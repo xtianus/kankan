@@ -73,3 +73,26 @@ def tmux_server():
     server = Tmux(f"kankan-test-{os.getpid()}-{id(object())}")
     yield server
     server.run(["kill-server"], check=False)
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def agent_path(tmp_path, monkeypatch):
+    """A PATH directory with ``claude``/``codex`` (the fake agent) and ``kankan`` (this checkout)."""
+    import sys
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = ROOT / "tests" / "fakes" / "fake_agent.py"
+    for name in ("claude", "codex"):
+        script = bindir / name
+        script.write_text(f"#!{sys.executable}\nimport runpy, sys\nsys.argv.insert(1, '--type={name}')\n"
+                          f"runpy.run_path({str(fake)!r}, run_name='__main__')\n")
+        script.chmod(0o755)
+    kankan = bindir / "kankan"
+    kankan.write_text(f"#!/bin/sh\nexec {sys.executable} -m kankan \"$@\"\n")
+    kankan.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    monkeypatch.setenv("PYTHONPATH", str(ROOT))
+    return bindir
