@@ -205,3 +205,31 @@ def yield_(ctx: AgentContext) -> dict:
     kankan_yield(ctx.project, ctx.lease, card, value, cause)
     signal(ctx, "yield")
     return {"card": current["card"], "phase": "parked" if cause != "yield" or meta.get("phase") == "impl" else "implemented"}
+
+
+def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, template: str) -> dict:
+    from kankan import clock
+    project = ctx.project
+    current = ctx.task
+    _own_ref(ctx, cards.OWNED_PHASES)
+    card_id = current["card"]
+    project.trello.add_label(card_id, label_id)
+    mention = f" @{project.cfg.notify_username}" if project.cfg.notify_username else ""
+    op_id = f"{cause}-" + hashlib.sha1(f"{current['id']}\0{text}".encode()).hexdigest()[:16]
+    comment = project.trello.comment_once(card_id, template.format(seat=ctx.seat, text=text) + mention, op_id)
+
+    def record(state):
+        state.label_causes.setdefault(card_id, {})[label_id] = {"cause": cause, "at": clock.iso(clock.now())}
+        state.comment_cursor[card_id] = comment.id
+    update_state(project.paths, ctx.seat, record)
+    project.log(cause, seat=ctx.seat, card=card_id)
+    signal(ctx, cause)
+    return {"card": card_id, "comment": comment.id}
+
+
+def ask(ctx: AgentContext, question: str) -> dict:
+    return _ask_or_fail(ctx, question, ctx.project.cfg.label_question, "ask", messages.ASK)
+
+
+def fail(ctx: AgentContext, reason: str) -> dict:
+    return _ask_or_fail(ctx, reason, ctx.project.cfg.label_error, "fail", messages.FAIL)

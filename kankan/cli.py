@@ -81,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("verify", "run the test command on a commit (agent command)")
     p.add_argument("--tested", required=True)
     add("yield", "give the card back (agent command)")
+    p = add("ask", "ask the user a question (agent command)")
+    p.add_argument("question")
+    p = add("fail", "report an error that needs the user (agent command)")
+    p.add_argument("reason")
     p = add("block", "park the card in Blocked (agent command)")
     p.add_argument("reason")
     p = add("resolve", "resolve a blocked card by hand")
@@ -208,6 +212,18 @@ def _cmd_integrate(args):
     from kankan import agentcmds, integrate
     data = integrate.integrate(agentcmds.context(), args.tested)
     return data, f"integrated: {data['merge']}"
+
+
+@command("ask")
+def _cmd_ask(args):
+    from kankan import agentcmds
+    return agentcmds.ask(agentcmds.context(), args.question), "question posted; wait for the answer in this terminal"
+
+
+@command("fail")
+def _cmd_fail(args):
+    from kankan import agentcmds
+    return agentcmds.fail(agentcmds.context(), args.reason), "error reported; wait for the user"
 
 
 @command("yield")
