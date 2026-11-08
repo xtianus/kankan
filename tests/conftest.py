@@ -34,3 +34,30 @@ def git_repo(tmp_path):
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "init")
     return repo
+
+
+@pytest.fixture
+def virtual_time(monkeypatch):
+    """Sleeps advance a virtual offset instead of blocking; monotonic includes it."""
+    import time
+    from kankan import clock
+    offset = [0.0]
+    monkeypatch.setattr(clock, "sleep", lambda s: offset.__setitem__(0, offset[0] + s))
+    monkeypatch.setattr(clock, "monotonic", lambda: time.monotonic() + offset[0])
+    return offset
+
+
+@pytest.fixture
+def fake_trello():
+    from tests.fakes.fake_trello import FakeTrello
+    with FakeTrello() as server:
+        yield server
+
+
+@pytest.fixture
+def kproject(git_repo, fake_trello, monkeypatch):
+    """A project bound to a fake board, with fast process kills."""
+    from kankan import seats
+    from tests.helpers import bind_project
+    monkeypatch.setattr(seats, "KILL_GRACE", 0.5)
+    return bind_project(git_repo, fake_trello, monkeypatch)

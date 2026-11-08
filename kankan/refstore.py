@@ -127,6 +127,10 @@ class RefStore:
             raise KankanError(Status.NEEDS_RECONCILIATION, f"{ref} has an unknown schema", {"ref": ref})
         return RefValue(oid, meta)
 
+    def read_blob(self, oid: str) -> RefValue:
+        body = gitutil.out(self.repo, ["cat-file", "blob", oid])
+        return self._parse(oid, oid, "blob", body)
+
     def read(self, ref: str) -> Optional[RefValue]:
         _check_ref(ref)
         return self.list(ref).get(ref)
