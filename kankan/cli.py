@@ -65,6 +65,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
     add("status", "seats, launcher states, tasks and waiting cards")
     add("claims", "card refs with phase, holder, age and branch")
+    p = add("release", "administration: park a card's ref (needs --force)")
+    p.add_argument("card")
+    p.add_argument("--force", action="store_true")
+    p = add("seat", "seat administration")
+    p.add_argument("action", choices=["recover", "remove"])
+    p.add_argument("seat")
+    p.add_argument("--kill", action="store_true")
+    p = add("purge-remote", "delete refs/agent-* published on a remote by mistake")
+    p.add_argument("--remote", default="origin")
     p = add("reconcile", "report inconsistencies (and repair the certain ones with --fix)")
     p.add_argument("--fix", action="store_true")
     p = add("skill", "install the shared kankan skill for Claude Code and Codex")
@@ -395,3 +404,27 @@ def _cmd_reconcile(args):
     from kankan import diag
     issues = diag.reconcile(_project(), args.fix)
     return diag.issues_data(issues), diag.issues_text(issues)
+
+
+@command("release")
+def _cmd_release(args):
+    from kankan import diag
+    if not args.force:
+        raise KankanError(Status.USAGE_ERROR, "release needs --force (it overrides the card's holder)")
+    return diag.release_force(_project(), args.card), "card released"
+
+
+@command("seat")
+def _cmd_seat(args):
+    from kankan import diag
+    project = _project()
+    if args.action == "recover":
+        return diag.seat_recover(project, args.seat, args.kill), f"seat {args.seat} recovered"
+    return diag.seat_remove(project, args.seat), f"seat {args.seat} removed"
+
+
+@command("purge-remote")
+def _cmd_purge_remote(args):
+    from kankan import diag
+    data = diag.purge_remote(_project(), args.remote)
+    return data, f"deleted {len(data['deleted'])} ref(s) from {args.remote}"

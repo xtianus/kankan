@@ -53,3 +53,6 @@ HOLD_AFTER_INTEGRATION = "kankan: HOLD arrived after integration; to undo: `git 
 
 ASK = "kankan: {seat} asks: {text}\nAnswer with a comment on this card (or in the agent's tmux session)."
 FAIL = "kankan: {seat} needs help: {text}"
+
+ADMIN_RELEASED = "kankan: an administrator released this card (`kankan release --force`); it stays where it is."
+ADMIN_SEAT_RECOVERED = "kankan: an administrator recovered seat {seat} (`kankan seat recover`); the seat keeps this card."

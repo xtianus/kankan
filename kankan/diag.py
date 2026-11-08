@@ -239,3 +239,99 @@ def issues_text(issues: List[Issue]) -> str:
 
 def issues_data(issues: List[Issue]) -> List[dict]:
     return [asdict(i) for i in issues]
+
+
+# ---------------------------------------------------------------------- administration
+from kankan import messages  # noqa: E402
+from kankan.cards import AdminActor, CardMeta, Phase, transition  # noqa: E402
+from kankan.errors import Status  # noqa: E402
+from kankan.refstore import seat_ref, validate_seat  # noqa: E402
+
+
+def _find_ref(project, card: str):
+    for card_id, value in workflow.card_refs(project).items():
+        if card in (card_id, value.meta.get("short")):
+            return card_id, value
+    raise KankanError(Status.INELIGIBLE, f"no card ref for {card}")
+
+
+def release_force(project, card: str) -> dict:
+    """Bring a card's ref to ``parked`` (cause admin_release); the card stays where it is."""
+    with project_lock(project.paths):
+        card_id, value = _find_ref(project, card)
+        trello_card = project.trello.card(card_id) or workflow._gone_card(card_id, value.meta)
+        new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None,
+                                                    cause="admin_release", target_list=None)
+        transition(project, AdminActor("release --force"), trello_card, value, new, messages.ADMIN_RELEASED)
+        project.log("admin_release", card=card_id, old_owner=value.meta.get("owner"))
+    return {"card": card_id, "phase": "parked"}
+
+
+def seat_recover(project, seat: str, kill: bool) -> dict:
+    """Recover a seat that is alive but stuck: its session loses ownership (and is killed with ``kill``)."""
+    validate_seat(seat)
+    with project_lock(project.paths):
+        value = project.refs.read(seat_ref(seat))
+        survivors = seats.recover_dead(project, seat, kill_alive=True) if kill else []
+        if survivors:
+            raise KankanError(Status.NEEDS_ACTION, f"processes of {seat} survive: {survivors}", {"pids": survivors})
+        if value is not None and not project.refs.delete(seat_ref(seat), value.oid):
+            raise KankanError(Status.INELIGIBLE, f"the ref of {seat} changed meanwhile; retry")
+        for card in seats.owned_cards(project, seat):
+            try:
+                project.trello.add_comment(card.meta["card"], messages.ADMIN_SEAT_RECOVERED.format(seat=seat),
+                                           f"admin-recover-{value.oid if value else 'none'}")
+            except KankanError as err:
+                project.log("comment_failed", error=err.message)
+        project.log("admin_seat_recover", seat=seat, kill=kill)
+    return {"seat": seat, "killed": kill}
+
+
+def seat_remove(project, seat: str) -> dict:
+    validate_seat(seat)
+    with project_lock(project.paths):
+        cfg = project.reload_config()
+        if seat not in cfg.seats:
+            raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
+        blockers = []
+        state = seats.liveness(project, seat)
+        if state != "free":
+            blockers.append(f"the seat is {state}")
+        held = [v.meta.get("short") for v in workflow.card_refs(project).values()
+                if seat in (v.meta.get("owner"),) or (v.meta.get("implementer") == seat and v.meta.get("phase") == "implemented")]
+        if held:
+            blockers.append("it holds cards: " + ", ".join(held))
+        snap = project.trello.snapshot(cfg.board_id)
+        seat_cfg = cfg.seats[seat]
+        lists = (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review)
+        in_lists = [c.short for c in snap.cards.values() if c.list_id in lists]
+        if in_lists:
+            blockers.append("its lists are not empty: " + ", ".join(in_lists))
+        if blockers:
+            raise KankanError(Status.NEEDS_ACTION, f"cannot remove {seat}: " + "; ".join(blockers),
+                              {"blockers": blockers})
+        for list_id in lists:
+            project.trello.archive_list(list_id)
+        del cfg.seats[seat]
+        from kankan.config import save_config
+        save_config(project.paths, cfg)
+        worktree = project.paths.seat_worktree(seat)
+        removed = False
+        if (worktree / ".git").exists() and not worktrees.dirty_files(worktree):
+            gitutil.run(project.paths.repo, ["worktree", "remove", str(worktree)])
+            removed = True
+        project.log("seat_removed", seat=seat, worktree_removed=removed)
+    return {"seat": seat, "worktree_removed": removed}
+
+
+def purge_remote(project, remote: str = "origin") -> dict:
+    """Delete refs/agent-* published by mistake (bypassing the local pre-push hook)."""
+    out = gitutil.out(project.paths.repo, ["ls-remote", remote, "refs/agent-*"], timeout=120)
+    deleted = []
+    for line in out.splitlines():
+        ref = line.split("\t", 1)[1] if "\t" in line else ""
+        if ref.startswith("refs/agent-"):
+            gitutil.run(project.paths.repo, ["push", "--no-verify", "-q", remote, "--delete", ref], timeout=120)
+            deleted.append(ref)
+    project.log("purge_remote", remote=remote, deleted=deleted)
+    return {"remote": remote, "deleted": deleted}
