@@ -64,3 +64,12 @@ def kproject(git_repo, fake_trello, monkeypatch):
     from tests.helpers import bind_project
     monkeypatch.setattr(seats, "KILL_GRACE", 0.5)
     return bind_project(git_repo, fake_trello, monkeypatch)
+
+
+@pytest.fixture
+def tmux_server():
+    """A private tmux server, killed at teardown."""
+    from kankan.tmux import Tmux
+    server = Tmux(f"kankan-test-{os.getpid()}-{id(object())}")
+    yield server
+    server.run(["kill-server"], check=False)
