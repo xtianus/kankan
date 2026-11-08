@@ -118,6 +118,7 @@ class Launcher:
             self.session = wanted
             self.tmux.set_option(wanted, "@kankan_repo", str(self.project.paths.repo))
         self._drop_interrupted_forward()
+        update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
         self.spawn_agent()
 
     def _resume_block_journal(self) -> None:

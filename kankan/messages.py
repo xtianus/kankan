@@ -23,7 +23,7 @@ INSTRUCTIONS = {
 SUSPEND_REQUEST = ("kankan: the card of your current task must be suspended. Commit your work in progress "
                    "(a WIP commit) and run `kankan yield --json`.")
 FORWARD_PREFIX = "Answer from the user on Trello: "
-NO_SIGNAL = "kankan: the agent stopped without closing its task (no done/ask/fail/block/yield signal)."
+NO_SIGNAL = "kankan: agent stopped without a signal (no done/ask/fail/block/yield); it needs a look."
 UNKNOWN_SCREEN = "kankan: the agent's screen is not recognized; it needs a look (`kankan adapter check {seat}`)."
 REGISTRY_LOST = "kankan: this board is now bound to another kankan clone; {seat} stops after the current task."
 FORWARDED = "kankan: forwarded to the agent."

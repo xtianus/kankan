@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notify", help="Trello user to mention (default: the token owner)")
     p.add_argument("--takeover", action="store_true", help="take over a board bound to another clone")
     p.add_argument("--reauth", action="store_true", help="only acquire new credentials")
+    p = add("stop", "stop a seat's agent after its current task")
+    p.add_argument("seat")
     p = add("adapter", "adapter tools")
     p.add_argument("action", choices=["check"])
     p.add_argument("target", help="a seat (e.g. claude-1) or a file with a saved screen")
@@ -226,3 +228,18 @@ def _cmd_adapter(args):
     data = {"type": agent_type, "state": result.state, "pattern": result.pattern, "answer": result.answer,
             "resume_at": result.resume_at.isoformat() if result.resume_at else None}
     return data, f"{result.state} (pattern: {result.pattern})" if result.pattern else result.state
+
+
+@command("stop")
+def _cmd_stop(args):
+    from kankan import seats
+    from kankan.config import Paths, load_config
+    from kankan.seatstate import update_state
+    paths = Paths.discover(os.getcwd())
+    cfg = load_config(paths)
+    seat = seats.validate_seat(args.seat)
+    if seat not in cfg.seats:
+        raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
+    update_state(paths, seat, lambda s: setattr(s, "stop_requested", True))
+    auditlog.append(paths, "stop_requested", seat=seat)
+    return {"seat": seat}, f"{seat} stops after its current task"

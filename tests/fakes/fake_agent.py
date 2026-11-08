@@ -130,6 +130,7 @@ def run_step(step, screens, show, log):
         log("input", line=line.rstrip("\n"), during=screen)
     if step.get("after_screen"):
         show(screens[step["after_screen"]].format(n=2))
+        time.sleep(float(step.get("after_sleep", 0)))
 
 
 if __name__ == "__main__":
