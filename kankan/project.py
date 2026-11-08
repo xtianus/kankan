@@ -30,5 +30,5 @@ class Project:
         self.cfg = load_config(self.paths)
         return self.cfg
 
-    def log(self, event: str, **fields) -> None:
+    def log(self, event: str, /, **fields) -> None:
         auditlog.append(self.paths, event, **fields)

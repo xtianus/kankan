@@ -71,3 +71,47 @@ def clear_kankan_labels(project, card, board_labels: Optional[Dict] = None, seat
             clear_label(project, card.id, label_id, None, seat)
         except KankanError as err:
             project.log("label_failed", card=card.id, error=err.message)
+
+
+def resume_label_name(when) -> str:
+    return f"{RESUME_PREFIX}{when.astimezone().strftime('%Y-%m-%d %H:%M')}"
+
+
+def resume_label(project, when) -> str:
+    """Create or reuse the board label ``Resume YYYY-MM-DD hh:mm`` (server time zone)."""
+    name = resume_label_name(when)
+    snap = project.trello.snapshot(project.cfg.board_id)
+    for label in snap.labels.values():
+        if label.name == name:
+            return label.id
+    return project.trello.create_label(project.cfg.board_id, name, "orange").id
+
+
+def _resume_time(name: str):
+    from datetime import datetime
+    try:
+        return datetime.strptime(name[len(RESUME_PREFIX):], "%Y-%m-%d %H:%M").astimezone()
+    except ValueError:
+        return None
+
+
+def gc_resume_labels(project) -> list:
+    """Delete Resume labels no card uses or whose time passed more than an hour ago (§14.1)."""
+    from datetime import timedelta
+    from kankan.config import project_lock
+    deleted = []
+    with project_lock(project.paths):
+        snap = project.trello.snapshot(project.cfg.board_id)
+        used = {label_id for card in snap.cards.values() for label_id in card.label_ids}
+        now = clock.now()
+        for label in snap.labels.values():
+            if not label.name.startswith(RESUME_PREFIX):
+                continue
+            when = _resume_time(label.name)
+            if when is None:
+                continue
+            if label.id not in used or now - when > timedelta(hours=1):
+                project.trello.delete_label(label.id)
+                deleted.append(label.id)
+                project.log("resume_label_deleted", label=label.name)
+    return deleted

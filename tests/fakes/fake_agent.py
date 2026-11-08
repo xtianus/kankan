@@ -67,6 +67,11 @@ def main() -> int:
             sys.stdout.write("\n")
         sys.stdout.flush()
 
+    import signal
+
+    def on_sigint(signum, frame):
+        log("sigint")
+    signal.signal(signal.SIGINT, on_sigint)
     log("start", type=agent_type, pid=os.getpid(), cwd=os.getcwd(), seat=os.environ.get("KANKAN_SEAT"))
     if scenario.get("trust"):
         show(screens["trust"])

@@ -99,6 +99,8 @@ def _log_internal(err: BaseException) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in ("supervisor", "launcher"):
+        return _internal(argv)
     as_json = "--json" in argv
     try:
         parser = build_parser()
@@ -129,6 +131,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print(f"{out['status']}: {out['message']}", file=sys.stderr)
     return code
+
+
+def _internal(argv: List[str]) -> int:
+    """Hidden process-chain commands: they own the pane, so no envelope is printed."""
+    parser = argparse.ArgumentParser(prog=f"kankan {argv[0]}")
+    parser.add_argument("--type", required=True, choices=["claude", "codex"])
+    parser.add_argument("--seat")
+    args = parser.parse_args(argv[1:])
+    if argv[0] == "supervisor":
+        from kankan import supervisor
+        return supervisor.run(os.getcwd(), args.type, args.seat)
+    from kankan import launcher
+    return launcher.main(args.type, args.seat)
 
 
 # --------------------------------------------------------------------- agent commands

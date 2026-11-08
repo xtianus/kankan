@@ -8,7 +8,7 @@ import os
 from kankan import clock
 
 
-def append(paths, event: str, **fields) -> None:
+def append(paths, event: str, /, **fields) -> None:
     record = {"ts": clock.iso(clock.now()), "event": event, "pid": os.getpid(), **fields}
     line = (json.dumps(record, default=str, sort_keys=False) + "\n").encode()
     paths.kankan_dir.mkdir(parents=True, exist_ok=True)

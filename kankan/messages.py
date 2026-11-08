@@ -19,3 +19,13 @@ INSTRUCTIONS = {
                "`kankan integrate --tested <hash>` and finally `kankan done`."),
     "hold_wip": "The card is on HOLD: commit your work in progress (WIP commit) and run `kankan yield --json`.",
 }
+
+SUSPEND_REQUEST = ("kankan: the card of your current task must be suspended. Commit your work in progress "
+                   "(a WIP commit) and run `kankan yield --json`.")
+FORWARD_PREFIX = "Answer from the user on Trello: "
+NO_SIGNAL = "kankan: the agent stopped without closing its task (no done/ask/fail/block/yield signal)."
+UNKNOWN_SCREEN = "kankan: the agent's screen is not recognized; it needs a look (`kankan adapter check {seat}`)."
+REGISTRY_LOST = "kankan: this board is now bound to another kankan clone; {seat} stops after the current task."
+FORWARDED = "kankan: forwarded to the agent."
+RESUMED = "kankan: resumed (answered from the terminal)."
+LIMIT_COMMENT = "kankan: {seat} hit a usage limit; it resumes at {when}."
