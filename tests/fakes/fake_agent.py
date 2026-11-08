@@ -52,6 +52,8 @@ def main() -> int:
     if args.scenario and os.path.exists(args.scenario):
         with open(args.scenario) as handle:
             scenario = json.load(handle)
+    if agent_type in scenario and isinstance(scenario[agent_type], dict):
+        scenario = dict(scenario, **scenario[agent_type])
     screens = SCREENS[agent_type]
     log_path = scenario.get("log") or os.environ.get("FAKE_AGENT_LOG")
     steps = list(scenario.get("steps", []))

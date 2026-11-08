@@ -28,10 +28,23 @@ the defaults are in `kankan/adapters_default.json`.
 - **Queueing while working:** a message typed and submitted while Codex was working stayed in the composer and was
   not sent, so `queue_while_working: false`: the launcher waits for *ready* before sending a suspension request.
 
+## Process chain with the real agents
+
+Checked on 2026-11-08 with `kankan up` against a fake Trello board, a scratch repository and a private tmux server:
+
+- Claude Code and Codex both reached *ready* through the kankan chain; the trust window was answered automatically
+  (worktree under the kankan root).
+- Ctrl-C typed in the pane reaches Claude Code ("Press Ctrl-C again to exit"); the launcher and the supervisor
+  ignore it. A second Ctrl-C made Claude exit: the launcher released the seat and the tmux session closed.
+- `kill -9` of the launcher: the agent (Claude Code, Codex) died through PDEATHSIG; the supervisor started a new
+  launcher in the same pane that recovered the same seat (`seat_recovered`) and started a new agent.
+- The installed `codex` is a native binary (no wrapper child process). With an npm wrapper, the native child would
+  be terminated by the pane-session cleanup of the next launcher, not by PDEATHSIG.
+- Ctrl-Z was not tried (it would stop the agent, which is the expected job-control behaviour).
+
 ## Not verified
 
 - Real usage-limit screens of either agent (no limit was reached); the limit fixtures are synthetic, built from
   the airesumer patterns. Check them with `kankan adapter check <seat>` the first time a limit happens and add an
   override if needed.
 - The Codex model-switch dialog (fixture built from the airesumer patterns).
-- PDEATHSIG and terminal control with the real agents (Task 13 manual check), see below.
