@@ -63,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("autostart", "start agents at boot (systemd user service)")
     p.add_argument("action", choices=["enable", "disable"])
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
+    p = add("skill", "install the shared kankan skill for Claude Code and Codex")
+    p.add_argument("action", choices=["install"])
+    p.add_argument("--force", action="store_true")
     p = add("stop", "stop a seat's agent after its current task")
     p.add_argument("seat")
     p = add("adapter", "adapter tools")
@@ -291,3 +294,10 @@ def _cmd_autostart(args):
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return {"unit": agents_cmd.unit_name(project), "warnings": warnings}, f"autostart enabled ({agents_cmd.unit_name(project)})"
+
+
+@command("skill")
+def _cmd_skill(args):
+    from kankan.skill_install import skill_install
+    lines = skill_install(args.force)
+    return {"installed": lines}, "\n".join(lines)
