@@ -22,7 +22,9 @@ def session_name(prefix: str, project: str, suffix: str) -> str:
 
 class Tmux:
     def __init__(self, socket: Optional[str] = None):
-        self.socket = socket
+        # KANKAN_TMUX_SOCKET selects a private server (tests); inside a pane $TMUX is used.
+        import os
+        self.socket = socket or os.environ.get("KANKAN_TMUX_SOCKET") or None
 
     def _base(self) -> List[str]:
         return ["tmux"] + (["-L", self.socket] if self.socket else [])

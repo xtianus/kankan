@@ -1,0 +1,14 @@
+# Reference template. `kankan autostart enable` writes a concrete
+# ~/.config/systemd/user/kankan-up@<project>.service with the absolute paths filled in.
+[Unit]
+Description=kankan agents for project %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/coding/%i
+ExecStart=/usr/bin/env kankan up claude=1 codex=1
+
+[Install]
+WantedBy=default.target

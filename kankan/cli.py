@@ -54,6 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notify", help="Trello user to mention (default: the token owner)")
     p.add_argument("--takeover", action="store_true", help="take over a board bound to another clone")
     p.add_argument("--reauth", action="store_true", help="only acquire new credentials")
+    p = add("agent", "start an agent in tmux")
+    p.add_argument("type", choices=["claude", "codex"])
+    p.add_argument("--seat")
+    p.add_argument("--attach", action="store_true")
+    p = add("up", "ensure the given number of agents run, starting the missing ones")
+    p.add_argument("wanted", nargs="+", metavar="<type>=<n>")
+    p = add("autostart", "start agents at boot (systemd user service)")
+    p.add_argument("action", choices=["enable", "disable"])
+    p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
     p = add("stop", "stop a seat's agent after its current task")
     p.add_argument("seat")
     p = add("adapter", "adapter tools")
@@ -243,3 +252,42 @@ def _cmd_stop(args):
     update_state(paths, seat, lambda s: setattr(s, "stop_requested", True))
     auditlog.append(paths, "stop_requested", seat=seat)
     return {"seat": seat}, f"{seat} stops after its current task"
+
+
+def _project():
+    from kankan.project import Project
+    return Project.open(os.getcwd())
+
+
+@command("agent")
+def _cmd_agent(args):
+    from kankan import agents_cmd
+    project = _project()
+    for warning in agents_cmd.warnings_for(project):
+        print(f"warning: {warning}", file=sys.stderr)
+    name = agents_cmd.agent(project, args.type, args.seat, args.attach)
+    return {"session": name}, f"started tmux session {name}"
+
+
+@command("up")
+def _cmd_up(args):
+    from kankan import agents_cmd
+    project = _project()
+    wanted = agents_cmd.parse_wanted(args.wanted)
+    for warning in agents_cmd.warnings_for(project):
+        print(f"warning: {warning}", file=sys.stderr)
+    started = agents_cmd.up(project, wanted)
+    return {"started": started}, (f"started {len(started)} agent(s)" if started else "all requested agents are running")
+
+
+@command("autostart")
+def _cmd_autostart(args):
+    from kankan import agents_cmd
+    project = _project()
+    if args.action == "disable":
+        agents_cmd.autostart_disable(project)
+        return {"unit": agents_cmd.unit_name(project)}, "autostart disabled"
+    warnings = agents_cmd.autostart_enable(project, agents_cmd.parse_wanted(args.wanted))
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return {"unit": agents_cmd.unit_name(project), "warnings": warnings}, f"autostart enabled ({agents_cmd.unit_name(project)})"

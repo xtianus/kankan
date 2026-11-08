@@ -113,7 +113,9 @@ class Launcher:
             wanted = session_name("ai-", self.project.paths.project, self.lease.seat)
             if current != wanted:
                 if self.tmux.has_session(wanted):
-                    raise KankanError(Status.CONFIG_ERROR, f"tmux session {wanted} already exists")
+                    owner = self.tmux.get_option(wanted, "@kankan_repo")
+                    raise KankanError(Status.CONFIG_ERROR, f"tmux session {wanted} already exists"
+                                      + (f" for {owner}; set project_name in config.json" if owner else ""))
                 self.tmux.rename_session(current, wanted)
             self.session = wanted
             self.tmux.set_option(wanted, "@kankan_repo", str(self.project.paths.repo))
