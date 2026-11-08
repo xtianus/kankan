@@ -43,9 +43,21 @@ def validate_type(agent_type: str) -> str:
     return agent_type
 
 
+SUPERVISOR_ENV = "KANKAN_SUPERVISOR_PID"
+
+
 def pane_sid() -> Optional[int]:
-    """Session id of the tmux pane this process runs in (tests replace it)."""
-    return os.getsid(0)
+    """Session id of the kankan pane this process runs in, or None.
+
+    Only a session whose leader is the kankan supervisor (tmux starts the pane command
+    as a session leader) is recorded, so recovery can never target a session kankan
+    did not create, such as the user's shell or a test runner.
+    """
+    supervisor = os.environ.get(SUPERVISOR_ENV, "")
+    sid = os.getsid(0)
+    if supervisor.isdigit() and int(supervisor) == sid:
+        return sid
+    return None
 
 
 def _lock_path(project, seat: str) -> Path:
@@ -254,7 +266,10 @@ def recover_dead(project, seat: str, kill_alive: bool = False) -> List[int]:
         project.log("seat_reboot", seat=seat)
     else:
         sid = proc.get("sid")
-        if sid:
+        leader_start = procutil.start_time(sid) if sid else None
+        if sid and leader_start is not None and leader_start != proc.get("sid_start"):
+            project.log("sid_reused", seat=seat, sid=sid)  # another process owns that pid now: kill nothing
+        elif sid:
             survivors = procutil.terminate_session(sid, exclude, grace=KILL_GRACE)
         for pid in _recorded_alive(proc):
             if pid not in exclude and pid not in survivors:

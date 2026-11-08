@@ -236,3 +236,31 @@ def test_agent_env_missing():
     with pytest.raises(KankanError) as exc:
         seats.AgentEnv.from_environ()
     assert exc.value.status == Status.USAGE_ERROR
+
+
+def test_pane_sid_only_for_supervisor_led_session(monkeypatch):
+    monkeypatch.delenv(seats.SUPERVISOR_ENV, raising=False)
+    assert seats.pane_sid() is None
+    monkeypatch.setenv(seats.SUPERVISOR_ENV, str(os.getpid()))
+    if os.getsid(0) != os.getpid():
+        assert seats.pane_sid() is None
+    monkeypatch.setenv(seats.SUPERVISOR_ENV, str(os.getsid(0)))
+    assert seats.pane_sid() == os.getsid(0)
+
+
+def test_reused_sid_not_killed(project):
+    lease = seats.acquire(project, "claude")
+    other = subprocess.Popen(["sleep", "1000"], start_new_session=True)
+    try:
+        os.close(lease.fd)
+        import json
+        proc_file = project.paths.seats_dir / "claude-1.proc.json"
+        data = json.loads(proc_file.read_text())
+        data.update(sid=other.pid, sid_start=1)  # recorded leader had another start time
+        proc_file.write_text(json.dumps(data))
+        seats.acquire(project, "claude", seat="claude-1")
+        assert other.poll() is None
+        assert any(e["event"] == "sid_reused" for e in auditlog.read(project.paths))
+    finally:
+        other.kill()
+        other.wait()
