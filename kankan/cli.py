@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     add("sync", "merge main into the review branch (agent command)")
     p = add("verify", "run the test command on a commit (agent command)")
     p.add_argument("--tested", required=True)
+    p = add("block", "park the card in Blocked (agent command)")
+    p.add_argument("reason")
+    p = add("resolve", "resolve a blocked card by hand")
+    p.add_argument("short")
+    p.add_argument("--done", action="store_true")
     p = add("integrate", "merge the tested branch into main (agent command)")
     p.add_argument("--tested", required=True)
     p = add("tick", "", hidden=True)
@@ -202,6 +207,22 @@ def _cmd_integrate(args):
     from kankan import agentcmds, integrate
     data = integrate.integrate(agentcmds.context(), args.tested)
     return data, f"integrated: {data['merge']}"
+
+
+@command("block")
+def _cmd_block(args):
+    from kankan import agentcmds
+    data = agentcmds.block(agentcmds.context(), args.reason)
+    return data, "card blocked"
+
+
+@command("resolve")
+def _cmd_resolve(args):
+    from kankan import integrate
+    from kankan.config import project_lock
+    project = _project()
+    with project_lock(project.paths):
+        return integrate.resolve(project, args.short, args.done)
 
 
 @command("tick")

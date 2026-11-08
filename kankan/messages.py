@@ -37,3 +37,13 @@ HOLD_AFTER_CLAIM_REVIEW = "kankan: HOLD found right after the review claim; the 
 INTEGRATED = "kankan: {seat} integrated this card into `{main}` with merge `{merge}`."
 MAIN_MOVED_LIMIT = "kankan: main kept moving during integration ({count} attempts); the card needs a look."
 PUSH_FAILED = "kankan: the integration is done locally but `git push origin {main}` failed: {error}"
+
+BLOCKED = ("kankan: {seat} blocked this card: {reason}\nConflicting files: {files}\n"
+           "To resolve: kankan resolve {short}")
+RESOLVE_HELP = ("Card {short} is blocked in {path}.\nFiles still in conflict:\n{files}\n"
+                "Steps: edit the files, `git add` them, `git commit`, then run `kankan resolve {short} --done` "
+                "in the project clone.")
+RESOLVE_NOTHING = ("Card {short} was blocked without a merge in progress: there is nothing to merge. "
+                   "`kankan resolve {short} --done` sends it back for review; moving it to the Backlog has it "
+                   "reimplemented.")
+RESOLVED = "kankan: the block of {short} was resolved; the card goes back to review."

@@ -143,3 +143,8 @@ def _trello_card(ctx: AgentContext):
         card = Card(id=ctx.task["card"], short=ctx.task.get("short", ""), board_id="", name="", desc="", url="",
                     list_id="", pos=0, label_ids=[], attachments=[], closed=True, last_activity="")
     return card
+
+
+def block(ctx: AgentContext, reason: str) -> dict:
+    from kankan import integrate
+    return integrate.block(ctx, reason)

@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import List, Optional
 
 from kankan import clock, faults, gitutil, labels, messages, worktrees
 from kankan.cards import CardMeta, Phase
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
-from kankan.refstore import Main, Update, Verify, card_ref, seat_ref
+from kankan.refstore import Main, Update, Verify, card_ref, seat_ref, validate_short_link
 from kankan.seats import verify_owner
 from kankan.seatstate import load_state, update_state
 
@@ -325,3 +328,255 @@ def done_review(ctx) -> dict:
 def _leave_worktree(ctx) -> None:
     if worktrees.current_branch(ctx.worktree) is not None and not worktrees.dirty_files(ctx.worktree):
         worktrees.detach(ctx.worktree)
+
+
+# ---------------------------------------------------------------------- block
+BLOCK_STEPS = ("snapshot", "abort", "blocked_wt", "restore", "transition")
+
+
+def _git_path(worktree, name: str) -> Path:
+    path = Path(gitutil.out(worktree, ["rev-parse", "--git-path", name]))
+    return path if path.is_absolute() else Path(worktree) / path
+
+
+def _status_entries(worktree) -> List[str]:
+    raw = gitutil.run(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).stdout
+    parts = raw.split("\0")
+    paths, index = [], 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if not entry:
+            continue
+        paths.append(entry[3:])
+        if entry[0] in "RC":
+            paths.append(parts[index])
+            index += 1
+    return sorted(set(paths))
+
+
+def _untracked(worktree) -> List[str]:
+    out = gitutil.run(worktree, ["ls-files", "--others", "--exclude-standard", "-z"]).stdout
+    return sorted(p for p in out.split("\0") if p)
+
+
+def worktree_digest(worktree) -> str:
+    """Digest of the whole uncommitted state: status, unstaged and staged diffs, untracked contents."""
+    digest = hashlib.sha256()
+    for args in (["status", "--porcelain=v2", "-z", "--untracked-files=all"], ["diff", "--binary"],
+                 ["diff", "--cached", "--binary"]):
+        digest.update(subprocess.run(["git", "-C", str(worktree), *args], capture_output=True).stdout)
+        digest.update(b"\0\0")
+    for path in _untracked(worktree):
+        full = Path(worktree) / path
+        digest.update(path.encode() + b"\0")
+        digest.update(os.readlink(full).encode() if full.is_symlink() else full.read_bytes())
+        digest.update(str(os.lstat(full).st_mode & 0o111).encode())
+    return digest.hexdigest()
+
+
+def _copy(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() or target.exists():
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    if source.is_symlink():
+        os.symlink(os.readlink(source), target)
+    else:
+        shutil.copy2(source, target)
+
+
+def block(ctx, reason: str) -> dict:
+    """§12.4: with a merge in progress move it to blocked-<short>; then park the card in Blocked."""
+    from kankan.agentcmds import _own_ref, require_clean, signal as send_signal
+    project = ctx.project
+    state = load_state(project.paths, ctx.seat)
+    if state.block_journal is None:
+        value = _own_ref(ctx, (Phase.IMPL.value, Phase.REVIEW.value))
+        merging = worktrees.merge_in_progress(ctx.worktree)
+        if not merging:
+            require_clean(ctx.worktree)
+        journal = {"card": ctx.task["card"], "short": value.meta["short"], "branch": value.meta["branch"],
+                   "reason": reason, "merging": merging, "done": [], "task_id": ctx.task["id"]}
+        update_state(project.paths, ctx.seat, lambda s: setattr(s, "block_journal", journal))
+    result = run_block_journal(project, ctx.lease)
+    send_signal(ctx, "block")
+    return result
+
+
+def resume_block(project, lease) -> Optional[dict]:
+    """Finish an interrupted ``block`` (called by the launcher at startup)."""
+    if load_state(project.paths, lease.seat).block_journal is None:
+        return None
+    return run_block_journal(project, lease)
+
+
+def _mark(project, seat: str, step: str, **extra) -> dict:
+    def mark(state):
+        journal = state.block_journal
+        if step not in journal["done"]:
+            journal["done"].append(step)
+        journal.update(extra)
+        return dict(journal)
+    return update_state(project.paths, seat, mark)
+
+
+def run_block_journal(project, lease) -> dict:
+    journal = load_state(project.paths, lease.seat).block_journal
+    seat_wt = project.paths.seat_worktree(lease.seat)
+    short = journal["short"]
+    snap_dir = project.paths.kankan_dir / "blocks" / short
+    blocked = project.paths.blocked_worktree(short)
+    if journal["merging"]:
+        if "snapshot" not in journal["done"]:
+            if snap_dir.exists():
+                shutil.rmtree(snap_dir)
+            (snap_dir / "files").mkdir(parents=True)
+            head = gitutil.rev(seat_wt, "HEAD")
+            merge_head = gitutil.rev(seat_wt, "MERGE_HEAD")
+            for name in ("MERGE_MSG", "MERGE_MODE"):
+                source = _git_path(seat_wt, name)
+                if source.exists():
+                    shutil.copy2(source, snap_dir / name)
+            shutil.copy2(_git_path(seat_wt, "index"), snap_dir / "index")
+            deleted, files = [], _status_entries(seat_wt)
+            for path in files:
+                full = seat_wt / path
+                if full.is_symlink() or full.exists():
+                    if full.is_dir() and not full.is_symlink():
+                        continue
+                    _copy(full, snap_dir / "files" / path)
+                else:
+                    deleted.append(path)
+            conflicted = conflicts(seat_wt)
+            faults.point("snapshot")
+            journal = _mark(project, lease.seat, "snapshot", head=head, merge_head=merge_head, files=files,
+                            deleted=deleted, digest=worktree_digest(seat_wt), conflicts=conflicted)
+        if "abort" not in journal["done"]:
+            # the snapshot holds every change: discard the merge and the files (reset also ends the merge)
+            gitutil.run(seat_wt, ["reset", "-q", "--hard", "HEAD"])
+            gitutil.run(seat_wt, ["clean", "-fdq"])
+            if worktrees.current_branch(seat_wt) is not None:
+                worktrees.detach(seat_wt)
+            faults.point("abort")
+            journal = _mark(project, lease.seat, "abort")
+        if "blocked_wt" not in journal["done"]:
+            if not (blocked / ".git").exists():
+                gitutil.run(project.paths.repo, ["worktree", "prune"])
+                gitutil.run(project.paths.repo, ["worktree", "add", "-q", str(blocked), journal["branch"]])
+            if not worktrees.merge_in_progress(blocked):
+                gitutil.run(blocked, ["merge", "--no-commit", "--no-ff", journal["merge_head"]], check=False)
+            faults.point("blocked_wt")
+            journal = _mark(project, lease.seat, "blocked_wt")
+        if "restore" not in journal["done"]:
+            shutil.copy2(snap_dir / "index", _git_path(blocked, "index"))
+            for name in ("MERGE_MSG", "MERGE_MODE"):
+                if (snap_dir / name).exists():
+                    shutil.copy2(snap_dir / name, _git_path(blocked, name))
+            for path in journal["files"]:
+                source = snap_dir / "files" / path
+                if source.is_symlink() or source.exists():
+                    _copy(source, blocked / path)
+            for path in journal["deleted"]:
+                target = blocked / path
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+            gitutil.run(blocked, ["update-index", "-q", "--refresh"], check=False)
+            if worktree_digest(blocked) != journal["digest"]:
+                raise KankanError(Status.NEEDS_RECONCILIATION,
+                                  f"the state rebuilt in {blocked} differs from the original; the snapshot is kept in "
+                                  f"{snap_dir}", {"blocked": str(blocked), "snapshot": str(snap_dir)})
+            faults.point("restore")
+            journal = _mark(project, lease.seat, "restore")
+    else:
+        if worktrees.current_branch(seat_wt) is not None:
+            worktrees.detach(seat_wt)
+    if "transition" not in journal["done"]:
+        _block_transition(project, lease, journal)
+        faults.point("transition")
+        journal = _mark(project, lease.seat, "transition")
+    if snap_dir.exists():
+        shutil.rmtree(snap_dir)
+    update_state(project.paths, lease.seat, lambda s: setattr(s, "block_journal", None))
+    project.log("blocked", card=journal["card"], merging=journal["merging"])
+    return {"card": journal["card"], "phase": "parked", "blocked_worktree": str(blocked) if journal["merging"] else None,
+            "conflicts": journal.get("conflicts", [])}
+
+
+def _block_transition(project, lease, journal) -> None:
+    from kankan.cards import transition
+    value = project.refs.read(card_ref(journal["card"]))
+    if value is not None and value.meta.get("phase") == Phase.PARKED.value and value.meta.get("cause") == "block":
+        return
+    if value is None or value.meta.get("owner") != lease.seat:
+        raise KankanError(Status.INELIGIBLE, "the card is no longer held by this seat")
+    card = project.trello.card(journal["card"])
+    if card is None:
+        raise KankanError(Status.INELIGIBLE, "the card was deleted")
+    new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None, cause="block",
+                                                target_list=project.cfg.blocked)
+    files = ", ".join(journal.get("conflicts") or []) or "none"
+    mention = f" @{project.cfg.notify_username}" if project.cfg.notify_username else ""
+    comment = messages.BLOCKED.format(seat=lease.seat, reason=journal["reason"], files=files, short=journal["short"]) + mention
+    transition(project, lease, card, value, new, comment)
+
+
+# ---------------------------------------------------------------------- resolve
+def find_card_ref(project, short: str):
+    from kankan.refstore import CARD_PREFIX
+    validate_short_link(short)
+    for ref, value in project.refs.list(CARD_PREFIX).items():
+        if value.meta.get("short") == short:
+            return value
+    return None
+
+
+def resolve_help(project, short: str, blocked: Path, remaining: List[str]) -> str:
+    files = "\n".join(f"  - {path}" for path in remaining) or "  (none left)"
+    return messages.RESOLVE_HELP.format(short=short, path=blocked, files=files)
+
+
+def resolve(project, short: str, done: bool, tmux=None) -> dict:
+    from kankan.cards import AdminActor, target_list_for, transition
+    value = find_card_ref(project, short)
+    if value is None or value.meta.get("phase") != Phase.PARKED.value:
+        raise KankanError(Status.INELIGIBLE, f"card {short} is not blocked")
+    blocked = project.paths.blocked_worktree(short)
+    has_wt = (blocked / ".git").exists()
+    if not done:
+        if not has_wt:
+            return {"short": short, "worktree": None}, messages.RESOLVE_NOTHING.format(short=short)
+        remaining = conflicts(blocked)
+        help_text = resolve_help(project, short, blocked, remaining)
+        from kankan.tmux import Tmux, session_name
+        tmux = tmux or Tmux()
+        name = session_name("kankan-resolve-", project.paths.project, short)
+        if not tmux.has_session(name):
+            tmux.new_session(name, str(blocked), ["bash", "-c", 'printf "%s\\n" "$KANKAN_RESOLVE_HELP"; exec "${SHELL:-bash}"'],
+                             env={"KANKAN_RESOLVE_HELP": help_text})
+        return {"short": short, "worktree": str(blocked), "conflicts": remaining, "tmux_session": name}, \
+            help_text + f"\nA shell is open in tmux session {name} (tmux attach -t {name})."
+    if has_wt:
+        problems = []
+        if worktrees.merge_in_progress(blocked):
+            problems.append("the merge is not committed yet")
+        dirty = worktrees.dirty_files(blocked)
+        if dirty:
+            problems.append("uncommitted files: " + ", ".join(dirty))
+        if problems:
+            raise KankanError(Status.NEEDS_ACTION, "; ".join(problems) + "\n" + resolve_help(
+                project, short, blocked, conflicts(blocked)), {"problems": problems})
+        gitutil.run(project.paths.repo, ["worktree", "remove", str(blocked)])
+    card = project.trello.card(value.meta["card"])
+    if card is None:
+        raise KankanError(Status.INELIGIBLE, f"card {short} no longer exists")
+    implementer = value.meta.get("implementer")
+    if implementer not in project.cfg.seats:
+        raise KankanError(Status.NEEDS_RECONCILIATION, f"the implementer seat {implementer} is not configured")
+    new = CardMeta.from_dict(value.meta).evolve(phase=Phase.IMPLEMENTED.value, owner=None, session=None, cause=None,
+                                                target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None,
+                                                                            implementer))
+    transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
+    return {"short": short, "phase": "implemented"}, f"card {short} is back in {implementer}'s Implemented list"
