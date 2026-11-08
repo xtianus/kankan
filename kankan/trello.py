@@ -361,6 +361,10 @@ class TrelloClient:
         return self._write_once(lambda: _comment(self._ok("POST", f"/1/cards/{card_id}/actions/comments",
                                                           body={"text": full}, retry=False)), find)
 
+    def comment_once(self, card_id: str, text: str, op_id: str) -> Comment:
+        """Post the comment unless one with this op-id marker already exists."""
+        return self.find_comment(card_id, op_id) or self.add_comment(card_id, text, op_id)
+
     def find_comment(self, card_id: str, op_id: str) -> Optional[Comment]:
         for comment in reversed(self.comments(card_id)):
             if comment.text.rstrip().endswith(marker(op_id)):

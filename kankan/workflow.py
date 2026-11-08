@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
-from kankan import labels, messages, worktrees
+from kankan import gitutil, labels, messages, worktrees
 from kankan.cards import OWNED_PHASES, CardMeta, Phase, _parse_refs, converge, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
@@ -144,8 +144,48 @@ def claim_impl(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
     return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
 
 
+def _free_branch_for_review(project, lease: Lease, card: Card, value: RefValue) -> None:
+    """§11 start of review: a clean blocked-* worktree is removed; an unfinished merge waits; elsewhere is an error."""
+    repo = project.paths.repo
+    branch = value.meta.get("branch")
+    where = worktrees.where_checked_out(repo, branch)
+    if where is None or where.resolve() == project.paths.seat_worktree(lease.seat).resolve():
+        return
+    if where.name == f"blocked-{card.short}":
+        if worktrees.merge_in_progress(where) or worktrees.dirty_files(where):
+            project.trello.comment_once(card.id, messages.MERGE_NOT_COMPLETED.format(path=where),
+                                       f"mergeopen-{value.oid}")
+            raise KankanError(Status.INELIGIBLE, f"merge not completed in {where}")
+        gitutil.run(repo, ["worktree", "remove", str(where)])
+        project.log("blocked_worktree_removed", card=card.id, path=str(where))
+        return
+    labels.set_label(project, card.id, project.cfg.label_error, "branch_elsewhere", lease.seat,
+                     comment=messages.BRANCH_ELSEWHERE.format(branch=branch, path=where),
+                     op_id=f"elsewhere-{value.oid}")
+    raise KankanError(Status.INELIGIBLE, f"branch {branch} is checked out in {where}")
+
+
 def claim_review(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
-    raise KankanError(Status.INELIGIBLE, "review claims are not available yet")
+    """Claim a card in an Implemented list for review (§9.2, §11)."""
+    card, value = choice.card, choice.ref
+    worktree = project.paths.seat_worktree(lease.seat)
+    if worktrees.dirty_files(worktree):
+        raise KankanError(Status.NEEDS_RECONCILIATION, f"worktree {worktree} is not clean; cannot start a review")
+    _free_branch_for_review(project, lease, card, value)
+    meta = CardMeta.from_dict(value.meta).evolve(
+        phase=Phase.REVIEW.value, owner=lease.seat, session=lease.session, cause=None,
+        target_list=target_list_for(project.cfg, Phase.REVIEW.value, lease.seat, None))
+    result = transition(project, lease, card, value, meta, messages.REVIEW_CLAIMED.format(
+        seat=lease.seat, branch=meta.branch, implementer=meta.implementer))
+    fresh = project.trello.card(card.id)
+    if fresh is not None and has_hold(project, fresh):
+        back = CardMeta.from_dict(result.ref.meta).evolve(
+            phase=Phase.IMPLEMENTED.value, owner=None, session=None,
+            target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None, meta.implementer))
+        transition(project, lease, card, result.ref, back, messages.HOLD_AFTER_CLAIM_REVIEW)
+        return None
+    worktrees.checkout(worktree, meta.branch)
+    return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
 
 
 def _prepare_resume(project, lease: Lease, choice: Choice) -> None:

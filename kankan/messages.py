@@ -29,3 +29,7 @@ REGISTRY_LOST = "kankan: this board is now bound to another kankan clone; {seat}
 FORWARDED = "kankan: forwarded to the agent."
 RESUMED = "kankan: resumed (answered from the terminal)."
 LIMIT_COMMENT = "kankan: {seat} hit a usage limit; it resumes at {when}."
+
+MERGE_NOT_COMPLETED = "kankan: merge not completed in `{path}`; finish it with `kankan resolve` before the review."
+BRANCH_ELSEWHERE = "kankan: branch `{branch}` is checked out in `{path}`; free it (detach or remove that worktree), then remove the Error label."
+HOLD_AFTER_CLAIM_REVIEW = "kankan: HOLD found right after the review claim; the card goes back to the implementer's list."
