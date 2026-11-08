@@ -65,3 +65,177 @@ def claims_text(rows: List[Dict]) -> str:
         return "No card refs."
     return "\n".join(f"{r['short']}  {r['phase']:<12} {r['owner'] or '-':<10} {r['age_s']:>7}s  {r['branch']}"
                      for r in rows)
+
+
+# ---------------------------------------------------------------------- reconcile
+from dataclasses import asdict, dataclass  # noqa: E402
+
+from kankan import auditlog, deps, gitutil, labels, worktrees  # noqa: E402
+from kankan.config import check_registry, project_lock, read_json, atomic_write_json  # noqa: E402
+from kankan.errors import KankanError  # noqa: E402
+from kankan.refstore import CARD_PREFIX, RefValue  # noqa: E402
+
+LABEL_AGE_HOURS = 24
+
+
+@dataclass
+class Issue:
+    kind: str
+    subject: str
+    detail: str
+    fixed: bool = False
+
+
+def _mismatch_memory(project) -> dict:
+    return read_json(project.paths.kankan_dir / "reconcile.json", {}) or {}
+
+
+def reconcile(project, fix: bool = False) -> List[Issue]:
+    """Report inconsistencies (§15.3); with ``fix`` repair only the certain cases."""
+    cfg = project.reload_config()
+    issues: List[Issue] = []
+    snap = project.trello.snapshot(cfg.board_id)
+    try:
+        check_registry(cfg, snap.desc)
+    except KankanError as err:
+        issues.append(Issue("registry_invalid", cfg.board_short, err.message))
+    raw = project.refs.list_raw(CARD_PREFIX)
+    refs: Dict[str, RefValue] = {}
+    for ref, (oid, kind, body) in raw.items():
+        card_id = ref[len(CARD_PREFIX):]
+        try:
+            refs[card_id] = project.refs._parse(ref, oid, kind, body)
+        except KankanError as err:
+            issues.append(Issue("malformed_blob", card_id, err.message))
+    liveness = {name: seats.liveness(project, name) for name in cfg.seats}
+    # card refs against lists
+    memory = _mismatch_memory(project)
+    seen_now = {}
+    fetched = {}
+    for card_id, value in refs.items():
+        meta = value.meta
+        card = snap.cards.get(card_id)
+        if card is None:
+            card = fetched.setdefault(card_id, project.trello.card(card_id))
+        if card is None:
+            issues.append(Issue("ref_of_deleted_card", card_id, f"phase {meta.get('phase')}, cause {meta.get('cause')}"))
+            continue
+        if card.closed:
+            issues.append(Issue("ref_of_archived_card", card_id, f"phase {meta.get('phase')}"))
+            continue
+        target = meta.get("target_list")
+        if target and card.list_id != target:
+            key = f"{card_id}:{value.oid}"
+            seen_now[key] = memory.get(key, clock.iso(clock.now()))
+            if key in memory:
+                issues.append(Issue("phase_list_mismatch", card_id,
+                                    f"phase {meta.get('phase')} expects list {target}, card is in {card.list_id}"))
+    atomic_write_json(project.paths.kankan_dir / "reconcile.json", seen_now)
+    seat_lists = cfg.seat_lists()
+    for card in snap.cards.values():
+        if card.list_id in seat_lists and card.id not in refs:
+            issues.append(Issue("card_without_ref", card.id, f"{card.short} is in a list of {seat_lists[card.list_id]}"))
+    # Done cards
+    merged = {m["card"] for m in _all_merges(project)}
+    for card in snap.cards.values():
+        if card.list_id == cfg.done:
+            if card.id in refs:
+                pass
+            elif card.short not in merged:
+                issues.append(Issue("done_without_merge", card.id, f"{card.short} has no Kankan-Card merge on main"))
+    # seats
+    for name, state in liveness.items():
+        if state == "dead":
+            issues.append(Issue("dead_seat", name, "registered seat whose holder died"))
+        elif state == "unavailable":
+            issues.append(Issue("seat_unavailable", name, "processes of the dead session survive"))
+        seat_cfg = cfg.seats[name]
+        for list_id in (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review):
+            lst = snap.lists.get(list_id)
+            if lst is None or lst.closed:
+                issues.append(Issue("seat_without_lists", name, f"list {list_id} is archived or missing"))
+                break
+    # dependencies
+    for card in snap.cards.values():
+        if card.list_id == cfg.backlog and deps.dependencies(card):
+            try:
+                result = deps.dep_status(project, snap, card)
+            except KankanError as err:
+                result = deps.DepStatus(False, [], [("?", err.message)])
+            for short, reason in result.problems:
+                issues.append(Issue("unsatisfiable_dependency", card.id, f"{card.short} -> {short}: {reason}"))
+    # branches and blocked worktrees
+    shorts = {meta.meta.get("short") for meta in refs.values()} | {c.short for c in snap.cards.values()}
+    for short in sorted(s for s in shorts if s):
+        found = worktrees.find_branches(project.paths.repo, short)
+        if len(found) > 1:
+            issues.append(Issue("multiple_branches", short, ", ".join(found)))
+    blocked_shorts = {c.short for c in snap.cards.values() if c.list_id == cfg.blocked}
+    for entry in worktrees.worktree_list(project.paths.repo):
+        path = entry.get("worktree", "")
+        name = path.rsplit("/", 1)[-1]
+        if name.startswith("blocked-") and name[len("blocked-"):] not in blocked_shorts:
+            issues.append(Issue("stale_blocked_worktree", path, "its card is no longer in Blocked"))
+    # old Error/Question labels
+    limit = LABEL_AGE_HOURS * 3600
+    for name in cfg.seats:
+        for card_id, causes in load_state(project.paths, name).label_causes.items():
+            for label_id, entry in causes.items():
+                if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
+                    issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
+    # push failures
+    if cfg.push_main:
+        remote_main = gitutil.rev(project.paths.repo, f"refs/remotes/origin/{cfg.main_branch}")
+        for event in auditlog.read(project.paths):
+            if event.get("event") == "push_failed" and event.get("merge"):
+                if not remote_main or not gitutil.is_ancestor(project.paths.repo, event["merge"], remote_main):
+                    issues.append(Issue("push_failed", event["merge"], "the merge is not on origin"))
+    for path in worktrees.main_checked_out(project.paths.repo, cfg.main_branch):
+        issues.append(Issue("main_checked_out", str(path), f"{cfg.main_branch} is checked out"))
+    if fix:
+        issues += _fix(project, snap, refs, liveness)
+    return issues
+
+
+def _all_merges(project):
+    from kankan.integrate import merges_on_main
+    return merges_on_main(project.paths.repo, project.cfg.main_branch, 100000)
+
+
+def _fix(project, snap, refs, liveness) -> List[Issue]:
+    fixed: List[Issue] = []
+    cfg = project.cfg
+    with project_lock(project.paths):
+        for card_id, value in refs.items():
+            meta = value.meta
+            owner = meta.get("owner")
+            if owner and liveness.get(owner) == "alive":
+                continue
+            card = snap.cards.get(card_id)
+            if meta.get("phase") == "integrated" and card is not None and card.list_id == cfg.done:
+                if project.refs.delete(f"{CARD_PREFIX}{card_id}", value.oid):
+                    fixed.append(Issue("integrated_ref_deleted", card_id, "card already in Done", True))
+        for label_id in labels.gc_resume_labels(project):
+            fixed.append(Issue("resume_label_deleted", label_id, "unused or expired", True))
+        snap = project.trello.snapshot(cfg.board_id)
+        for card in snap.cards.values():
+            if card.list_id != cfg.done:
+                continue
+            value = refs.get(card.id)
+            if value is not None and value.meta.get("owner") and liveness.get(value.meta["owner"]) == "alive":
+                continue
+            for label_id in labels.kankan_label_ids(project, card, snap.labels):
+                project.trello.remove_label(card.id, label_id)
+                fixed.append(Issue("done_label_removed", card.id, label_id, True))
+    project.log("reconcile_fix", fixed=len(fixed))
+    return fixed
+
+
+def issues_text(issues: List[Issue]) -> str:
+    if not issues:
+        return "No issues found."
+    return "\n".join(f"{'fixed ' if i.fixed else ''}{i.kind}: {i.subject} — {i.detail}" for i in issues)
+
+
+def issues_data(issues: List[Issue]) -> List[dict]:
+    return [asdict(i) for i in issues]

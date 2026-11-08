@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
     add("status", "seats, launcher states, tasks and waiting cards")
     add("claims", "card refs with phase, holder, age and branch")
+    p = add("reconcile", "report inconsistencies (and repair the certain ones with --fix)")
+    p.add_argument("--fix", action="store_true")
     p = add("skill", "install the shared kankan skill for Claude Code and Codex")
     p.add_argument("action", choices=["install"])
     p.add_argument("--force", action="store_true")
@@ -386,3 +388,10 @@ def _cmd_claims(args):
     from kankan import diag
     rows = diag.claims(_project())
     return rows, diag.claims_text(rows)
+
+
+@command("reconcile")
+def _cmd_reconcile(args):
+    from kankan import diag
+    issues = diag.reconcile(_project(), args.fix)
+    return diag.issues_data(issues), diag.issues_text(issues)
