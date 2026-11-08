@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kankan"
+version = "0.1.0"
+description = "Coordinates Claude Code and Codex agents working in parallel on one Git repository through a Trello board"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+kankan = "kankan.cli:main"
+
+[tool.setuptools]
+packages = ["kankan"]
+
+[tool.setuptools.package-data]
+kankan = ["adapters_default.json", "skill/SKILL.md", "hooks/pre-push", "systemd/*.service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "trello_live: tests against a real Trello test board",
+    "tmux: tests that need a real tmux server",
+    "slow: slow tests",
+]
+addopts = "-m 'not trello_live'"
