@@ -366,7 +366,13 @@ class Launcher:
         return bool(load_state(self.project.paths, self.lease.seat).suspend_requested)
 
     def clear_suspend_request(self) -> None:
-        update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "suspend_requested", None))
+        """The request was pasted: remember its cause on the task (yield reads it) and clear it."""
+        def clear(state):
+            reason = (state.suspend_requested or {}).get("reason")
+            if state.task is not None and reason:
+                state.task["suspend_cause"] = reason
+            state.suspend_requested = None
+        update_state(self.project.paths, self.lease.seat, clear)
 
     def request_suspend(self, reason: str) -> None:
         if self.state != "working" and self.state != "limited":

@@ -148,3 +148,60 @@ def _trello_card(ctx: AgentContext):
 def block(ctx: AgentContext, reason: str) -> dict:
     from kankan import integrate
     return integrate.block(ctx, reason)
+
+
+def _yield_meta(project, value: RefValue, cause: str = "yield", current_list: Optional[str] = None) -> CardMeta:
+    meta = CardMeta.from_dict(value.meta)
+    if cause != "yield":
+        return meta.evolve(phase=Phase.PARKED.value, owner=None, session=None, cause=cause, target_list=current_list)
+    if value.meta.get("phase") == Phase.REVIEW.value:
+        return meta.evolve(phase=Phase.IMPLEMENTED.value, owner=None, session=None,
+                           target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None, meta.implementer))
+    return meta.evolve(phase=Phase.PARKED.value, owner=None, session=None, cause="yield",
+                       target_list=project.cfg.backlog)
+
+
+def kankan_yield(project, lease: Lease, card, value: RefValue, cause: str = "yield") -> None:
+    """Give the card back (§10.3): impl → Backlog top, review → implementer's Implemented.
+
+    With a user-move cause (§14.6) the ref is parked where the user put the card, without a move.
+    """
+    worktree = project.paths.seat_worktree(lease.seat)
+    require_clean(worktree)
+    if worktrees.current_branch(worktree) is not None:
+        worktrees.detach(worktree)
+    current = card.list_id if (card is not None and not card.closed) else None
+    new = _yield_meta(project, value, cause, current)
+    if card is None:
+        from kankan.trello import Card
+        card = Card(id=value.meta["card"], short=value.meta.get("short", ""), board_id="", name="", desc="", url="",
+                    list_id="", pos=0, label_ids=[], attachments=[], closed=True, last_activity="")
+    text = (messages.REVIEW_YIELDED if value.meta.get("phase") == Phase.REVIEW.value else messages.YIELDED).format(
+        seat=lease.seat, branch=value.meta.get("branch"))
+    transition(project, lease, card, value, new, text if cause == "yield" else messages.USER_MOVED_YIELD.format(
+        seat=lease.seat, branch=value.meta.get("branch")))
+
+
+def yield_(ctx: AgentContext) -> dict:
+    """Agent ``yield``: commit WIP first; idempotent after the transition happened."""
+    current = ctx.task
+    value = _card_ref(ctx)
+    meta = value.meta if value else {}
+    if value is None or meta.get("owner") != ctx.seat or meta.get("phase") not in cards.OWNED_PHASES:
+        if value is not None and meta.get("owner") is None and meta.get("phase") in (Phase.PARKED.value,
+                                                                                     Phase.IMPLEMENTED.value):
+            if worktrees.current_branch(ctx.worktree) is not None and not worktrees.dirty_files(ctx.worktree):
+                worktrees.detach(ctx.worktree)
+            signal(ctx, "yield")
+            return {"card": current["card"], "phase": meta.get("phase")}
+        raise KankanError(Status.INELIGIBLE, "the card of the current task is no longer held by this seat")
+    require_clean(ctx.worktree)
+    state = load_state(ctx.project.paths, ctx.seat)
+    reason = (state.suspend_requested or {}).get("reason") or (state.task or {}).get("suspend_cause")
+    cause = "yield"
+    card = ctx.project.trello.card(current["card"])
+    if reason == "user_moved" or reason in ("user_deleted", "user_archived"):
+        cause = "user_deleted" if card is None else ("user_archived" if card.closed else "user_moved")
+    kankan_yield(ctx.project, ctx.lease, card, value, cause)
+    signal(ctx, "yield")
+    return {"card": current["card"], "phase": "parked" if cause != "yield" or meta.get("phase") == "impl" else "implemented"}

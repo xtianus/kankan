@@ -186,6 +186,7 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
                 continue
             target = meta.get("target_list")
             if phase == Phase.INTEGRATED.value and card.list_id == cfg.done:
+                _hold_after_integration(project, card, meta)
                 if project.refs.delete(ref, value.oid):
                     labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
                     project.log("ref_closed", card=card_id)
@@ -201,6 +202,8 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
                 project.trello.move_card(card_id, target)
                 events.append(f"moved:{card_id}")
                 _reset_failures(project, lease, card_id)
+                if phase == Phase.INTEGRATED.value:
+                    _hold_after_integration(project, card, meta)
                 if phase == Phase.INTEGRATED.value and project.refs.delete(ref, value.oid):
                     labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
                     events.append(f"deleted:{card_id}")
@@ -228,3 +231,14 @@ def _reset_failures(project, lease: Lease, card_id: str) -> None:
     from kankan.seatstate import load_state
     if card_id in load_state(project.paths, lease.seat).convergence_failures:
         update_state(project.paths, lease.seat, lambda s: s.convergence_failures.pop(card_id, None))
+
+
+def _hold_after_integration(project, card, meta: dict) -> None:
+    """§9.4: HOLD on a card whose merge is already on main is irreversible; say how to undo it."""
+    if project.cfg.label_hold in card.label_ids and meta.get("merge"):
+        from kankan import messages
+        try:
+            project.trello.comment_once(card.id, messages.HOLD_AFTER_INTEGRATION.format(merge=meta["merge"]),
+                                        f"holdlate-{meta['merge']}")
+        except KankanError as err:
+            project.log("comment_failed", card=card.id, error=err.message)

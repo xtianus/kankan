@@ -80,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("sync", "merge main into the review branch (agent command)")
     p = add("verify", "run the test command on a commit (agent command)")
     p.add_argument("--tested", required=True)
+    add("yield", "give the card back (agent command)")
     p = add("block", "park the card in Blocked (agent command)")
     p.add_argument("reason")
     p = add("resolve", "resolve a blocked card by hand")
@@ -207,6 +208,13 @@ def _cmd_integrate(args):
     from kankan import agentcmds, integrate
     data = integrate.integrate(agentcmds.context(), args.tested)
     return data, f"integrated: {data['merge']}"
+
+
+@command("yield")
+def _cmd_yield(args):
+    from kankan import agentcmds
+    data = agentcmds.yield_(agentcmds.context())
+    return data, "card given back"
 
 
 @command("block")

@@ -317,6 +317,8 @@ def done_review(ctx) -> dict:
             except KankanError as err:
                 project.log("move_failed", card=card.id, error=err.message)
         if moved:
+            from kankan.cards import _hold_after_integration
+            _hold_after_integration(project, project.trello.card(card.id) or card, value.meta)
             if project.refs.delete(ref, value.oid):
                 project.log("ref_closed", card=ctx.task["card"])
             labels.clear_kankan_labels(project, project.trello.card(card.id) or card, None, ctx.seat)

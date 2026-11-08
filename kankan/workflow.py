@@ -234,6 +234,7 @@ def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
     if kind == "hold_yield":
         from kankan import agentcmds
         agentcmds.kankan_yield(project, lease, choice.card, choice.ref)
+        project.log("hold_yield", card=choice.card.id)
         return None
     if kind == "impl":
         claimed = claim_impl(project, lease, choice)

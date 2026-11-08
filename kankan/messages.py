@@ -47,3 +47,6 @@ RESOLVE_NOTHING = ("Card {short} was blocked without a merge in progress: there 
                    "`kankan resolve {short} --done` sends it back for review; moving it to the Backlog has it "
                    "reimplemented.")
 RESOLVED = "kankan: the block of {short} was resolved; the card goes back to review."
+
+USER_MOVED_YIELD = "kankan: {seat} stopped working on this card because it was moved, archived or deleted; the work is on `{branch}`."
+HOLD_AFTER_INTEGRATION = "kankan: HOLD arrived after integration; to undo: `git revert -m 1 {merge}`"
