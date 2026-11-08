@@ -226,8 +226,6 @@ class Launcher:
 
     def answer_dialogs(self, cls: Classification) -> bool:
         if cls.state == "trust":
-            if self.state != "starting" and not self.trust_allowed():
-                return True
             if not self.trust_allowed():
                 if not self.trust_warned:
                     self.log("trust_not_answered", worktree=str(self.project.paths.seat_worktree(self.lease.seat)))
@@ -450,7 +448,8 @@ class Launcher:
                     labels.set_label(self.project, self.task["card"], self.resume_label, "limit", self.lease.seat)
                 except KankanError as err:
                     self.log("label_failed", error=err.message)
-        elif cls.state == "working" and self.state == "limited":
+        elif cls.state in ("working", "ready") and self.state == "limited":
+            # ready too: the agent may resume and finish between two polls; unknown keeps it limited
             self.set_state(self.prev_state or "working")
             if self.task and self.resume_label:
                 try:

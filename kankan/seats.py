@@ -288,7 +288,16 @@ def recover_dead(project, seat: str, kill_alive: bool = False) -> List[int]:
 
 
 def liveness(project, seat: str) -> str:
-    """``alive`` (flock held), ``free`` (no ref), ``unavailable`` (survivors recorded) or ``dead``."""
+    """``alive`` (flock held), ``free`` (no ref), ``unavailable`` (survivors recorded) or ``dead``.
+
+    Probes run under the project lock: a probe briefly holding a seat flock must never make a
+    concurrent occupation believe the seat is alive (and create an extra seat).
+    """
+    with project_lock(project.paths):
+        return _liveness(project, seat)
+
+
+def _liveness(project, seat: str) -> str:
     fd = _try_flock(project, seat)
     if fd is None:
         return "alive"

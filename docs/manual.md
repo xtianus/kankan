@@ -66,7 +66,7 @@ Each agent gets a **seat** (`claude-1`, `codex-2`…) with three lists on the bo
 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
 
 The agent runs in the tmux session `ai-<project>-<seat>`; attach with `tmux attach -t ai-<project>-<seat>` to watch.
-Ctrl-C and Ctrl-Z typed there reach the agent. kankan never types while you are typing (it waits
+Ctrl-C typed there reaches the agent (the launcher and supervisor ignore Ctrl-C, Ctrl-Z and Ctrl-\\). kankan never types while you are typing (it waits
 `write_quiet_seconds`, default 20 s) and never sends Esc or Ctrl-C. `airesumer.sh` finds these sessions and resumes
 agents after a usage limit.
 

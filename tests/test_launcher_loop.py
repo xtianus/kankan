@@ -186,3 +186,22 @@ def test_known_dialog_answered(chain):
     assert wait_for(lambda: "3" in inputs(log), timeout=40)
     time.sleep(3)
     assert inputs(log).count("3") == 1
+
+
+def test_limit_left_on_ready_screen(kproject, fake_trello):
+    """An agent that resumes and finishes between two polls must not leave the launcher stuck in limited."""
+    from tests.test_ask import FakeTmux, make_launcher
+    project, fake = kproject, fake_trello
+    card = fake.add_card(project.cfg.backlog, "c")
+    lease = seats.acquire(project, "claude")
+    from kankan import workflow
+    task = workflow.tick(project, lease)
+    tmux = FakeTmux()
+    launcher = make_launcher(project, lease, tmux, task)
+    tmux.screen = "  ⎿  You've hit your session limit · resets 11:58pm\n"
+    launcher.step()
+    assert launcher.state == "limited"
+    tmux.screen = "────\n❯ \n"
+    launcher.step()
+    assert launcher.state == "working"
+    assert not any(n.startswith("Resume ") for n in label_names(fake, card))

@@ -73,6 +73,9 @@ def tmux_server():
     server = Tmux(f"kankan-test-{os.getpid()}-{id(object())}")
     yield server
     server.run(["kill-server"], check=False)
+    socket = Path(f"/tmp/tmux-{os.getuid()}") / server.socket
+    if socket.exists():
+        socket.unlink()
 
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -264,3 +264,24 @@ def test_reused_sid_not_killed(project):
     finally:
         other.kill()
         other.wait()
+
+
+def _hold_project_lock(repo, ready, seconds):
+    from kankan.config import Paths, project_lock
+    with project_lock(Paths.discover(repo)):
+        ready.set()
+        time.sleep(seconds)
+
+
+def test_liveness_serialized_with_occupation(project, git_repo):
+    """A liveness probe must not grab a seat flock while an occupation holds the project lock."""
+    seats.release(project, seats.acquire(project, "claude"))
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    holder = ctx.Process(target=_hold_project_lock, args=(git_repo, ready, 1.0))
+    holder.start()
+    ready.wait(10)
+    start = time.monotonic()
+    assert seats.liveness(project, "claude-1") == "free"
+    assert time.monotonic() - start >= 0.7
+    holder.join()
