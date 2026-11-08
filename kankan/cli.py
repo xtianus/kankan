@@ -77,6 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("note", "comment progress on the card (agent command)")
     p.add_argument("text")
     add("done", "close the current task (agent command)")
+    add("sync", "merge main into the review branch (agent command)")
+    p = add("verify", "run the test command on a commit (agent command)")
+    p.add_argument("--tested", required=True)
     p = add("tick", "", hidden=True)
     p.add_argument("--seat", required=True)
     for extra in EXTRA_PARSERS:
@@ -178,6 +181,18 @@ def _cmd_done(args):
     from kankan import agentcmds
     data = agentcmds.done(agentcmds.context())
     return data, f"done: card is now {data.get('phase')}"
+
+
+@command("sync")
+def _cmd_sync(args):
+    from kankan import agentcmds, integrate
+    return integrate.sync(agentcmds.context()), "main merged into the branch"
+
+
+@command("verify")
+def _cmd_verify(args):
+    from kankan import agentcmds, integrate
+    return integrate.verify(agentcmds.context(), args.tested), "tests passed"
 
 
 @command("tick")
