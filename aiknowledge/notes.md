@@ -22,6 +22,10 @@
 - `workflow.tick(project, lease)` is one launcher iteration without the agent (convergence, choice, preparation); the hidden `kankan tick --seat <s>` runs it for debugging.
 - Seat state (`<gcd>/kankan/seats/<seat>.state.json`) is changed only through `seatstate.update_state`.
 - The launcher shares the pane's terminal with the agent: it never prints while the agent runs; events go to `<gcd>/kankan/log.jsonl`.
+- Card refs carry `from_list` only while a Trello move is unconfirmed: after a verified move `cards.confirm_move` rewrites the ref without it, so convergence moves a card only from its recorded source and never replays a move over a later human move.
+- Transitions of held cards (`impl`/`review`) by a seat require the card to be open and in its expected list; only the user-move parking (`cause` `user_*`) is exempt. `integrate` and review `done` apply the same rule and re-check seat ownership and task identity under the project lock.
+- The launcher checks its seat lease every poll interval and exits when `seat recover` revoked it.
+- `seat recover --kill` terminates only the recorded processes (pid + start time); a whole session is terminated only when it is the recorded supervisor-led pane session.
 - Seat recovery terminates the processes of the recorded pane session only when that session was created by a kankan supervisor (`KANKAN_SUPERVISOR_PID` equals the session id) and the session leader's start time still matches; otherwise it kills nothing.
 
 ## Testing

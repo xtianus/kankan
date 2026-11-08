@@ -206,7 +206,11 @@ def integrate(ctx, tested: str) -> dict:
         meta = value.meta
         short = meta["short"]
         card = project.trello.card(ctx.task["card"])
-        if card is not None and cfg.label_hold in card.label_ids:
+        from kankan.cards import _where_expected
+        if not _where_expected(card, meta):
+            raise KankanError(Status.INELIGIBLE, "the card was moved, archived or deleted by the user: commit WIP "
+                              "and run `kankan yield`")
+        if cfg.label_hold in card.label_ids:
             raise KankanError(Status.ON_HOLD, "the card is on HOLD: commit WIP and run `kankan yield`")
         for merge in merges_on_main(repo, cfg.main_branch):
             if merge["card"] == short and merge["tested"] == tested:
@@ -285,55 +289,96 @@ def _record_integrated(ctx, value, merge: str, tested: str, repaired: bool) -> d
                                                 merge=merge, tested=tested, target_list=project.cfg.done,
                                                 from_list=card.list_id if card else None)
     oid = project.refs.write_blob(new.to_dict())
-    if not project.refs.transaction([Update(card_ref(value.meta["card"]), oid, value.oid)]):
+    if not project.refs.transaction([Verify(seat_ref(ctx.seat), ctx.lease.seat_oid),
+                                     Update(card_ref(value.meta["card"]), oid, value.oid)]):
+        seat_value = project.refs.read(seat_ref(ctx.seat))
+        if seat_value is None or seat_value.oid != ctx.lease.seat_oid:
+            raise KankanError(Status.NOT_OWNER, "this session no longer owns the seat")
         raise KankanError(Status.INELIGIBLE, "the card's ref changed meanwhile")
     project.log("integrate_repaired", card=value.meta["card"], merge=merge)
     return {"merge": merge, "tested": tested, "repaired": repaired}
 
 
+def _check_task_owner(ctx) -> None:
+    """Under the project lock: this session still owns the seat and the task is still current."""
+    verify_owner(ctx.project, ctx.seat, ctx.session)
+    state = load_state(ctx.project.paths, ctx.seat)
+    if not state.task or state.task.get("id") != ctx.task["id"]:
+        raise KankanError(Status.INELIGIBLE, "the task changed meanwhile")
+
+
 def done_review(ctx) -> dict:
     """Review ``done``: card to Done, verification, ref deleted (or left to convergence)."""
     from kankan.agentcmds import signal as send_signal
+    from kankan.cards import _hold_after_integration
     project = ctx.project
     cfg = project.cfg
     ref = card_ref(ctx.task["card"])
-    value = project.refs.read(ref)
-    card = project.trello.card(ctx.task["card"])
-    if value is None:
-        if card is not None and card.list_id == cfg.done and card_merged(project.paths.repo, cfg.main_branch,
-                                                                          ctx.task.get("short", "")):
-            _leave_worktree(ctx)
-            send_signal(ctx, "done")
-            return {"card": ctx.task["card"], "phase": "done"}
-        raise KankanError(Status.INELIGIBLE, "the card has no ref and is not done")
-    if value.meta.get("phase") != Phase.INTEGRATED.value:
-        raise KankanError(Status.NEEDS_ACTION, "the card is not integrated yet: run `kankan integrate --tested <hash>`")
+    branch = ctx.task.get("branch")
     with project_lock(project.paths):
-        moved = card is not None and card.list_id == cfg.done
-        if card is not None and not moved:
-            try:
-                project.trello.move_card(card.id, cfg.done)
-                moved = True
-            except KankanError as err:
-                project.log("move_failed", card=card.id, error=err.message)
+        _check_task_owner(ctx)
+        value = project.refs.read(ref)
+        card = project.trello.card(ctx.task["card"])
+        if value is None:
+            if card is not None and card.list_id == cfg.done and card_merged(project.paths.repo, cfg.main_branch,
+                                                                              ctx.task.get("short", "")):
+                _leave_worktree(ctx, branch)
+                send_signal(ctx, "done")
+                return {"card": ctx.task["card"], "phase": "done"}
+            raise KankanError(Status.INELIGIBLE, "the card has no ref and is not done")
+        if value.meta.get("phase") != Phase.INTEGRATED.value:
+            raise KankanError(Status.NEEDS_ACTION, "the card is not integrated yet: run `kankan integrate --tested <hash>`")
+        moved = card is not None and not card.closed and card.list_id == cfg.done
+        if card is not None and not card.closed and not moved:
+            if card.list_id == value.meta.get("from_list"):
+                try:
+                    project.trello.move_card(card.id, cfg.done)
+                    moved = True
+                except KankanError as err:
+                    project.log("move_failed", card=card.id, error=err.message)
+            else:
+                # moved by the user after the integration: leave it where it is (reconcile reports it)
+                project.log("human_moved", card=card.id, phase="integrated")
         if moved:
-            from kankan.cards import _hold_after_integration
             _hold_after_integration(project, project.trello.card(card.id) or card, value.meta)
             if project.refs.delete(ref, value.oid):
                 project.log("ref_closed", card=ctx.task["card"])
             labels.clear_kankan_labels(project, project.trello.card(card.id) or card, None, ctx.seat)
-    _leave_worktree(ctx)
+    _leave_worktree(ctx, branch)
     send_signal(ctx, "done")
     return {"card": ctx.task["card"], "phase": "done" if moved else "integrated", "merge": value.meta.get("merge")}
 
 
-def _leave_worktree(ctx) -> None:
-    if worktrees.current_branch(ctx.worktree) is not None and not worktrees.dirty_files(ctx.worktree):
+def _leave_worktree(ctx, branch: Optional[str]) -> None:
+    """Detach the seat worktree only from this task's branch (never from a newer task's)."""
+    if branch and worktrees.current_branch(ctx.worktree) == branch and not worktrees.dirty_files(ctx.worktree):
         worktrees.detach(ctx.worktree)
 
 
 # ---------------------------------------------------------------------- block
 BLOCK_STEPS = ("snapshot", "abort", "blocked_wt", "restore", "transition")
+BLOCK_LOCK_TIMEOUT = 30
+
+
+def _block_lock(project, seat: str):
+    """One block journal run per seat at a time: a concurrent run could delete the only snapshot."""
+    import contextlib
+    from kankan.config import file_lock
+
+    @contextlib.contextmanager
+    def guarded():
+        try:
+            lock = file_lock(project.paths.seats_dir / f"{seat}.block.lock", timeout=BLOCK_LOCK_TIMEOUT,
+                             what="block lock")
+            lock.__enter__()
+        except KankanError as err:
+            raise KankanError(Status.NEEDS_ACTION, "another `kankan block` is running for this seat; wait for it "
+                              "and retry", {"detail": err.message})
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+    return guarded()
 
 
 def _git_path(worktree, name: str) -> Path:
@@ -394,6 +439,16 @@ def block(ctx, reason: str) -> dict:
     """§12.4: with a merge in progress move it to blocked-<short>; then park the card in Blocked."""
     from kankan.agentcmds import _own_ref, require_clean, signal as send_signal
     project = ctx.project
+    with _block_lock(project, ctx.seat):
+        result = _block_locked(ctx, reason)
+    send_signal(ctx, "block")
+    return result
+
+
+def _block_locked(ctx, reason: str) -> dict:
+    from kankan.agentcmds import _own_ref, require_clean
+    project = ctx.project
+    verify_owner(project, ctx.seat, ctx.session)
     state = load_state(project.paths, ctx.seat)
     if state.block_journal is None:
         value = _own_ref(ctx, (Phase.IMPL.value, Phase.REVIEW.value))
@@ -403,16 +458,15 @@ def block(ctx, reason: str) -> dict:
         journal = {"card": ctx.task["card"], "short": value.meta["short"], "branch": value.meta["branch"],
                    "reason": reason, "merging": merging, "done": [], "task_id": ctx.task["id"]}
         update_state(project.paths, ctx.seat, lambda s: setattr(s, "block_journal", journal))
-    result = run_block_journal(project, ctx.lease)
-    send_signal(ctx, "block")
-    return result
+    return run_block_journal(project, ctx.lease)
 
 
 def resume_block(project, lease) -> Optional[dict]:
     """Finish an interrupted ``block`` (called by the launcher at startup)."""
-    if load_state(project.paths, lease.seat).block_journal is None:
-        return None
-    return run_block_journal(project, lease)
+    with _block_lock(project, lease.seat):
+        if load_state(project.paths, lease.seat).block_journal is None:
+            return None
+        return run_block_journal(project, lease)
 
 
 def _mark(project, seat: str, step: str, **extra) -> dict:

@@ -102,6 +102,12 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
     """Git first, then Trello: one ref transaction, then a verified move and a de-duplicated comment."""
     with project_lock(project.paths):
         fresh = project.trello.card(card.id)
+        user_park = new is not None and new.phase == Phase.PARKED.value and (new.cause or "").startswith("user_")
+        if isinstance(actor, Lease) and expect is not None and new is not None and not user_park \
+                and expect.meta.get("phase") in OWNED_PHASES and not _where_expected(fresh, expect.meta):
+            # §14.6: the user moved, archived or deleted a held card; only the suspension path may park it
+            raise KankanError(Status.INELIGIBLE, f"card {card.short or card.id} was moved, archived or deleted "
+                              "by the user: commit WIP and run `kankan yield`")
         ops = []
         if isinstance(actor, Lease):
             ops.append(Verify(seat_ref(actor.seat), actor.seat_oid))
@@ -137,6 +143,8 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
                 moved = False
                 project.log("move_failed", card=card.id, target=new.target_list, error=err.message)
         faults.point("after_move")
+        if moved and new_value is not None and new_value.meta.get("from_list") and new.target_list:
+            new_value = confirm_move(project, ref, new_value)
         if comment and fresh is not None and not fresh.closed:
             try:
                 project.trello.add_comment(card.id, comment, op_id)
@@ -145,6 +153,25 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
         project.log("transition", card=card.id, actor=actor_name, old=expect.oid if expect else None,
                     new=new_value.oid if new_value else None, phase=new.phase if new else "deleted", moved=moved)
         return TransitionResult(new_value, moved)
+
+
+def _where_expected(card: Optional[Card], meta: dict) -> bool:
+    """The card is open and in its target list or, while a move is unconfirmed, in its source list."""
+    if card is None or card.closed:
+        return False
+    return card.list_id in {meta.get("target_list"), meta.get("from_list")} - {None}
+
+
+def confirm_move(project, ref: str, value: RefValue) -> RefValue:
+    """Record that the move to ``target_list`` happened: drop ``from_list`` so a later human move back to
+    the source list is never replayed by convergence. Conditional; on a race the old value is kept."""
+    meta = dict(value.meta)
+    meta.pop("from_list", None)
+    meta.pop("nonce", None)
+    oid = project.refs.write_blob(meta)
+    if project.refs.update(ref, oid, value.oid):
+        return project.refs.read_blob(oid)
+    return value
 
 
 def _parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
@@ -194,6 +221,8 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
                 continue
             if target is None or card.list_id == target:
                 _reset_failures(project, lease, card_id)
+                if target is not None and meta.get("from_list") and phase != Phase.INTEGRATED.value:
+                    confirm_move(project, ref, value)
                 continue
             if card.list_id != meta.get("from_list"):
                 events.append(f"human_moved:{card_id}")
@@ -202,6 +231,8 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
                 project.trello.move_card(card_id, target)
                 events.append(f"moved:{card_id}")
                 _reset_failures(project, lease, card_id)
+                if phase != Phase.INTEGRATED.value:
+                    value = confirm_move(project, ref, value)
                 if phase == Phase.INTEGRATED.value:
                     _hold_after_integration(project, card, meta)
                 if phase == Phase.INTEGRATED.value and project.refs.delete(ref, value.oid):

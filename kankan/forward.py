@@ -21,7 +21,8 @@ def poll(launcher) -> None:
     """Read new comments; keep the configured member's, never kankan's own; queue them."""
     project, seat, card_id = launcher.project, launcher.lease.seat, launcher.task["card"]
     state = load_state(project.paths, seat)
-    if state.pending_forward:
+    pending = state.pending_forward
+    if pending and pending.get("card") == card_id and pending.get("task_id") == launcher.task["id"]:
         return
     cursor = state.comment_cursor.get(card_id)
     try:
@@ -37,8 +38,8 @@ def poll(launcher) -> None:
     def save(st):
         st.comment_cursor[card_id] = newest
         if wanted:
-            st.pending_forward = {"card": card_id, "text": "\n\n".join(c.text for c in wanted), "status": "queued",
-                                  "cursor": newest}
+            st.pending_forward = {"card": card_id, "task_id": launcher.task["id"],
+                                  "text": "\n\n".join(c.text for c in wanted), "status": "queued", "cursor": newest}
     update_state(project.paths, seat, save)
     faults.point("after_cursor_save")
 
@@ -55,8 +56,22 @@ def step(launcher, cls) -> None:
     if now >= getattr(launcher, "next_comment_poll", 0.0):
         launcher.next_comment_poll = now + launcher.cfg.poll_seconds
         poll(launcher)
+    if launcher.suspend_pending():
+        # HOLD or a user move while waiting: the suspension request goes first (§9.4, §14.6)
+        if launcher.can_write(cls, queue=True):
+            launcher.paste(messages.SUSPEND_REQUEST)
+            launcher.clear_suspend_request()
+            update_state(launcher.project.paths, launcher.lease.seat, lambda s: setattr(s, "pending_forward", None))
+            _clear_waiting_label(launcher)
+            launcher.ready_since = None
+            launcher.set_state("suspending")
+        return
     state = load_state(launcher.project.paths, launcher.lease.seat)
     pending = state.pending_forward
+    if pending and (pending.get("card") != launcher.task["card"] or pending.get("task_id") != launcher.task["id"]):
+        launcher.log("forward_dropped_stale", card=pending.get("card"))
+        update_state(launcher.project.paths, launcher.lease.seat, lambda s: setattr(s, "pending_forward", None))
+        pending = None
     if pending and pending.get("status") == "queued":
         if not launcher.can_write(cls, queue=True):
             return

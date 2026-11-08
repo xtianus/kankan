@@ -25,8 +25,8 @@ SEAT_PREFIX = "refs/agent-seats/"
 _CARD_RE = re.compile(r"^[0-9a-f]{24}$")
 _SHORT_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 _SEAT_RE = re.compile(r"^[a-z]+-[0-9]+$")
-_MISMATCH = ("cannot lock ref", "but expected", "reference already exists", "unable to resolve reference",
-             "is at", "already exists")
+# expected-value mismatches and lock-file contention only; anything else (permissions...) is an error
+_MISMATCH = ("but expected", "reference already exists", "unable to resolve reference", "File exists")
 
 
 def _validate(regex: re.Pattern, value: str, what: str) -> str:

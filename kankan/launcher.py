@@ -32,6 +32,12 @@ def _wall() -> float:
     return time.time()
 
 
+def _supervisor_pid() -> Optional[int]:
+    """The parent, only if it is the kankan supervisor (never record e.g. the user's shell)."""
+    parent = os.getppid()
+    return parent if os.environ.get("KANKAN_SUPERVISOR_PID") == str(parent) else None
+
+
 class Launcher:
     def __init__(self, project: Project, adapter: Adapter, tmux: Tmux, agent_type: str, seat: Optional[str] = None):
         self.project = project
@@ -58,6 +64,7 @@ class Launcher:
         self.idle_since = clock.monotonic()
         self.resume_label: Optional[str] = None
         self.last_screen = ""
+        self.next_lease_check = 0.0
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -102,7 +109,7 @@ class Launcher:
         check_lists(self.cfg, snap.lists)
         from kankan import worktrees
         main_wts = worktrees.main_checked_out(self.project.paths.repo, self.cfg.main_branch)
-        pids = {"launcher": os.getpid(), "supervisor": os.getppid(), "sid": seats.pane_sid()}
+        pids = {"launcher": os.getpid(), "supervisor": _supervisor_pid(), "sid": seats.pane_sid()}
         self.lease = seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
         self.project.reload_config()
         if main_wts:
@@ -202,6 +209,8 @@ class Launcher:
 
     def step(self) -> bool:
         """One pass: returns True when the launcher must exit."""
+        if self.lease_revoked():
+            return True
         cls = self.screen()
         if self.answer_dialogs(cls):
             return False
@@ -222,6 +231,19 @@ class Launcher:
             self.waiting_human(cls)
         elif self.state == "closing":
             self.closing(cls)
+        return False
+
+    def lease_revoked(self) -> bool:
+        """Every poll interval: the seat ref must still name this session (``seat recover``, §15.4)."""
+        now = clock.monotonic()
+        if now < self.next_lease_check:
+            return False
+        self.next_lease_check = now + self.cfg.poll_seconds
+        try:
+            seats.verify_owner(self.project, self.lease.seat, self.lease.session)
+        except KankanError:
+            self.log("lease_revoked")
+            return True
         return False
 
     def answer_dialogs(self, cls: Classification) -> bool:
@@ -373,7 +395,7 @@ class Launcher:
         update_state(self.project.paths, self.lease.seat, clear)
 
     def request_suspend(self, reason: str) -> None:
-        if self.state != "working" and self.state != "limited":
+        if self.state not in ("working", "limited", "waiting_human"):
             return
         task_id = self.task["id"] if self.task else None
 
@@ -401,7 +423,7 @@ class Launcher:
         card = snap.cards.get(self.task["card"])
         if card is not None and self.cfg.label_hold in card.label_ids:
             self.request_suspend("hold")
-        if self.state in ("working", "suspending", "limited"):
+        if self.state in ("working", "suspending", "limited", "waiting_human"):
             self.check_user_move(snap)
 
     def check_user_move(self, snap) -> None:
@@ -477,7 +499,11 @@ class Launcher:
     # ------------------------------------------------------------------ closing
     def closing(self, cls: Classification) -> None:
         if self.task is not None:
-            update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "task", None))
+            def clear(state):
+                state.task = None
+                state.pending_forward = None
+                state.suspend_requested = None
+            update_state(self.project.paths, self.lease.seat, clear)
             self.task = None
             try:
                 cards.converge(self.project, self.lease)

@@ -134,6 +134,22 @@ def terminate_session(sid: int, exclude: Set[int], grace: float = 5.0) -> List[i
     return targets()
 
 
+def terminate_pids(pids: Iterable[tuple], grace: float = 5.0) -> List[int]:
+    """SIGTERM then SIGKILL individual ``(pid, start_time)`` processes still matching; return survivors."""
+    targets = [(pid, start) for pid, start in pids if alive(pid, start)]
+    _signal_all([pid for pid, _ in targets], signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(alive(p, s) for p, s in targets):
+        _reap()
+        time.sleep(0.05)
+    _signal_all([pid for pid, start in targets if alive(pid, start)], signal.SIGKILL)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and any(alive(p, s) for p, s in targets):
+        _reap()
+        time.sleep(0.05)
+    return [pid for pid, start in targets if alive(pid, start)]
+
+
 def set_pdeathsig(sig: int = signal.SIGKILL) -> None:
     """Ask the kernel to send ``sig`` to this process when its parent dies."""
     libc = ctypes.CDLL(None, use_errno=True)

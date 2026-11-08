@@ -245,12 +245,13 @@ def write_proc(project, seat: str, reset: bool = False, **pids) -> None:
     atomic_write_json(_proc_path(project, seat), data)
 
 
-def _recorded_alive(proc: dict) -> List[int]:
+def _recorded_alive(proc: dict) -> List[tuple]:
+    """Recorded ``(pid, start_time)`` pairs whose process still exists with that start time."""
     result = []
     for name in ("supervisor", "launcher", "agent"):
         entry = proc.get(name)
         if isinstance(entry, dict) and procutil.alive(entry.get("pid"), entry.get("start")):
-            result.append(entry["pid"])
+            result.append((entry["pid"], entry.get("start")))
     return result
 
 
@@ -271,10 +272,12 @@ def recover_dead(project, seat: str, kill_alive: bool = False) -> List[int]:
             project.log("sid_reused", seat=seat, sid=sid)  # another process owns that pid now: kill nothing
         elif sid:
             survivors = procutil.terminate_session(sid, exclude, grace=KILL_GRACE)
-        for pid in _recorded_alive(proc):
-            if pid not in exclude and pid not in survivors:
-                survivors += procutil.terminate_session(procutil.session_id(pid) or -1, exclude, grace=KILL_GRACE) \
-                    if kill_alive else [pid]
+        remaining = [(pid, start) for pid, start in _recorded_alive(proc) if pid not in exclude and pid not in survivors]
+        if kill_alive:
+            # only the recorded processes themselves (identity checked): never a whole unvalidated session
+            survivors += procutil.terminate_pids(remaining, grace=KILL_GRACE)
+        else:
+            survivors += [pid for pid, _ in remaining]
         escaped = [pid for pid in procutil.pids_with_cwd_under(str(project.paths.seat_worktree(seat)))
                    if pid not in exclude]
         if escaped:
