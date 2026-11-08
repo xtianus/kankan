@@ -1,9 +1,9 @@
 # kankan — coordinating AI agents on a Kanban board
 
-**Status:** specification v1.1 (English translation)
+**Status:** specification v1.1
 **Date:** 2026-11-08
 **Related documents:** `kanban_requirements.md` (requirements for backends other than Trello)
-**Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual. This document is a translation of the original Italian v1.1.
+**Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual.
 
 ## 1. Purpose
 
