@@ -47,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
             kwargs["help"] = help_text
         return sub.add_parser(name, **kwargs)
 
+    # user commands
+    p = add("init", "bind this clone to a Trello board")
+    p.add_argument("url", nargs="?")
+    p.add_argument("--credentials", help=".properties file holding the Trello key and token")
+    p.add_argument("--notify", help="Trello user to mention (default: the token owner)")
+    p.add_argument("--takeover", action="store_true", help="take over a board bound to another clone")
+    p.add_argument("--reauth", action="store_true", help="only acquire new credentials")
     # agent commands
     add("task", "show the current task (agent command)")
     p = add("note", "comment progress on the card (agent command)")
@@ -157,3 +164,16 @@ def _cmd_tick(args):
     task = workflow.tick(project, lease)
     _os.close(lease.fd)
     return {"seat": lease.seat, "session": lease.session, "task": task}
+
+
+# --------------------------------------------------------------------- user commands
+@command("init")
+def _cmd_init(args):
+    from pathlib import Path
+    from kankan.init import init
+    cfg, warnings = init(os.getcwd(), args.url, Path(args.credentials) if args.credentials else None, args.notify,
+                         args.takeover, args.reauth)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return {"board": cfg.board_id, "registry": cfg.registry_id, "warnings": warnings}, \
+        f"kankan initialized for board {cfg.board_short}"

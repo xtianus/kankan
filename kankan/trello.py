@@ -223,6 +223,14 @@ class TrelloClient:
     def me(self) -> dict:
         return self._ok("GET", "/1/members/me", {"fields": "id,username,fullName"})
 
+    def member(self, username: str) -> Optional[dict]:
+        status, payload = self._request("GET", f"/1/members/{urllib.parse.quote(username)}", {"fields": "id,username"})
+        if status in (400, 404):
+            return None
+        if status != 200:
+            raise KankanError(Status.TRELLO_ERROR, f"Trello GET member: HTTP {status}")
+        return payload
+
     def board(self, short_or_id: str) -> dict:
         return self._ok("GET", f"/1/boards/{urllib.parse.quote(short_or_id)}", {"fields": "id,name,desc,shortLink,url"})
 

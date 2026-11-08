@@ -36,13 +36,13 @@ Requirement levels:
 | B3 | MUST | Read in **one request** the board description, all lists, all open cards (list ID, position, labels, attachments, title, description, URL, archived state) and all labels. kankan performs this read on every launcher cycle and before every state-changing command. | `GET /1/boards/{id}?fields=name,desc&lists=all&cards=open&card_attachments=true&card_attachment_fields=url&labels=all&labels_limit=1000&...` (nested resources) |
 | B4 | MUST | Read all lists of a board with ID, name, position and archived state. | part of the B3 read (`lists=all&list_fields=name,closed,pos`); `GET /1/boards/{id}?lists=open` to find a list by name after a create that timed out |
 | B5 | MUST | Read all labels defined on a board, more than 50 included. | part of the B3 read (`labels_limit=1000`); `GET /1/boards/{id}/labels?limit=1000[&before=...]` when 1000 labels come back, and to find a label by name after a create that timed out |
-| B6 | SHOULD | Read board members, to resolve the username to mention. | `GET /1/boards/{id}/members` |
+| B6 | SHOULD | Resolve a username to the member to mention (`init --notify <user>`). | `GET /1/members/{username}` |
 
 ## 4. Lists (columns)
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| L1 | MUST | Create a list with a given name on a board. Used by `init` (Backlog, Done, Blocked) and by automatic seat creation (three lists per seat). | `POST /1/lists` (`name`, `idBoard`, `pos`) |
+| L1 | MUST | Create a list with a given name on a board. Used by `init` (Backlog, Done, Blocked) and by automatic seat creation (three lists per seat). Existing lists with the same name are found through the B3 read and adopted (after confirmation in `init`). | `POST /1/lists` (`name`, `idBoard`, `pos`) |
 | L2 | MUST | Archive (or delete) a list. Used by `seat remove` and by test cleanup. | `PUT /1/lists/{id}/closed` |
 | L3 | MUST | Detect that a configured list was archived or deleted. | `GET /1/lists/{id}` (`closed`, or 404) |
 | L4 | MUST | Unlimited, or at least several dozen, lists per board, and lists created by humans that kankan ignores. | — |
@@ -63,7 +63,7 @@ Requirement levels:
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| T1 | MUST | Create a board label with a name and colour. Used for HOLD, Question, Error and the dynamic `Resume YYYY-MM-DD hh:mm` labels. | `POST /1/labels` (`idBoard`, `name`, `color`) |
+| T1 | MUST | Create a board label with a name and colour. Used for HOLD, Question, Error and the dynamic `Resume YYYY-MM-DD hh:mm` labels; labels with those names already on the board are adopted. | `POST /1/labels` (`idBoard`, `name`, `color`) |
 | T2 | MUST | Delete a board label. Used to remove unused or expired `Resume` labels. | `DELETE /1/labels/{id}` |
 | T3 | MUST | Add and remove a label on a card by label ID. | `POST /1/cards/{id}/idLabels`, `DELETE /1/cards/{id}/idLabels/{idLabel}` |
 | T4 | MUST | Labels keep their ID when the user renames or recolours them. | — |

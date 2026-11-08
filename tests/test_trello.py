@@ -170,3 +170,11 @@ def test_credentials_never_in_errors(fake, board, virtual_time):
     with pytest.raises(KankanError) as exc:
         TrelloClient(KEY, TOKEN, base_url="http://127.0.0.1:1", timeout=0.2).me()
     assert KEY not in str(exc.value) and TOKEN not in str(exc.value)
+
+
+def test_rate_bucket_waits(monkeypatch, virtual_time):
+    from kankan.trello import _RateBucket
+    bucket = _RateBucket(limit=3, window=10.0)
+    for _ in range(4):
+        bucket.take()
+    assert virtual_time[0] >= 9.0

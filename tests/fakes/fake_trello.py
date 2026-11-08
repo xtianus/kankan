@@ -268,6 +268,11 @@ class FakeTrello:
         st = self.state
         if parts == ["members", "me"] and method == "GET":
             return 200, self.me
+        if parts[0] == "members" and len(parts) == 2 and method == "GET":
+            for member in self.members.values():
+                if member["username"] == parts[1] or member["id"] == parts[1]:
+                    return 200, member
+            return 404, "member not found"
         if parts[0] == "boards":
             board = self._find("boards", parts[1])
             if board is None:

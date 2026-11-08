@@ -22,6 +22,8 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.invalid")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    from kankan import trello
+    monkeypatch.setattr(trello._BUCKET, "limit", 10 ** 9)
     return home
 
 
