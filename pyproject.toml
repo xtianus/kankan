@@ -31,3 +31,4 @@ markers = [
     "slow: slow tests",
 ]
 addopts = "-m 'not trello_live'"
+filterwarnings = ["ignore:This process .* is multi-threaded:DeprecationWarning"]

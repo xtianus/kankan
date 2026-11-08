@@ -121,6 +121,7 @@ class Config:
     project_name: Optional[str] = None
     worktree_root: Optional[str] = None
     trello_base_url: str = "https://api.trello.com"
+    trello_timeout: float = 5.0
     settle_seconds: float = 3.0
     new_conversation: Dict[str, str] = field(default_factory=dict)
 
