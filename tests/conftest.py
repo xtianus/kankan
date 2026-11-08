@@ -12,6 +12,7 @@ def git(repo, *args, check=True):
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Keep every test away from the real ~/.config, ~/coding/.kankan and skills."""
+    monkeypatch.setenv("KANKAN_REAL_HOME", os.environ.get("KANKAN_REAL_HOME") or os.path.expanduser("~"))
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
