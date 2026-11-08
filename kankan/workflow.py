@@ -40,11 +40,12 @@ def has_hold(project, card: Card) -> bool:
 
 
 def deps_satisfied(project, snap: Snapshot, card: Card) -> bool:
+    from kankan import deps
     try:
-        from kankan import deps
-    except ImportError:
-        return True
-    return deps.dep_status(project, snap, card).ok
+        return deps.dep_status(project, snap, card).ok
+    except KankanError as err:
+        project.log("deps_unreadable", card=card.id, error=err.message)
+        return False
 
 
 def _own_choices(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue]) -> List[Choice]:
