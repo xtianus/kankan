@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Opus 5.5 with medium effort · Claude Pro
+ ▝▝   ▝▝   /…/coding/.kankan/proj/claude-1 · /rc active
+
+
+❯ /clear
+
+❯ Write the numbers 1 to 300, one per line.
+
+● Reading the global core instructions file
+  ⎿  $ cat /home/user/.claude/AGENTS-CORE.md 2>/dev/null || echo "NOT FOUND"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✶ Proofing… (2s · ↓ 175 tokens · thinking with medium effort)
+  ⎿  Tip: Name your conversations with /rename to find them easily in /resume later
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  user@host:/home/user/coding/.kankan/proj/x…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

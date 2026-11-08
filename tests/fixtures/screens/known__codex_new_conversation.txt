@@ -1,0 +1,40 @@
+› Count slowly from 1 to 40, one number per line, then say DONE.
+  14
+  15
+  16
+  17
+  18
+  19
+  20
+  21
+  22
+  23
+  24
+  25
+  26
+  27
+  28
+  29
+  30
+  31
+  32
+  33
+  34
+  35
+  36
+  37
+  38
+  39
+  40
+  DONE
+
+  Worked for 8s • 19:43
+
+
+  Where should the new conversation run?
+
+
+› 1. Use current Git worktree  Keep using the current working directory
+  2. Create new Git worktree   Create a separate checkout of this repository in another directory
+
+  enter select · esc back

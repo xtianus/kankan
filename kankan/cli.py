@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notify", help="Trello user to mention (default: the token owner)")
     p.add_argument("--takeover", action="store_true", help="take over a board bound to another clone")
     p.add_argument("--reauth", action="store_true", help="only acquire new credentials")
+    p = add("adapter", "adapter tools")
+    p.add_argument("action", choices=["check"])
+    p.add_argument("target", help="a seat (e.g. claude-1) or a file with a saved screen")
+    p.add_argument("--type", choices=["claude", "codex"], help="agent type for a screen file")
     # agent commands
     add("task", "show the current task (agent command)")
     p = add("note", "comment progress on the card (agent command)")
@@ -177,3 +181,33 @@ def _cmd_init(args):
         print(f"warning: {warning}", file=sys.stderr)
     return {"board": cfg.board_id, "registry": cfg.registry_id, "warnings": warnings}, \
         f"kankan initialized for board {cfg.board_short}"
+
+
+@command("adapter")
+def _cmd_adapter(args):
+    from pathlib import Path
+    from kankan.adapters import classify, load_adapter
+    from kankan.config import Paths, load_config
+    try:
+        paths = Paths.discover(os.getcwd())
+    except KankanError:
+        paths = None
+    target = Path(args.target)
+    if target.exists():
+        agent_type = args.type or ("codex" if "codex" in target.name else "claude")
+        screen = target.read_text(errors="replace")
+        tail_lines = 30
+    else:
+        from kankan import seats, tmux
+        seat = seats.validate_seat(args.target)
+        agent_type = seats.seat_type(seat)
+        if paths is None:
+            raise KankanError(Status.CONFIG_ERROR, "not inside a kankan project")
+        cfg = load_config(paths)
+        session = tmux.session_name("ai-", paths.project, seat)
+        screen = tmux.Tmux().capture(tmux.Tmux().pane_of_session(session))
+        tail_lines = cfg.tail_lines
+    result = classify(load_adapter(paths, agent_type), screen, tail_lines)
+    data = {"type": agent_type, "state": result.state, "pattern": result.pattern, "answer": result.answer,
+            "resume_at": result.resume_at.isoformat() if result.resume_at else None}
+    return data, f"{result.state} (pattern: {result.pattern})" if result.pattern else result.state

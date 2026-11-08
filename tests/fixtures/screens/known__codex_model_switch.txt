@@ -1,0 +1,7 @@
+  Switch to gpt-6-mini for lower credit usage?
+
+› 1. Switch to gpt-6-mini
+  2. Keep current model
+  3. Keep current model (never show again)
+
+  enter select · esc back

@@ -1,0 +1,9 @@
+  Some earlier output
+
+  ⎿  You've hit your session limit · resets 4pm (Europe/Rome)
+     /upgrade to increase your usage limit.
+
+────────────────────────────────
+❯ 
+────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

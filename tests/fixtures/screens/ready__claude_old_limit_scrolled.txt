@@ -1,0 +1,45 @@
+  ⎿  You've hit your session limit · resets 3pm
+  line 1 of later output
+  line 2 of later output
+  line 3 of later output
+  line 4 of later output
+  line 5 of later output
+  line 6 of later output
+  line 7 of later output
+  line 8 of later output
+  line 9 of later output
+  line 10 of later output
+  line 11 of later output
+  line 12 of later output
+  line 13 of later output
+  line 14 of later output
+  line 15 of later output
+  line 16 of later output
+  line 17 of later output
+  line 18 of later output
+  line 19 of later output
+  line 20 of later output
+  line 21 of later output
+  line 22 of later output
+  line 23 of later output
+  line 24 of later output
+  line 25 of later output
+  line 26 of later output
+  line 27 of later output
+  line 28 of later output
+  line 29 of later output
+  line 30 of later output
+  line 31 of later output
+  line 32 of later output
+  line 33 of later output
+  line 34 of later output
+  line 35 of later output
+  line 36 of later output
+  line 37 of later output
+  line 38 of later output
+  line 39 of later output
+  line 40 of later output
+────
+❯ 
+────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

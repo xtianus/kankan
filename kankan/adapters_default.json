@@ -1,0 +1,87 @@
+{
+  "_comment": "Default adapters. Override only the keys that change in ~/.config/kankan/agents.json or <gcd>/kankan/agents.json. Patterns are case-insensitive Python regexes applied per line (multiline) to the last lines of the pane, with colours and URLs stripped. Answers are lists of tmux keys; text is sent literally.",
+  "claude": {
+    "command": ["claude"],
+    "new_conversation": "/clear",
+    "submit_key": "Enter",
+    "queue_while_working": true,
+    "ready": ["^❯(\\s|$)"],
+    "working": [
+      "esc.{0,20}to interrupt",
+      "working.{0,40}esc.{0,20}interrupt",
+      "^\\S\\s+\\S[^\\n]{0,60}…\\s*\\(\\d+[hms]",
+      "retrying in",
+      "attempt\\s+\\d+/\\d+"
+    ],
+    "limit": [
+      "you.?ve hit your monthly spend limit",
+      "monthly spend limit",
+      "hit your spend cap",
+      "you.?ve hit your (session|[0-9]+-hour|weekly|usage) limit",
+      "you.?ve (hit|reached|exceeded).{0,80}limit",
+      "(session|weekly|usage|rate)[ -]?limit.{0,30}(reached|exceeded)",
+      "(reached|exceeded).{0,40}(session|weekly|usage|rate)[ -]?limit",
+      "workspace is out of credits",
+      "out of.{0,30}usage",
+      "stop and wait for limit to reset"
+    ],
+    "limit_reset": [
+      "resets?\\s+(at\\s+)?[0-9]{1,2}(:[0-9]{2})?\\s*(am|pm)?",
+      "resets?\\s+(on\\s+)?(mon|tue|wed|thu|fri|sat|sun)",
+      "resets?\\s+(on\\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+      "(resets?|try again)\\s+in[:\\s]+[0-9]",
+      "try again at(\\s|$)"
+    ],
+    "trust": ["quick safety check", "yes, i trust this folder"],
+    "trust_answer": ["Down", "Enter"],
+    "known": []
+  },
+  "codex": {
+    "command": ["codex"],
+    "new_conversation": "/new",
+    "submit_key": "Enter",
+    "queue_while_working": false,
+    "ready": ["^› (?!\\d+\\.)", "\\? for shortcuts"],
+    "working": [
+      "esc.{0,20}to interrupt",
+      "working.{0,40}esc.{0,20}interrupt",
+      "^•\\s+working\\b",
+      "retrying in",
+      "attempt\\s+\\d+/\\d+"
+    ],
+    "limit": [
+      "you.?ve hit your monthly spend limit",
+      "monthly spend limit",
+      "hit your spend cap",
+      "you.?ve hit your (session|[0-9]+-hour|weekly|usage) limit",
+      "you.?ve (hit|reached|exceeded).{0,80}limit",
+      "(session|weekly|usage|rate)[ -]?limit.{0,30}(reached|exceeded)",
+      "(reached|exceeded).{0,40}(session|weekly|usage|rate)[ -]?limit",
+      "workspace is out of credits",
+      "out of.{0,30}usage"
+    ],
+    "limit_reset": [
+      "resets?\\s+(at\\s+)?[0-9]{1,2}(:[0-9]{2})?\\s*(am|pm)?",
+      "resets?\\s+(on\\s+)?(mon|tue|wed|thu|fri|sat|sun)",
+      "resets?\\s+(on\\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+      "(resets?|try again)\\s+in[:\\s]+[0-9]",
+      "try again at(\\s|$)"
+    ],
+    "trust": ["trust this folder\\?"],
+    "trust_answer": ["Enter"],
+    "known": [
+      {
+        "name": "model_switch",
+        "patterns": ["switch to .{1,60} for lower credit usage\\?", "keep current model \\(never show again\\)"],
+        "all": true,
+        "answer": ["3"]
+      },
+      {
+        "name": "new_conversation_location",
+        "patterns": ["where should the new conversation run\\?", "use current git worktree"],
+        "all": true,
+        "answer": ["Enter"]
+      }
+    ]
+  }
+}
