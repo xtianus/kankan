@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("autostart", "start agents at boot (systemd user service)")
     p.add_argument("action", choices=["enable", "disable"])
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
+    add("status", "seats, launcher states, tasks and waiting cards")
+    add("claims", "card refs with phase, holder, age and branch")
     p = add("skill", "install the shared kankan skill for Claude Code and Codex")
     p.add_argument("action", choices=["install"])
     p.add_argument("--force", action="store_true")
@@ -370,3 +372,17 @@ def _cmd_skill(args):
     from kankan.skill_install import skill_install
     lines = skill_install(args.force)
     return {"installed": lines}, "\n".join(lines)
+
+
+@command("status")
+def _cmd_status(args):
+    from kankan import diag
+    data = diag.status(_project())
+    return data, diag.status_text(data)
+
+
+@command("claims")
+def _cmd_claims(args):
+    from kankan import diag
+    rows = diag.claims(_project())
+    return rows, diag.claims_text(rows)
