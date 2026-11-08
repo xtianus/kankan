@@ -7,3 +7,7 @@ Status: specification and implementation plan; no code yet.
 - Specification: [aispecs/kankan_spec.md](aispecs/kankan_spec.md)
 - Kanban backend requirements: [aispecs/kanban_requirements.md](aispecs/kanban_requirements.md)
 - Implementation plan: [aiplans/2026-11-08-kankan.md](aiplans/2026-11-08-kankan.md)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
