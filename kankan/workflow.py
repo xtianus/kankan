@@ -24,7 +24,7 @@ class Claimed:
 
 @dataclass
 class Choice:
-    kind: str  # impl, review, resume_impl, resume_review, hold_yield, hold_wip
+    kind: str  # impl, review, resume_impl, resume_review, hold_yield, hold_wip, moved_yield, moved_wip
     card: Card
     ref: Optional[RefValue]
 
@@ -56,14 +56,26 @@ def _own_choices(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue
             if meta.get("owner") != lease.seat or meta.get("phase") != phase:
                 continue
             card = snap.cards.get(card_id)
-            if card is None or card.list_id != meta.get("target_list"):
-                continue  # convergence or the user-move safety net handles it
+            if card is None or card.list_id not in (meta.get("target_list"), meta.get("from_list")):
+                # §14.6: moved out of the seat's lists, archived or deleted by the user
+                fetched = card or project.trello.card(card_id) or _gone_card(card_id, meta)
+                dirty = worktrees.dirty_files(project.paths.seat_worktree(lease.seat))
+                result.append(Choice("moved_wip" if dirty else "moved_yield", fetched, value))
+                continue
+            if card.list_id != meta.get("target_list"):
+                continue  # lagging move: convergence completes it
             if has_hold(project, card):
                 dirty = worktrees.dirty_files(project.paths.seat_worktree(lease.seat))
                 result.append(Choice("hold_wip" if dirty else "hold_yield", card, value))
             else:
                 result.append(Choice(f"resume_{phase}", card, value))
     return result
+
+
+def _gone_card(card_id: str, meta: dict) -> Card:
+    """Placeholder for a card deleted on Trello (``closed`` and no list)."""
+    return Card(id=card_id, short=meta.get("short", ""), board_id="", name="", desc="", url="", list_id="",
+                pos=0, label_ids=[], attachments=[], closed=True, last_activity="", )
 
 
 def review_candidates(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue]) -> List[Choice]:
@@ -228,6 +240,7 @@ def tick(project, lease: Lease) -> Optional[dict]:
             return task
         if choice.kind in ("impl", "review"):
             return None
+        refs = card_refs(project)
 
 
 def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
@@ -249,9 +262,26 @@ def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
         return _store_task(project, lease, "review", choice.card, claimed.meta.branch, resumed=False)
     if kind == "hold_wip":
         return _store_task(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
+    if kind in ("moved_yield", "moved_wip"):
+        cause = _user_cause(project, choice.card)
+        if kind == "moved_yield":
+            from kankan import agentcmds
+            agentcmds.kankan_yield(project, lease, None if cause == "user_deleted" else choice.card, choice.ref, cause)
+            project.log("user_move_yield", card=choice.card.id, cause=cause)
+            return None
+        task = _store_task(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
+        update_state(project.paths, lease.seat, lambda s: s.task.__setitem__("suspend_cause", "user_moved"))
+        task["suspend_cause"] = "user_moved"
+        return task
     _prepare_resume(project, lease, choice)
     return _store_task(project, lease, kind.replace("resume_", ""), choice.card, choice.ref.meta.get("branch"),
                        resumed=True)
+
+
+def _user_cause(project, card: Card) -> str:
+    if card.closed and not card.list_id:
+        return "user_deleted"
+    return "user_archived" if card.closed else "user_moved"
 
 
 def _store_task(project, lease: Lease, kind: str, card: Card, branch: Optional[str], resumed: bool) -> dict:

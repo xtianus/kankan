@@ -137,7 +137,7 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
                 moved = False
                 project.log("move_failed", card=card.id, target=new.target_list, error=err.message)
         faults.point("after_move")
-        if comment and fresh is not None:
+        if comment and fresh is not None and not fresh.closed:
             try:
                 project.trello.add_comment(card.id, comment, op_id)
             except KankanError as err:
