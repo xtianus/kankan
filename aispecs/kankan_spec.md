@@ -3,7 +3,7 @@
 **Status:** specification v1.1 (English translation)
 **Date:** 2026-11-08
 **Related documents:** `kanban_requirements.md` (requirements for backends other than Trello)
-**Language:** this specification, the implementation plan, the code and code comments are in English; the user manual is in Italian. This document is a translation of the original Italian v1.1.
+**Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual. This document is a translation of the original Italian v1.1.
 
 ## 1. Purpose
 
@@ -677,7 +677,7 @@ All phases are designed in this specification; the order makes each step verifia
 | 2. Processes and launcher | `agent`, `up`, `autostart`, supervisor, launcher and state machine, adapters and `adapter check`, pane observation and writes, trust window, `Resume`, `SKILL.md`, fake agent | 8–10, 14, 15, 31–36, 40 |
 | 3. Review and integration | review claim, `sync`, `verify`, `integrate` with transaction and receipt, `block` with dedicated worktree, `resolve` | 16, 17, 23–26 |
 | 4. Communication and policies | `HOLD` and `yield`, `ask`/`fail` with comment forwarding, dependencies, cards moved by the user | 18, 19, 28–30 |
-| 5. Diagnostics and documentation | `status`, `claims`, `reconcile [--fix]`, `release --force`, `seat recover`, `seat remove`, `purge-remote`, user manual in Italian | cross-cutting |
+| 5. Diagnostics and documentation | `status`, `claims`, `reconcile [--fix]`, `release --force`, `seat recover`, `seat remove`, `purge-remote`, user manual | cross-cutting |
 
 ## 20. Out of scope
 

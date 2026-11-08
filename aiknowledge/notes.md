@@ -9,7 +9,7 @@
 ## Conventions
 
 - Python code uses 4-space indentation (PEP 8), overriding the global tabs rule.
-- Code, comments, specs and plans are in English; the user manual is in Italian.
+- Everything is in English: code, comments, specs, plans, user manual and user-facing messages.
 
 ## Rules
 
