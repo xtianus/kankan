@@ -32,10 +32,10 @@ Requirement levels:
 | ID | Level | Capability | Trello endpoint used by kankan |
 |---|---|---|---|
 | B1 | MUST | Resolve a board from the URL the user pastes (short code or slug) to its stable ID. | `GET /1/boards/{shortLink}` |
-| B2 | MUST | Read and update a free-text board description, preserving the content outside kankan's delimited block. Used for the board↔registry binding. | `GET /1/boards/{id}?fields=desc`, `PUT /1/boards/{id}` (`desc`) |
-| B3 | MUST | Read all open cards of a board in one request, including list ID, position, labels, attachments, title, description, URL and archived state. | `GET /1/boards/{id}/cards?attachments=true&fields=...` |
-| B4 | MUST | Read all lists of a board with ID, name, position and archived state. | `GET /1/boards/{id}/lists?filter=all` |
-| B5 | MUST | Read all labels defined on a board. | `GET /1/boards/{id}/labels` |
+| B2 | MUST | Read and update a free-text board description, preserving the content outside kankan's delimited block. Used for the board↔registry binding. | read through the nested board read of B3; `PUT /1/boards/{id}` (`desc`) |
+| B3 | MUST | Read in **one request** the board description, all lists, all open cards (list ID, position, labels, attachments, title, description, URL, archived state) and all labels. kankan performs this read on every launcher cycle and before every state-changing command. | `GET /1/boards/{id}?fields=name,desc&lists=all&cards=open&card_attachments=true&card_attachment_fields=url&labels=all&labels_limit=1000&...` (nested resources) |
+| B4 | MUST | Read all lists of a board with ID, name, position and archived state. | part of the B3 read (`lists=all&list_fields=name,closed,pos`); `GET /1/boards/{id}?lists=open` to find a list by name after a create that timed out |
+| B5 | MUST | Read all labels defined on a board, more than 50 included. | part of the B3 read (`labels_limit=1000`); `GET /1/boards/{id}/labels?limit=1000[&before=...]` when 1000 labels come back, and to find a label by name after a create that timed out |
 | B6 | SHOULD | Read board members, to resolve the username to mention. | `GET /1/boards/{id}/members` |
 
 ## 4. Lists (columns)
@@ -54,7 +54,7 @@ Requirement levels:
 |---|---|---|---|
 | C1 | MUST | Read one card by ID with list, labels, attachments, title, description, URL, archived state and last activity. Used for the reread after a claim and for verification after every move. | `GET /1/cards/{id}?attachments=true` |
 | C2 | MUST | Resolve a card from a short, URL-safe, globally unique code that is stable across board moves. kankan puts this code in branch names. | `shortLink`; `GET /1/cards/{shortLink}` |
-| C3 | MUST | Move a card to another list of the same board and place it at the top. | `PUT /1/cards/{id}` (`idList`, `pos=top`) |
+| C3 | MUST | Move a card to another list of the same board and place it at the top. kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top`) then `GET /1/cards/{id}` |
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
 | C6 | SHOULD | Card creation and deletion through the API. Not used by kankan in production; required by the live test suite. | `POST /1/cards`, `DELETE /1/cards/{id}` |
@@ -74,7 +74,7 @@ Requirement levels:
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
 | M1 | MUST | Add a plain-text or Markdown comment to a card. | `POST /1/cards/{id}/actions/comments` |
-| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp). Used to forward the user's answers to a waiting agent. | `GET /1/cards/{id}/actions?filter=commentCard&since=...` |
+| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp), with pagination. Used to forward the user's answers to a waiting agent and to find kankan's own comment (by its `kankan:<op-id>` marker) after a comment post timed out. | `GET /1/cards/{id}/actions?filter=commentCard&since=<action id>&before=<action id>&limit=50` |
 | M3 | MUST | Mentioning a user in a comment (e.g. `@username`) sends that user a notification (app, push or email). This is how kankan alerts the user about Question, Error and Blocked. | Trello `@mention` behaviour |
 | M4 | SHOULD | React to a comment or reply to it, to acknowledge that a comment was forwarded. Workaround: post a new comment. | `POST /1/actions/{id}/reactions` |
 | M5 | MUST | Identify the authenticated user (ID and username). | `GET /1/members/me` |
