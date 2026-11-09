@@ -352,7 +352,9 @@ def write_agent_file(project, seat: str, session: str, worktree) -> None:
     shared daemon): kept in the seat worktree's private git directory, never in the working tree."""
     gitdir = _worktree_gitdir(worktree)
     if gitdir is not None:
-        atomic_write_json(gitdir / AGENT_FILE, {"seat": seat, "session": session, "project": project.paths.project})
+        from kankan.build import code_id
+        atomic_write_json(gitdir / AGENT_FILE, {"seat": seat, "session": session, "project": project.paths.project,
+                                                "code": code_id()})
 
 
 def read_agent_file(cwd) -> Optional[dict]:

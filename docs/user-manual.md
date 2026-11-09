@@ -18,6 +18,8 @@ kankan skill install                   # links the shared skill into ~/.claude/s
 kankan doctor                          # checks git, tmux, the agents and their login, the skill, PATH; fixes what it can
 ```
 
+`pipx install` builds a **copy** of kankan: later changes to `/path/to/kankan` have no effect until you reinstall it (`pipx install --force /path/to/kankan`). Restart the agents after reinstalling: an agent's kankan commands refuse to run when kankan changed since its launcher started. Editable installs (`pip install -e`) are only for developing kankan itself.
+
 kankan uses only the Python standard library. `kankan` must be on your **login** `PATH` (for example `~/.local/bin`): Codex runs its shell commands through a background service that sees only that `PATH`, not the environment kankan gives the agent. `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning. Agents always run the same kankan as their launcher, through a small wrapper in `<git dir>/kankan/bin`.
 
 ## 3. Binding a project to a board

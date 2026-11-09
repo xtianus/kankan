@@ -133,3 +133,26 @@ def test_agent_file_with_old_session_is_not_owner(agent, capsys, monkeypatch):
     seats.write_agent_file(project, lease.seat, "stale-session", wt)
     code, out = run(capsys, "task")
     assert code == 31 and out["status"] == "not_owner"
+
+
+def test_agent_command_refuses_other_kankan_code(agent, capsys, monkeypatch):
+    """The launcher records the kankan code it runs; an agent command running different code refuses."""
+    from kankan import build
+    project, fake, lease, task, wt, card = agent
+    seats.write_agent_file(project, lease.seat, lease.session, wt)
+    code, out = run(capsys, "task")
+    assert code == 0
+    monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
+    code, out = run(capsys, "task")
+    assert code == 40 and out["status"] == "config_error" and "restart the agents" in out["message"]
+
+
+def test_code_id_changes_with_the_code(tmp_path, monkeypatch):
+    from kankan import build
+    pkg = tmp_path / "kankan"
+    pkg.mkdir()
+    (pkg / "a.py").write_text("x = 1\n")
+    first = build.code_id(pkg)
+    assert first == build.code_id(pkg) and len(first) == 12
+    (pkg / "a.py").write_text("x = 2\n")
+    assert build.code_id(pkg) != first

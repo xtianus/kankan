@@ -89,9 +89,12 @@ It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # once: kankan on the login PATH (Codex needs it)
+ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # kankan on the login PATH (Codex needs it); see below
 .venv/bin/python -m tests.live.agents_e2e    # options: --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
+rm ~/.local/bin/kankan                       # after testing (or reinstall your pipx copy over it)
 ```
+
+The link points to the editable install: every kankan started through it, by any agent on any project, runs `~/coding/kankan` as it is at that moment, including unfinished edits and whatever branch is checked out. Keep it only while you test, and do not run agents on real projects meanwhile; for real projects use a separate copy (`pipx install ~/coding/kankan`, from a commit you trust). If kankan's code changes while agents run, their commands refuse to run until the agents are restarted (the launcher records the code it started with).
 
 What it does:
 

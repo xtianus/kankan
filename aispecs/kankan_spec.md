@@ -572,7 +572,7 @@ Checks the machine and, inside a clone, the project; fixes what is safe and prin
 
 ### 16.2 Agent commands
 
-They identify the seat with `KANKAN_SEAT` and `KANKAN_SESSION`; when the agent runs commands without its environment (Codex hands them to a shared background service), they fall back to `kankan-agent.json`, written by the launcher in the seat worktree's private Git directory with the seat and current session. They verify ownership and act on the current task: `task`, `note`, `sync`, `verify --tested <hash>`, `integrate --tested <hash>`, `done`, `ask`, `fail`, `block`, `yield`.
+They identify the seat with `KANKAN_SEAT` and `KANKAN_SESSION`; when the agent runs commands without its environment (Codex hands them to a shared background service), they fall back to `kankan-agent.json`, written by the launcher in the seat worktree's private Git directory with the seat and current session. The seat file also records an identifier of the launcher's kankan code (a hash of the package files); an agent command running different code (kankan edited or upgraded since the launcher started) refuses with `config_error` and asks to restart the agents. They verify ownership and act on the current task: `task`, `note`, `sync`, `verify --tested <hash>`, `integrate --tested <hash>`, `done`, `ask`, `fail`, `block`, `yield`.
 
 ### 16.3 Internal commands
 
