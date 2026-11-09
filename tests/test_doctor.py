@@ -289,6 +289,9 @@ def test_agent_session_path(kproject, tmp_path, monkeypatch):
         def sessions(self):
             return []
 
+        def sessions_with_option(self, option):
+            return {}
+
         def has_session(self, name):
             return False
 
