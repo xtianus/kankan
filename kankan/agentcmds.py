@@ -230,7 +230,9 @@ def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, templa
     _own_ref(ctx, cards.OWNED_PHASES)
     card_id = current["card"]
     project.trello.add_label(card_id, label_id)
-    mention = f" @{project.cfg.notify_username}" if project.cfg.notify_username else ""
+    from kankan import notify
+    mention = notify.mention(project, card_id)
+    mention = f" {mention}" if mention else ""
     op_id = f"{cause}-" + hashlib.sha1(f"{current['id']}\0{text}".encode()).hexdigest()[:16]
     comment = project.trello.comment_once(card_id, template.format(seat=ctx.seat, text=text) + mention, op_id)
 

@@ -99,7 +99,7 @@ def test_init_warns_when_integration_branch_checked_out(git_repo, env):
 def test_config_keys(git_repo):
     from kankan.config import Config
     base = dict(board_id="b", board_short="s", registry_id="r", backlog="", done="", blocked="", label_hold="",
-                label_question="", label_error="", notify_id="", notify_username="", test_command="")
+                label_question="", label_error="", test_command="")
     assert Config.from_dict({**base, "main_branch": "main"}).integration_branch == "main"
     assert Config.from_dict({**base, "main_branch": "main", "integration_branch": "x"}).integration_branch == "x"
     assert "main_branch" not in Config.from_dict({**base, "main_branch": "main"}).to_dict()

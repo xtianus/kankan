@@ -106,14 +106,6 @@ def live_credentials_path() -> Optional[Path]:
     return path if path.exists() else None
 
 
-def live_notify() -> Optional[str]:
-    """``kankan.test.notify`` from the test properties: the human who answers when the token is the bot's."""
-    from kankan.properties import PropertiesFile
-    path = live_credentials_path()
-    value = PropertiesFile.load(path).get("kankan.test.notify") if path else None
-    return value.strip().lstrip("@") or None if value else None
-
-
 def _answer(question: str) -> str:
     if "adopt it?" in question:
         return "y"
@@ -122,8 +114,7 @@ def _answer(question: str) -> str:
     return ""
 
 
-def bind(clone: Path, base: Path, board_url: str, credentials: Path, notify: Optional[str],
-         say: Callable[[str], None]) -> Config:
+def bind(clone: Path, base: Path, board_url: str, credentials: Path, say: Callable[[str], None]) -> Config:
     """``kankan init`` on the test board (taking it over), then the run's configuration."""
     from kankan.init import parse_board_url
     client = _client_for(credentials)
@@ -132,7 +123,7 @@ def bind(clone: Path, base: Path, board_url: str, credentials: Path, notify: Opt
         if block:
             say(f"taking over the test board from {block.get('host')}:{block.get('path')}; that clone's agents "
                 "will stop")
-    init(clone, board_url, credentials=credentials, notify=notify, takeover=True, prompt=_answer, say=say)
+    init(clone, board_url, credentials=credentials, takeover=True, prompt=_answer, say=say)
     paths = Paths.discover(clone)
     cfg = load_config(paths)
     cfg.project_name = PROJECT_NAME
@@ -230,11 +221,11 @@ EXPECTED_FILES = {
 }
 
 
-def user_answers(client: TrelloClient, card_id: str, notify_id: str) -> List[str]:
-    """Comments of the configured member without a kankan marker, oldest first (the filter of forward.poll)."""
+def user_answers(client: TrelloClient, card_id: str, kankan_id: str) -> List[str]:
+    """Comments not written by kankan's account and without a kankan marker, oldest first (notify.is_answer)."""
     from kankan.trello import MARKER_PREFIX
     return [c.text for c in client.comments(card_id)
-            if c.member_id == notify_id and f"`{MARKER_PREFIX}" not in c.text]
+            if c.member_id != kankan_id and f"`{MARKER_PREFIX}" not in c.text]
 
 
 def _events(project) -> List[dict]:
@@ -331,7 +322,7 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
             problems.append(f"{card.name}: {len(found)} merges on {branch} instead of 1")
         elif _rev(repo, f"{found[0]['merge']}^2") != found[0]["tested"]:
             problems.append(f"{card.name}: Kankan-Tested is not the merge's second parent")
-    answers = user_answers(client, cards["ask"].id, cfg.notify_id) if ask_ran and "ask" in cards else []
+    answers = user_answers(client, cards["ask"].id, cfg.kankan_member_id) if ask_ran and "ask" in cards else []
     if ask_ran and not answers:
         problems.append("ask: the user's answer was not found on the card")
     for key, (path, check, what) in EXPECTED_FILES.items():

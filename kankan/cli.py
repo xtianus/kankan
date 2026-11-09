@@ -52,7 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("init", "bind this clone to a Trello board")
     p.add_argument("url", nargs="?")
     p.add_argument("--credentials", help=".properties file holding the Trello key and token")
-    p.add_argument("--notify", help="Trello user to mention (default: the token owner)")
     p.add_argument("--takeover", action="store_true", help="take over a board bound to another clone")
     p.add_argument("--reauth", action="store_true", help="only acquire new credentials")
     p = add("agent", "start an agent in tmux")
@@ -294,7 +293,7 @@ def _cmd_tick(args):
 def _cmd_init(args):
     from pathlib import Path
     from kankan.init import init
-    cfg, warnings = init(os.getcwd(), args.url, Path(args.credentials) if args.credentials else None, args.notify,
+    cfg, warnings = init(os.getcwd(), args.url, Path(args.credentials) if args.credentials else None,
                          args.takeover, args.reauth)
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)

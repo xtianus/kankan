@@ -39,20 +39,20 @@ Trello never notifies you about your own actions. If kankan uses **your** token,
    3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. Copy the **API key** (kankan does not need the *Secret*).
 4. Still logged in as the bot, get the token: on the same **Trello Auth** tab click the **Token** link next to the API key, check that the page names your app, press **Allow** and copy the token. Key, app and token all belong to the bot; your own account only owns the boards.
    - This token also has the `account` scope (it could change the bot's own profile), which kankan does not need; for a dedicated bot account that is harmless. For the minimal scope, open instead the URL that `kankan init` prints when it asks for the token (`scope=read,write`).
-5. Keep the key and the token at hand: `kankan init` asks for them ([section 3.2](#32-kankan-init)), or put them in a `.properties` file and pass it with `--credentials`. Run `init` with `--notify <your Trello username>`: by default kankan mentions the token's owner, which is the bot.
+5. Keep the key and the token at hand: `kankan init` asks for them ([section 3.2](#32-kankan-init)), or put them in a `.properties` file and pass it with `--credentials`. 
 
-If a clone already uses your own token, switch it to the bot with `kankan init --reauth`, then `kankan init --notify <your Trello username>`.
+If a clone already uses your own token, switch it to the bot with `kankan init --reauth`. kankan treats every comment of its token's owner as its own: with your own token your answers would be ignored, so `kankan init` and `kankan doctor` complain when the token's owner is an admin of the board.
 
 Trello does not let you reset an API key, so keep the key and the token private; the token stays valid until it is revoked from the bot's account settings.
 
-Your answers keep working: kankan forwards to the agent only comments written by the notify user (you) without kankan's marker, and ignores the bot's own comments. `kankan init` and `kankan doctor` warn while the notify user is the token owner.
+Who gets notified: kankan mentions the person who created the card; for cards kankan created itself, the board's admins. Who can answer: any member of the board except kankan's own account; comments by people outside the board are ignored.
 
 ### 3.2 `kankan init`
 
 Run once in the project clone (for example `~/coding/myproject`):
 
 ```bash
-kankan init https://trello.com/b/<shortLink>/<name> --notify <your Trello username> [--credentials <file.properties>]
+kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.properties>]
 ```
 
 `init` ([spec §6.1](../aispecs/kankan_spec.md#61-kankan-init-board-url)):
@@ -124,7 +124,7 @@ With only one agent type running, implemented cards wait in `Implemented`; `kank
 | `Error` | the agent or kankan needs help | read the comment; fix, then remove the label |
 | `Resume YYYY-MM-DD hh:mm` | usage limit until then | nothing |
 
-Your comment is forwarded to the waiting agent once, and kankan replies "forwarded to the agent". If that reply does not appear, repeat the comment. Only comments by the configured user (`--notify`) are forwarded.
+Your comment is forwarded to the waiting agent once, and kankan replies "forwarded to the agent". If that reply does not appear, repeat the comment. Comments by any board member are forwarded, except kankan's own and those of people outside the board.
 
 `HOLD` on a card that was already integrated cannot stop it: the card goes to `Done` with a comment telling how to revert it.
 

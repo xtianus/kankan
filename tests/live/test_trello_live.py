@@ -31,6 +31,8 @@ def test_live_snapshot_move_label_comment(live_board, run_prefix):
     desc = client.board(board["id"])["desc"]
     client.set_board_desc(board["id"], desc)
     assert client.member(me["username"])["id"] == me["id"]
+    assert client.card_creator(card.id)[0] == me["id"]  # the token's owner created it
+    assert me["id"] in {member_id for member_id, _, _ in client.board_members(board["id"])}
     client.delete_label(label.id)
     created["labels"].remove(label.id)
     client.archive_list(second.id)

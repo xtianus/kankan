@@ -58,10 +58,9 @@ The configuration stays outside the repository. Either create `~/.config/kankan/
 kankan.test.board.url=https://trello.com/b/<shortLink>/<name>
 kankan.trello.key=<the bot's key>
 kankan.trello.token=<the bot's token>
-kankan.test.notify=<your Trello username>
 ```
 
-`kankan.test.notify` is the human who answers questions in the live run of [section 3.5](#35-live-run-with-real-agents) (the `--notify` option overrides it). Without it, kankan mentions the owner of the token, the bot, and accepts answers only from the bot: your replies would be ignored and the run would time out. The runner warns when the notify user owns the token.
+kankan acts as the bot: in the live run of [section 3.5](#35-live-run-with-real-agents) it mentions you as the test board's admin (it creates the run's cards itself) and forwards your answers, since they come from a board member other than the bot.
 
 or set environment variables:
 
@@ -93,7 +92,7 @@ It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any
 ```bash
 .venv/bin/pip install -e '.[dev]'
 ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # kankan on the login PATH (Codex needs it); see below
-.venv/bin/python -m tests.live.agents_e2e --keep   # options: --clean --clean-only --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
+.venv/bin/python -m tests.live.agents_e2e --keep   # options: --clean --clean-only --no-ask --no-hold --timeout 60 --keep --base DIR
 rm ~/.local/bin/kankan                       # after testing (or reinstall your pipx copy over it)
 ```
 
@@ -106,7 +105,7 @@ What it does:
 3. Creates the cards, named `ke-<timestamp>-<random> <title>`: *Say hello*, *Type one random word*, *What's your name* (each appends to a file), *Ask for a colour* (the agent asks you), *Count slowly* (counts to 5 with pauses, for HOLD), and a merge request of a branch `user-work` holding a `user.txt` commit.
 4. Starts `kankan up claude=1 codex=1` on your default tmux server and prints the board URL and `tmux attach -t ai-kankan-e2e-claude-1` / `ai-kankan-e2e-codex-1` (detach with `Ctrl-b d`).
 5. Watches the board every 10 s, printing each card's list and labels when they change, and rings the bell when you are needed:
-   - the colour card gets `Question`: answer with a comment on the card, from the Trello account that owns the token (or the one given with `--notify`);
+   - the colour card gets `Question`: answer with a comment on the card from your own account (any board member except the bot);
    - the slow card enters an `In Progress` list: add `HOLD` to it; when it is back in `Backlog`, remove `HOLD` so it resumes from its branch.
 6. When every card is in `Done` it waits up to 5 minutes for the side effects (ref deletion, labels, push), then verifies: one merge per card on `kankan-agents` with correct trailers, file contents, `main` and `user-work` untouched, origin up to date, each card reviewed by the other agent type, the HOLD suspension and resumption on the same branch, a clean `kankan reconcile`.
 7. Stops the agents, deletes its cards and its registry block, and removes the run directory on success. On failure, timeout or Ctrl-C it first saves pane captures, `log.jsonl` and `kankan status` in `<run dir>/diagnostics/` and keeps the run directory.

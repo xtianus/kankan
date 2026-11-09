@@ -11,8 +11,9 @@ from kankan.seatstate import update_state
 RESUME_PREFIX = "Resume "
 
 
-def _mention(project) -> str:
-    return f"@{project.cfg.notify_username}" if project.cfg.notify_username else ""
+def _mention(project, card_id: str) -> str:
+    from kankan import notify
+    return notify.mention(project, card_id)
 
 
 def set_label(project, card_id: str, label_id: str, cause: str, seat: Optional[str],
@@ -24,7 +25,7 @@ def set_label(project, card_id: str, label_id: str, cause: str, seat: Optional[s
             state.label_causes.setdefault(card_id, {})[label_id] = {"cause": cause, "at": clock.iso(clock.now())}
         update_state(project.paths, seat, record)
     if comment:
-        text = f"{comment} {_mention(project)}".rstrip() if mention else comment
+        text = f"{comment} {_mention(project, card_id)}".rstrip() if mention else comment
         project.trello.add_comment(card_id, text, op_id or f"label-{label_id}-{cause}-{clock.iso(clock.now())}")
     project.log("label_set", card=card_id, label=label_id, cause=cause, seat=seat)
 

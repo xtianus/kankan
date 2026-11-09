@@ -138,7 +138,7 @@ def test_comments_paginated_oldest_first(fake, board, virtual_time):
         fake.user_comment(card["id"], f"c{i}")
     comments = client(fake).comments(card["id"], since=first["id"])
     assert [c.text for c in comments] == [f"c{i}" for i in range(1, 120)]
-    assert comments[0].username == "kankanbot"
+    assert comments[0].username == "boardowner"
 
 
 def test_lists_and_desc(fake, board, virtual_time):

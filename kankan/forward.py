@@ -32,7 +32,8 @@ def poll(launcher) -> None:
         return
     if not new:
         return
-    wanted = [c for c in new if c.member_id == project.cfg.notify_id and f"`{MARKER_PREFIX}" not in c.text]
+    from kankan import notify
+    wanted = notify.answers(project, new)
     newest = max(c.id for c in new)
 
     def save(st):

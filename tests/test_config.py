@@ -16,7 +16,7 @@ from kankan.trello import TList
 def make_cfg(**kw):
     base = dict(board_id="b" * 24, board_short="Ab12Cd34", registry_id="reg1", backlog="1" * 24, done="2" * 24,
                 blocked="3" * 24, label_hold="4" * 24, label_question="5" * 24, label_error="6" * 24,
-                notify_id="7" * 24, notify_username="me", test_command="")
+                test_command="")
     base.update(kw)
     return Config(**base)
 

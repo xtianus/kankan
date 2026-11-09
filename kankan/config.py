@@ -102,8 +102,6 @@ class Config:
     label_hold: str
     label_question: str
     label_error: str
-    notify_id: str
-    notify_username: str
     test_command: str
     test_timeout: int = 1800
     integration_branch: str = "kankan-agents"
@@ -125,6 +123,8 @@ class Config:
     trello_timeout: float = 5.0
     settle_seconds: float = 3.0
     new_conversation: Dict[str, str] = field(default_factory=dict)
+    kankan_member_id: str = ""  # kankan's own Trello account (the token owner)
+    kankan_username: str = ""
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)

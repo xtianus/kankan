@@ -1,6 +1,6 @@
 """Manual live run with real Claude Code and Codex agents on the Trello test board.
 
-    .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--timeout MIN] [--keep] [--notify USER]
+    .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--timeout MIN] [--keep]
                                               [--base DIR]
 
 Never collected by pytest. See docs/developer-manual.md §3.5.
@@ -92,7 +92,8 @@ class Watch:
         cfg = self.cfg
         ask = state.get("ask")
         if ask is not None and cfg.label_question in ask.label_ids and not self.ask_prompted:
-            alert(f"The agent asks a question on {ask.url}\n    Reply with a card comment as @{cfg.notify_username}, "
+            alert(f"The agent asks a question on {ask.url}\n    Reply with a card comment from your account (not "
+                  f"@{cfg.kankan_username}), "
                   "for example: blue")
             self.ask_prompted = True
         hold = state.get("hold")
@@ -206,7 +207,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "ai-kankan-e2e-* tmux sessions, ke-/kt- cards and the registry block on the test board, "
                         "kankan-e2e-ke-* run directories")
     parser.add_argument("--clean-only", action="store_true", help="like --clean, then exit without running")
-    parser.add_argument("--notify", help="Trello user who answers (default: the token owner)")
     parser.add_argument("--base", help="directory for the run directory (default: the system temp dir)")
     args = parser.parse_args(argv)
 
@@ -252,11 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok = False
     try:
         clone, origin = es.make_repos(run_dir)
-        cfg = es.bind(clone, run_dir, board_url, creds, args.notify or es.live_notify(), say)
-        if client.me().get("id") == cfg.notify_id:
-            alert(f"kankan will accept answers only from @{cfg.notify_username}, the owner of the Trello token. If "
-                  "that is the kankan bot, stop now (Ctrl-C) and rerun with --notify <your username>, or add "
-                  "kankan.test.notify=<your username> to the test properties.")
+        cfg = es.bind(clone, run_dir, board_url, creds, say)
         from kankan import doctor
         from kankan.integrate import merge_request
         from kankan.project import Project
@@ -283,7 +279,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         say(f"\nBoard: https://trello.com/b/{cfg.board_short}")
         say(f"Watch: tmux attach -t {SESSION_PREFIX}claude-1    |    tmux attach -t {SESSION_PREFIX}codex-1"
             "    (detach with Ctrl-b d)")
-        say(f"Answers to questions come from @{cfg.notify_username}. Run directory: {run_dir}\n")
+        say(f"kankan acts as @{cfg.kankan_username}; answer from your own account. Run directory: {run_dir}\n")
 
         watch = Watch(client, cfg, cards)
         deadline = time.monotonic() + args.timeout * 60

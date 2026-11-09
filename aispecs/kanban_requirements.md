@@ -36,7 +36,9 @@ Requirement levels:
 | B3 | MUST | Read in **one request** the board description, all lists, all open cards (list ID, position, labels, attachments, title, description, URL, archived state) and all labels. kankan performs this read on every launcher cycle and before every state-changing command. | `GET /1/boards/{id}?fields=name,desc&lists=all&cards=open&card_attachments=true&card_attachment_fields=url&labels=all&labels_limit=1000&...` (nested resources) |
 | B4 | MUST | Read all lists of a board with ID, name, position and archived state. | part of the B3 read (`lists=all&list_fields=name,closed,pos`); `GET /1/boards/{id}?lists=open` to find a list by name after a create that timed out |
 | B5 | MUST | Read all labels defined on a board, more than 50 included. | part of the B3 read (`labels_limit=1000`); `GET /1/boards/{id}/labels?limit=1000[&before=...]` when 1000 labels come back, and to find a label by name after a create that timed out |
-| B6 | SHOULD | Resolve a username to the member to mention (`init --notify <user>`). | `GET /1/members/{username}` |
+| B6 | MUST | Read a board's members with their role (admin, normal, observer). Only comments by board members other than kankan's own account are forwarded to an agent; the board's admins are mentioned for cards kankan created. | `GET /1/boards/{id}/memberships?member=true&member_fields=username` |
+| B7 | SHOULD | Read who created a card, to mention that person about it. Without it, kankan mentions the board's admins. | `GET /1/cards/{id}/actions?filter=createCard,copyCard,convertToCardFromCheckItem` (`idMemberCreator`, `memberCreator`) |
+| B8 | MAY | Resolve a username to a member. Used only by the live test suite. | `GET /1/members/{username}` |
 
 ## 4. Lists (columns)
 

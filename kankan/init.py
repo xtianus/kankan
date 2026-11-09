@@ -81,7 +81,7 @@ def _blank_config(cfg_old: Optional[Config]) -> Config:
     if cfg_old is not None:
         return cfg_old
     return Config(board_id="", board_short="", registry_id="", backlog="", done="", blocked="", label_hold="",
-                  label_question="", label_error="", notify_id="", notify_username="", test_command="")
+                  label_question="", label_error="", test_command="")
 
 
 def hook_path(paths: Paths) -> Path:
@@ -125,8 +125,7 @@ def add_excludes(paths: Paths) -> None:
         exclude.write_text(text + "# kankan\n/.kankan/\n")
 
 
-def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Optional[str] = None,
-         takeover: bool = False, reauth: bool = False, prompt: Callable[[str], str] = input,
+def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: bool = False, reauth: bool = False, prompt: Callable[[str], str] = input,
          say: Callable[[str], None] = _say, base_url: Optional[str] = None) -> Tuple[Config, List[str]]:
     """Run the §6.1 steps under the project lock; returns the configuration and warnings."""
     paths = Paths.discover(Path(cwd))
@@ -160,18 +159,8 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Op
         snap = client.snapshot(cfg.board_id)
         _ensure_lists(cfg, cfg_old, client, snap, prompt)
         ensure_labels(cfg, client, snap)
-        if notify:
-            member = client.member(notify.lstrip("@"))
-            if member is None:
-                raise KankanError(Status.USAGE_ERROR, f"Trello user {notify!r} not found")
-            cfg.notify_id, cfg.notify_username = member["id"], member["username"]
-        elif not cfg.notify_id:
-            cfg.notify_id, cfg.notify_username = me["id"], me["username"]
-        if cfg.notify_id == me["id"]:
-            warnings.append(f"kankan will mention @{cfg.notify_username}, the owner of its Trello token: Trello does "
-                            "not send you notifications about your own comments. Use a separate Trello account for "
-                            "kankan's token, then `kankan init --reauth` and `kankan init --notify <your username>` "
-                            "(user manual §3.1)")
+        cfg.kankan_member_id, cfg.kankan_username = me["id"], me["username"]
+        warnings += account_warnings(client, cfg)
         current = cfg.test_command
         hint = f" [{current}]" if current else " (empty for none)"
         answer = prompt(f"Test command run by `kankan verify`{hint}: ").strip()
@@ -189,6 +178,19 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Op
                             "advances)")
         auditlog.append(paths, "init", board=cfg.board_id, registry=cfg.registry_id)
     return cfg, warnings
+
+
+def account_warnings(client: TrelloClient, cfg: Config) -> List[str]:
+    """kankan must act through its own Trello account, invited to boards that people administer (spec §14.2)."""
+    admins = client.board_admins(cfg.board_id)
+    if any(member_id == cfg.kankan_member_id for member_id, _ in admins):
+        u = cfg.kankan_username
+        return [f"the Trello token belongs to @{u}, an admin of this board: kankan treats every comment of its token's "
+                f"owner as its own, so @{u}'s answers would never reach the agents and @{u} would get no notifications. "
+                "Give kankan its own Trello account (user manual §3.1), then `kankan init --reauth`"]
+    if not admins:
+        return ["the board has no admin other than kankan: nobody is notified about the cards kankan creates"]
+    return []
 
 
 def _current_branch(repo: Path) -> Optional[str]:

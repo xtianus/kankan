@@ -62,7 +62,7 @@ def test_init_idempotent(git_repo, env, monkeypatch):
     assert desc.count("--- kankan-registry ---") == 1 and desc.startswith("Our board.")
     assert registry_block(desc)["registry-id"] == cfg1.registry_id
     assert len([l for l in fake.state["lists"].values() if l["name"] == "Backlog"]) == 1
-    assert cfg1.notify_username == "kankanbot"
+    assert cfg1.kankan_username == "kankanbot" and cfg1.kankan_member_id == fake.me["id"]
     assert (git_repo / ".git" / "hooks" / "pre-push").exists()
     assert "/.kankan/" in (git_repo / ".git" / "info" / "exclude").read_text()
 
@@ -143,11 +143,11 @@ def test_init_preserves_properties(git_repo, tmp_path, env, monkeypatch):
     assert KEY not in (git_repo / ".git" / "kankan" / "config.json").read_text()
 
 
-def test_notify_other_user(git_repo, env):
+def test_init_records_kankan_account_and_accepts_a_bot_member(git_repo, env):
     fake, board = env
-    other = fake.add_member("alice")
-    cfg, _ = run_init(git_repo, board, notify="@alice")
-    assert cfg.notify_id == other["id"] and cfg.notify_username == "alice"
+    cfg, warnings = run_init(git_repo, board)
+    assert (cfg.kankan_member_id, cfg.kankan_username) == (fake.me["id"], "kankanbot")
+    assert not any("admin" in w for w in warnings)
 
 
 def test_main_checked_out_warning(git_repo, env):
@@ -158,10 +158,9 @@ def test_main_checked_out_warning(git_repo, env):
     assert any("main is checked out" in w for w in warnings)
 
 
-def test_init_warns_when_notifying_the_token_owner(git_repo, env):
+def test_init_warns_when_the_token_is_a_board_admin(git_repo, env):
+    """Using a person's own token: kankan would take that person's answers for its own comments."""
     fake, board = env
+    fake.state["boards"][board["id"]]["memberships"] = [{"idMember": fake.me["id"], "memberType": "admin"}]
     _, warnings = run_init(git_repo, board)
-    assert any("notifications" in w for w in warnings)
-    human = fake.add_member("human")
-    _, warnings = run_init(git_repo, board, notify="human")
-    assert not any("notifications" in w for w in warnings)
+    assert any("an admin of this board" in w and "own Trello account" in w for w in warnings)

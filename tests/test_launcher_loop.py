@@ -95,7 +95,7 @@ def test_ready_without_signal_sets_error(chain):
     card = fake.add_card(project.cfg.backlog, "c")
     start_agent(tmux, project, scenario={"steps": [{"sleep": 0.2}]})
     assert wait_for(lambda: project.cfg.label_error in card_labels(fake, card), timeout=40)
-    assert wait_for(lambda: any("without a signal" in c and "@kankanbot" in c for c in fake.card_comments(card["id"])))
+    assert wait_for(lambda: any("without a signal" in c and "@boardowner" in c for c in fake.card_comments(card["id"])))
 
 
 def test_unknown_screen_no_write(chain):

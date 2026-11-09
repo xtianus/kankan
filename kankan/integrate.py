@@ -575,7 +575,9 @@ def _block_transition(project, lease, journal) -> None:
     new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None, cause="block",
                                                 target_list=project.cfg.blocked)
     files = ", ".join(journal.get("conflicts") or []) or "none"
-    mention = f" @{project.cfg.notify_username}" if project.cfg.notify_username else ""
+    from kankan import notify
+    mention = notify.mention(project, card.id)
+    mention = f" {mention}" if mention else ""
     comment = messages.BLOCKED.format(seat=lease.seat, reason=journal["reason"], files=files, short=journal["short"]) + mention
     transition(project, lease, card, value, new, comment)
 

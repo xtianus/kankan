@@ -38,8 +38,9 @@ class FakeTrello:
         self.requests = []  # (method, path)
         self.faults = []  # [method, regex, fault, remaining]
         self.timeout_delay = 0.6
-        self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}
-        self.members = {self.me["id"]: self.me}
+        self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}  # the token owner
+        self.owner = {"id": self.new_id(), "username": "boardowner", "fullName": "Board Owner"}  # the human
+        self.members = {self.me["id"]: self.me, self.owner["id"]: self.owner}
         self.state = {"boards": {}, "lists": {}, "cards": {}, "labels": {}, "comments": {}}
         self.prev_state = copy.deepcopy(self.state)
         self.server = None
@@ -75,7 +76,9 @@ class FakeTrello:
 
     def add_board(self, name: str = "board", desc: str = "") -> dict:
         with self.lock:
-            board = {"id": self.new_id(), "name": name, "desc": desc, "shortLink": _short(), "closed": False}
+            board = {"id": self.new_id(), "name": name, "desc": desc, "shortLink": _short(), "closed": False,
+                     "memberships": [{"idMember": self.owner["id"], "memberType": "admin"},
+                                     {"idMember": self.me["id"], "memberType": "normal"}]}
             board["url"] = f"https://trello.com/b/{board['shortLink']}/{name}"
             self.state["boards"][board["id"]] = board
             return board
@@ -93,7 +96,7 @@ class FakeTrello:
             self.state["labels"][label["id"]] = label
             return label
 
-    def add_card(self, list_id: str, name: str = "card", desc: str = "", pos: float = None) -> dict:
+    def add_card(self, list_id: str, name: str = "card", desc: str = "", pos: float = None, creator: str = None) -> dict:
         with self.lock:
             lst = self.state["lists"][list_id]
             short = _short()
@@ -102,7 +105,8 @@ class FakeTrello:
             card = {"id": self.new_id(), "name": name, "desc": desc, "idBoard": lst["idBoard"], "idList": list_id,
                     "pos": pos, "idLabels": [], "shortLink": short,
                     "url": f"https://trello.com/c/{short}/1-{re.sub('[^a-z0-9]+', '-', name.lower())}",
-                    "closed": False, "dateLastActivity": self._now(), "attachments": []}
+                    "closed": False, "dateLastActivity": self._now(), "attachments": [],
+                    "idMemberCreator": creator or self.owner["id"]}
             self.state["cards"][card["id"]] = card
             return card
 
@@ -137,7 +141,7 @@ class FakeTrello:
 
     def user_comment(self, card_id: str, text: str, member_id: str = None) -> dict:
         with self.lock:
-            return self._comment(card_id, text, member_id or self.me["id"])
+            return self._comment(card_id, text, member_id or self.owner["id"])
 
     def _comment(self, card_id: str, text: str, member_id: str) -> dict:
         member = self.members[member_id]
@@ -296,6 +300,13 @@ class FakeTrello:
                 if "desc" in p:
                     board["desc"] = p["desc"]
                 return 200, board
+            if len(parts) == 3 and parts[2] == "memberships" and method == "GET":
+                out = []
+                for m in board.get("memberships", []):
+                    member = self.members[m["idMember"]]
+                    out.append({"idMember": m["idMember"], "memberType": m["memberType"],
+                                "member": {"id": member["id"], "username": member["username"]}})
+                return 200, out
             if len(parts) == 3 and parts[2] == "labels" and method == "GET":
                 labels = sorted((l for l in st["labels"].values() if l["idBoard"] == board["id"]), key=lambda l: l["id"])
                 if p.get("before"):
@@ -332,8 +343,9 @@ class FakeTrello:
             if len(parts) == 1 and method == "POST":
                 if p.get("pos") == "top":
                     others = [c["pos"] for c in st["cards"].values() if c["idList"] == p["idList"]]
-                    return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""), pos=min(others or [1024]) / 2)
-                return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""))
+                    return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""), pos=min(others or [1024]) / 2,
+                                              creator=self.me["id"])
+                return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""), creator=self.me["id"])
             card = self._find("cards", parts[1])
             if card is None:
                 return 404, "The requested resource was not found."
@@ -367,6 +379,10 @@ class FakeTrello:
                     return 200, card["idLabels"]
             if parts[2:] == ["actions", "comments"] and method == "POST":
                 return 200, self._comment(card["id"], p["text"], self.me["id"])
+            if parts[2:] == ["actions"] and method == "GET" and "createCard" in p.get("filter", ""):
+                creator = self.members[card["idMemberCreator"]]
+                return 200, [{"id": card["id"], "type": "createCard", "idMemberCreator": creator["id"],
+                              "memberCreator": {"id": creator["id"], "username": creator["username"]}}]
             if parts[2:] == ["actions"] and method == "GET":
                 comments = sorted((c for c in st["comments"].values() if c["data"]["card"]["id"] == card["id"]),
                                   key=lambda c: c["id"], reverse=True)

@@ -64,7 +64,7 @@ def test_ask_forward_once(waiting):
     project, fake, card, launcher, tmux = waiting
     assert project.cfg.label_question in labels_of(fake, card)
     question = [c for c in fake.card_comments(card["id"]) if "Which database?" in c]
-    assert question and "@kankanbot" in question[0]
+    assert question and "@boardowner" in question[0] and "@kankanbot" not in question[0]
     fake.user_comment(card["id"], "Use PostgreSQL.")
     launcher.step()
     launcher.step()
@@ -76,8 +76,7 @@ def test_ask_forward_once(waiting):
 
 def test_own_comments_not_forwarded(waiting):
     project, fake, card, launcher, tmux = waiting
-    other = fake.add_member("stranger")
-    fake.user_comment(card["id"], "I am not the configured user", other["id"])
+    fake.user_comment(card["id"], "written by kankan's account", fake.me["id"])
     fake.user_comment(card["id"], "kankan note\n\n`kankan:abc`")
     launcher.step()
     launcher.step()
@@ -147,3 +146,25 @@ def test_crash_between_cursor_and_paste_loses_not_duplicates(waiting, monkeypatc
     for _ in range(3):
         restarted.step()
     assert len([p for p in tmux.pastes if "the answer" in p]) == expected
+
+
+def test_mentions_card_creator_or_board_admins(kproject, fake_trello):
+    """The card's creator is mentioned; for cards kankan created, the board's admins (never kankan itself)."""
+    from kankan import notify
+    alice = fake_trello.add_member("alice")
+    by_alice = fake_trello.add_card(kproject.cfg.backlog, "a", creator=alice["id"])
+    by_kankan = fake_trello.add_card(kproject.cfg.backlog, "k", creator=fake_trello.me["id"])
+    assert notify.mention(kproject, by_alice["id"]) == "@alice"
+    assert notify.mention(kproject, by_kankan["id"]) == "@boardowner"
+
+
+def test_answers_from_any_member_but_kankan_are_forwarded(waiting):
+    project, fake, card, launcher, tmux = waiting
+    teammate, outsider = fake.add_member("teammate"), fake.add_member("outsider")
+    fake.state["boards"][project.cfg.board_id]["memberships"].append({"idMember": teammate["id"], "memberType": "normal"})
+    fake.user_comment(card["id"], "kankan's own words", fake.me["id"])
+    fake.user_comment(card["id"], "rm -rf everything", outsider["id"])  # not on the board: never forwarded
+    fake.user_comment(card["id"], "Use SQLite.", teammate["id"])
+    launcher.step()
+    launcher.step()
+    assert tmux.pastes == ["Answer from the user on Trello: Use SQLite."]

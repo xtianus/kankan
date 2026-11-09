@@ -60,7 +60,7 @@ def test_bind_adopts_existing_lists(board, tmp_path, virtual_time):
     existing = {name: fake.add_list(b["id"], name)["id"] for name in ("Backlog", "Done", "Blocked")}
     hold = fake.add_label(b["id"], "HOLD")["id"]
     clone, _ = es.make_repos(tmp_path)
-    cfg = es.bind(clone, tmp_path, b["url"], creds, None, lambda s: None)
+    cfg = es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     assert (cfg.backlog, cfg.done, cfg.blocked) == (existing["Backlog"], existing["Done"], existing["Blocked"])
     assert cfg.label_hold == hold
     assert all(len(lists_named(fake, b["id"], n)) == 1 for n in existing)
@@ -75,7 +75,7 @@ def test_bind_takes_over_foreign_registry(board, tmp_path, virtual_time):
         f"Test board {MARKER}.", {"registry-id": "abc", "host": "elsewhere", "path": "/x"})
     said = []
     clone, _ = es.make_repos(tmp_path)
-    cfg = es.bind(clone, tmp_path, b["url"], creds, None, said.append)
+    cfg = es.bind(clone, tmp_path, b["url"], creds, said.append)
     desc = fake.state["boards"][b["id"]]["desc"]
     assert MARKER in desc and registry_block(desc)["registry-id"] == cfg.registry_id
     assert any("elsewhere:/x" in s for s in said)
@@ -98,7 +98,7 @@ def test_seat_lists_adopted(board, tmp_path, virtual_time, monkeypatch):
     names = [f"claude-1 · {s}" for s in ("In Progress", "Implemented", "Review")]
     ids = [fake.add_list(b["id"], n)["id"] for n in names]
     clone, _ = es.make_repos(tmp_path)
-    es.bind(clone, tmp_path, b["url"], creds, None, lambda s: None)
+    es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     project = Project.open(clone)
     seat = seats.ensure_created(project, "claude-1", "claude")
     assert [seat.in_progress, seat.implemented, seat.review] == ids
@@ -107,7 +107,7 @@ def test_seat_lists_adopted(board, tmp_path, virtual_time, monkeypatch):
 def test_create_cards_order_and_names(board, tmp_path, virtual_time):
     fake, b, creds = board
     clone, _ = es.make_repos(tmp_path)
-    cfg = es.bind(clone, tmp_path, b["url"], creds, None, lambda s: None)
+    cfg = es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     cards = es.create_cards(client(fake), cfg, "ke-1-abc", es.scenario())
     assert list(cards) == ["hello", "word", "name", "ask", "hold"]
     assert cards["hello"].name == "ke-1-abc Say hello" and "greetings.txt" in cards["hello"].desc
@@ -236,10 +236,11 @@ def test_user_answers_filters_member_and_marker(fake_trello):
     lst = fake_trello.add_list(board_["id"], "Backlog")
     card = fake_trello.add_card(lst["id"], "c")
     other = fake_trello.add_member("someone")
-    fake_trello.user_comment(card["id"], "kankan: question\n\n`kankan:op1`")
-    fake_trello.user_comment(card["id"], "red", other["id"])
-    fake_trello.user_comment(card["id"], "blue")
-    assert es.user_answers(client(fake_trello), card["id"], fake_trello.me["id"]) == ["blue"]
+    fake_trello.user_comment(card["id"], "kankan: question\n\n`kankan:op1`", fake_trello.me["id"])
+    fake_trello.user_comment(card["id"], "red", fake_trello.me["id"])  # kankan's own account: never an answer
+    fake_trello.user_comment(card["id"], "blue", other["id"])
+    fake_trello.user_comment(card["id"], "green")
+    assert es.user_answers(client(fake_trello), card["id"], fake_trello.me["id"]) == ["blue", "green"]
 
 
 def _ev(event, **fields):
@@ -339,11 +340,3 @@ def test_clean_leftovers(board, tmp_path):
     assert not (tmp_path / "kankan-e2e-ke-1-abc").exists() and (tmp_path / "unrelated").exists()
     assert any("killed" in a for a in actions)
 
-
-def test_live_notify_from_properties(tmp_path, monkeypatch):
-    creds = tmp_path / "test.properties"
-    creds.write_text("kankan.trello.key=k\nkankan.trello.token=t\n")
-    monkeypatch.setenv("KANKAN_TEST_CREDENTIALS", str(creds))
-    assert es.live_notify() is None
-    creds.write_text("kankan.trello.key=k\nkankan.trello.token=t\nkankan.test.notify=@xtian\n")
-    assert es.live_notify() == "xtian"

@@ -89,7 +89,7 @@ def test_block_crash_at_each_step_resumes(conflicted, monkeypatch, step):
     assert project.refs.read(card_ref(card["id"])).meta["phase"] == "parked"
     assert fake.card_list(card["id"]) == project.cfg.blocked
     comments = [c for c in fake.card_comments(card["id"]) if "To resolve: kankan resolve" in c]
-    assert len(comments) == 1 and "@kankanbot" in comments[0]
+    assert len(comments) == 1 and "@boardowner" in comments[0]
 
 
 def test_block_with_merge_identical_state_and_resolve(conflicted, monkeypatch, tmux_server):

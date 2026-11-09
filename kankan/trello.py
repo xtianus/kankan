@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from kankan import clock
 from kankan.errors import KankanError, Status
@@ -230,6 +230,28 @@ class TrelloClient:
         if status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello GET member: HTTP {status}")
         return payload
+
+    def card_creator(self, card_id: str) -> Optional[Tuple[str, str]]:
+        """(member id, username) of whoever created the card, or None if Trello no longer has that action."""
+        actions = self._ok("GET", f"/1/cards/{card_id}/actions",
+                           {"filter": "createCard,copyCard,convertToCardFromCheckItem", "fields": "type,idMemberCreator",
+                            "memberCreator_fields": "username", "limit": "1000"})
+        if not actions:
+            return None
+        oldest = min(actions, key=lambda a: a["id"])
+        member = oldest.get("memberCreator") or {}
+        return (oldest.get("idMemberCreator") or member.get("id"), member.get("username", ""))
+
+    def board_members(self, board_id: str) -> List[Tuple[str, str, str]]:
+        """(member id, username, member type) of the board's members (admin, normal, observer)."""
+        memberships = self._ok("GET", f"/1/boards/{board_id}/memberships",
+                               {"member": "true", "member_fields": "username"})
+        return [(m["idMember"], (m.get("member") or {}).get("username", ""), m.get("memberType", ""))
+                for m in memberships]
+
+    def board_admins(self, board_id: str) -> List[Tuple[str, str]]:
+        """(member id, username) of the board's admins."""
+        return [(i, u) for i, u, kind in self.board_members(board_id) if kind == "admin"]
 
     def board(self, short_or_id: str) -> dict:
         return self._ok("GET", f"/1/boards/{urllib.parse.quote(short_or_id)}", {"fields": "id,name,desc,shortLink,url"})

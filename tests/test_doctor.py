@@ -369,11 +369,9 @@ def test_kankan_not_on_path_is_manual(fakebin):
     assert check.status == doctor.MANUAL and "PATH" in check.action
 
 
-def test_notify_user_is_token_owner_warns(bound, fakebin, fake_trello):
-    check = by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"]
-    assert check.status == doctor.WARN and "separate Trello account" in check.action
-    other = fake_trello.add_member("me-the-human")
-    cfg = load_config(bound.paths)
-    cfg.notify_id, cfg.notify_username = other["id"], other["username"]
-    save_config(bound.paths, cfg)
+def test_token_owner_as_board_admin_is_manual(bound, fakebin, fake_trello):
     assert by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"].status == doctor.OK
+    fake_trello.state["boards"][bound.cfg.board_id]["memberships"] = [
+        {"idMember": fake_trello.me["id"], "memberType": "admin"}]
+    check = by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"]
+    assert check.status == doctor.MANUAL and "own Trello account" in check.action

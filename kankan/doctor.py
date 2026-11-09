@@ -331,13 +331,17 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
         return [Check("credentials", MANUAL, err.message, "kankan init --reauth")] + \
             [Check(n, SKIPPED, "needs credentials") for n in rest]
     checks = [Check("credentials", OK, "valid")]
-    if project.trello.me().get("id") == cfg.notify_id:
-        checks.append(Check("notifications", WARN, f"kankan mentions @{cfg.notify_username}, who also owns the token: "
-                            "Trello never notifies you about your own comments",
-                            "use a separate Trello account for kankan's token (user manual §3.1), then "
-                            "kankan init --reauth and kankan init --notify <your username>"))
+    from kankan.init import account_warnings
+    cfg.kankan_member_id = cfg.kankan_member_id or project.trello.me()["id"]
+    cfg.kankan_username = cfg.kankan_username or project.trello.me()["username"]
+    problems = account_warnings(project.trello, cfg)
+    if problems:
+        checks.append(Check("notifications", MANUAL, problems[0],
+                            "give kankan its own Trello account (user manual §3.1), invite it to the board, then "
+                            "kankan init --reauth"))
     else:
-        checks.append(Check("notifications", OK, f"kankan mentions @{cfg.notify_username}"))
+        checks.append(Check("notifications", OK, f"kankan acts as @{cfg.kankan_username}; it mentions each card's "
+                            "creator, or the board's admins"))
     snap = project.trello.snapshot(cfg.board_id)
     block = registry_block(snap.desc) or {}
     if block.get("registry-id") != cfg.registry_id:
