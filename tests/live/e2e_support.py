@@ -106,6 +106,42 @@ def live_credentials_path() -> Optional[Path]:
     return path if path.exists() else None
 
 
+class LinkError(Exception):
+    """~/.local/bin/kankan exists and is not this checkout's kankan."""
+
+
+def _kankan_link_paths() -> Tuple[Path, Path]:
+    import sys
+    return Path(os.path.expanduser("~")) / ".local" / "bin" / "kankan", Path(sys.executable).parent / "kankan"
+
+
+def ensure_kankan_link() -> Optional[Path]:
+    """Put this checkout's kankan on the login PATH (~/.local/bin, which Codex's command daemon sees) for the run.
+
+    Returns the link when this call created it (the caller removes it), None when it was already in place.
+    """
+    link, target = _kankan_link_paths()
+    if not target.exists():
+        raise LinkError(f"{target} is missing: run `.venv/bin/pip install -e '.[dev]'` first")
+    if link.is_symlink() and os.readlink(link) == str(target):
+        return None
+    if link.exists() or link.is_symlink():
+        raise LinkError(f"{link} is another kankan installation: the agents would run it instead of this checkout. "
+                        f"Move it away for the run (it is restored by reinstalling, e.g. `pipx install --force …`)")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    return link
+
+
+def remove_kankan_link(link: Optional[Path]) -> bool:
+    """Remove a link made by ensure_kankan_link (never anything else)."""
+    _, target = _kankan_link_paths()
+    if link is not None and link.is_symlink() and os.readlink(link) == str(target):
+        link.unlink()
+        return True
+    return False
+
+
 def _answer(question: str) -> str:
     if "adopt it?" in question:
         return "y"

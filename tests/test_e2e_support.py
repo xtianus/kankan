@@ -1,5 +1,6 @@
 """Helpers of the live agents run (tests/live/e2e_support.py), exercised on the fake Trello server."""
 
+import os
 import subprocess
 
 import pytest
@@ -340,3 +341,34 @@ def test_clean_leftovers(board, tmp_path):
     assert not (tmp_path / "kankan-e2e-ke-1-abc").exists() and (tmp_path / "unrelated").exists()
     assert any("killed" in a for a in actions)
 
+
+
+def test_kankan_link_created_and_removed(isolated_home, tmp_path, monkeypatch):
+    """The runner puts this checkout's kankan on the login PATH (~/.local/bin) for the run and removes its own link."""
+    import sys
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "kankan").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "executable", str(venv_bin / "python"))
+    link = isolated_home / ".local" / "bin" / "kankan"
+    created = es.ensure_kankan_link()
+    assert created == link and os.readlink(link) == str(venv_bin / "kankan")
+    assert es.ensure_kankan_link() is None  # already there: not ours to remove later
+    es.remove_kankan_link(created)
+    assert not link.exists() and not link.is_symlink()
+
+
+def test_kankan_link_refuses_another_installation(isolated_home, tmp_path, monkeypatch):
+    import sys
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "kankan").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "executable", str(venv_bin / "python"))
+    link = isolated_home / ".local" / "bin" / "kankan"
+    link.parent.mkdir(parents=True)
+    link.write_text("#!/bin/sh\n# a pipx copy\n")
+    with pytest.raises(es.LinkError) as exc:
+        es.ensure_kankan_link()
+    assert str(link) in str(exc.value)
+    es.remove_kankan_link(link)  # never removes something that is not our link
+    assert link.exists()

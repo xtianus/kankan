@@ -196,7 +196,7 @@ def clean_leftovers(tmux, client, board_id: str, base: Path) -> List[str]:
     return actions
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m tests.live.agents_e2e", description=__doc__.splitlines()[0])
     parser.add_argument("--no-ask", action="store_true", help="skip the card that asks you a question")
     parser.add_argument("--no-hold", action="store_true", help="skip the card you put on HOLD")
@@ -208,7 +208,35 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "kankan-e2e-ke-* run directories")
     parser.add_argument("--clean-only", action="store_true", help="like --clean, then exit without running")
     parser.add_argument("--base", help="directory for the run directory (default: the system temp dir)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Link this checkout's kankan into ~/.local/bin for the run (Codex sees only the login PATH), then run.
+
+    The link is removed at the end, except with --keep while agents are still running on it."""
+    args = _parser().parse_args(argv)
+    link = Path(os.path.expanduser("~")) / ".local" / "bin" / "kankan"
+    if not args.clean_only:
+        try:
+            if es.ensure_kankan_link():
+                say(f"linked {link} to this checkout's kankan for the run")
+        except es.LinkError as err:
+            say(str(err))
+            return 2
+        if str(link.parent) not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = f"{link.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    state = {"agents_started": False}
+    try:
+        return _main(args, state)
+    finally:
+        if args.keep and state["agents_started"]:
+            say(f"--keep: {link} stays while the agents run; afterwards: --clean-only (or rm {link})")
+        elif es.remove_kankan_link(link):
+            say(f"removed {link}")
+
+
+def _main(args, state) -> int:
 
     from kankan.init import parse_board_url
     from tests.live.conftest import MARKER
@@ -275,6 +303,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         card_ids.append(cards["merge"].id)
 
         from kankan import agents_cmd
+        state["agents_started"] = True
         agents_cmd.up(project, {"claude": 1, "codex": 1}, tmux=tmux)
         say(f"\nBoard: https://trello.com/b/{cfg.board_short}")
         say(f"Watch: tmux attach -t {SESSION_PREFIX}claude-1    |    tmux attach -t {SESSION_PREFIX}codex-1"
