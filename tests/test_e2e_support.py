@@ -311,3 +311,30 @@ def test_runner_failure_after_bind_tears_down(board, tmp_path, monkeypatch, caps
     assert agents_e2e.main(["--base", str(tmp_path)]) == 2
     assert registry_block(fake.state["boards"][b["id"]]["desc"]) is None
     assert "run directory kept" in capsys.readouterr().out
+
+
+def test_clean_leftovers(board, tmp_path):
+    """--clean kills leftover sessions, cleans the board and removes old run directories only."""
+    from tests.live import agents_e2e
+    fake, b, _ = board
+    lst = fake.add_list(b["id"], "Backlog")
+    leftover = fake.add_card(lst["id"], "ke-1 old")
+    fake.state["boards"][b["id"]]["desc"] = write_registry_block(f"{MARKER}", {"registry-id": "old"})
+    (tmp_path / "kankan-e2e-ke-1-abc").mkdir()
+    (tmp_path / "unrelated").mkdir()
+
+    class StubTmux:
+        def __init__(self):
+            self.names = ["ai-kankan-e2e-codex-1", "ai-other-claude-1"]
+
+        def sessions(self):
+            return list(self.names)
+
+        def kill_session(self, name):
+            self.names.remove(name)
+    tmux = StubTmux()
+    actions = agents_e2e.clean_leftovers(tmux, client(fake), b["id"], tmp_path)
+    assert tmux.names == ["ai-other-claude-1"]
+    assert leftover["id"] not in fake.state["cards"] and registry_block(fake.state["boards"][b["id"]]["desc"]) is None
+    assert not (tmp_path / "kankan-e2e-ke-1-abc").exists() and (tmp_path / "unrelated").exists()
+    assert any("killed" in a for a in actions)

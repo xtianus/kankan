@@ -90,7 +90,7 @@ It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any
 ```bash
 .venv/bin/pip install -e '.[dev]'
 ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # kankan on the login PATH (Codex needs it); see below
-.venv/bin/python -m tests.live.agents_e2e    # options: --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
+.venv/bin/python -m tests.live.agents_e2e --keep   # options: --clean --clean-only --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
 rm ~/.local/bin/kankan                       # after testing (or reinstall your pipx copy over it)
 ```
 
@@ -107,6 +107,10 @@ What it does:
    - the slow card enters an `In Progress` list: add `HOLD` to it; when it is back in `Backlog`, remove `HOLD` so it resumes from its branch.
 6. When every card is in `Done` it waits up to 5 minutes for the side effects (ref deletion, labels, push), then verifies: one merge per card on `kankan-agents` with correct trailers, file contents, `main` and `user-work` untouched, origin up to date, each card reviewed by the other agent type, the HOLD suspension and resumption on the same branch, a clean `kankan reconcile`.
 7. Stops the agents, deletes its cards and its registry block, and removes the run directory on success. On failure, timeout or Ctrl-C it first saves pane captures, `log.jsonl` and `kankan status` in `<run dir>/diagnostics/` and keeps the run directory.
+
+**Debugging: use `--keep`.** Without it, a successful run deletes its run directory and a failed one keeps only `diagnostics/`. With `--keep` the agents stay alive in tmux, the cards stay on the board and the whole run directory (clone, worktrees, `log.jsonl`) stays in place, so you can inspect what really happened, also after a success. Use it whenever you want to look at a run, and always when something looks wrong.
+
+**Leftovers: use `--clean`.** A run stopped with `--keep`, or one that died, leaves `ai-kankan-e2e-*` tmux sessions, `ke-` cards, the registry block and `kankan-e2e-ke-*` run directories behind, and the next run refuses to start. `--clean` kills and removes all of them first, then runs; `--clean-only` just cleans and exits. It kills the sessions of any run in progress too, so do not use it while another run is going.
 
 It spends real tokens and takes about 15–30 minutes. The agents load your global `CLAUDE.md`/`AGENTS.md`, so your personal instructions apply to them too; the card descriptions tell them that the kankan workflow takes precedence and that they must never push `main`.
 

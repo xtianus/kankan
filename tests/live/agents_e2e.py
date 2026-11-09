@@ -1,6 +1,7 @@
 """Manual live run with real Claude Code and Codex agents on the Trello test board.
 
-    .venv/bin/python -m tests.live.agents_e2e [--no-ask] [--no-hold] [--timeout MIN] [--keep] [--notify USER] [--base DIR]
+    .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--timeout MIN] [--keep] [--notify USER]
+                                              [--base DIR]
 
 Never collected by pytest. See docs/developer-manual.md §3.5.
 """
@@ -180,12 +181,31 @@ def teardown(args, client, board_id, tmux, project, cfg, card_ids, clone, run_di
         signal.signal(signal.SIGINT, previous)
 
 
+def clean_leftovers(tmux, client, board_id: str, base: Path) -> List[str]:
+    """--clean: kill the sessions, board items and run directories that previous runs left behind."""
+    actions = []
+    for name in run_sessions(tmux):
+        tmux.kill_session(name)
+        actions.append(f"killed tmux session {name}")
+    actions += es.cleanup_board(client, board_id)
+    for old in sorted(base.glob("kankan-e2e-ke-*")):
+        if old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+            actions.append(f"removed {old}")
+    return actions
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tests.live.agents_e2e", description=__doc__.splitlines()[0])
     parser.add_argument("--no-ask", action="store_true", help="skip the card that asks you a question")
     parser.add_argument("--no-hold", action="store_true", help="skip the card you put on HOLD")
     parser.add_argument("--timeout", type=int, default=60, help="minutes before giving up (default 60)")
-    parser.add_argument("--keep", action="store_true", help="leave agents, cards, registry and run directory")
+    parser.add_argument("--keep", action="store_true", help="leave agents, cards, registry and run directory "
+                        "(for debugging; clean up later with --clean)")
+    parser.add_argument("--clean", action="store_true", help="first kill and remove what previous runs left: "
+                        "ai-kankan-e2e-* tmux sessions, ke-/kt- cards and the registry block on the test board, "
+                        "kankan-e2e-ke-* run directories")
+    parser.add_argument("--clean-only", action="store_true", help="like --clean, then exit without running")
     parser.add_argument("--notify", help="Trello user who answers (default: the token owner)")
     parser.add_argument("--base", help="directory for the run directory (default: the system temp dir)")
     args = parser.parse_args(argv)
@@ -200,25 +220,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     for var in ("TMUX", "KANKAN_TMUX_SOCKET"):  # address the user's default tmux server
         os.environ.pop(var, None)
     tmux = _tmux()
-    leftovers = run_sessions(tmux)
-    if leftovers:
-        say(f"tmux sessions of a previous run are still alive: {', '.join(leftovers)}; kill them first")
-        return 2
     client = TrelloClient(key, token)
     board = client.board(parse_board_url(board_url))
     if MARKER not in (board.get("desc") or ""):
         say(f"the board description lacks {MARKER!r}: refusing to write")
         return 3
+    base = Path(args.base or tempfile.gettempdir())
+    if args.clean or args.clean_only:
+        for action in clean_leftovers(tmux, client, board["id"], base) or ["nothing to clean"]:
+            say(f"  {action}")
+        if args.clean_only:
+            return 0
+    leftovers = run_sessions(tmux)
+    if leftovers:
+        say(f"tmux sessions of a previous run are still alive: {', '.join(leftovers)}; rerun with --clean")
+        return 2
     blocking = es.blocking_cards(client, board["id"])
     if blocking:
-        say("the test board has cards in workflow lists; archive them (or run `python -m tests.live.cleanup` for "
-            "ke-/kt- leftovers):")
+        say("the test board has cards in workflow lists; archive them (ke-/kt- leftovers go away with --clean):")
         for card in blocking:
             say(f"  {card.name}  {card.url}")
         return 2
 
     run_id = es.new_run_id()
-    run_dir = Path(args.base or tempfile.gettempdir()) / f"kankan-e2e-{run_id}"
+    run_dir = base / f"kankan-e2e-{run_id}"
     run_dir.mkdir(parents=True)
     say(f"run {run_id} in {run_dir}")
     clone = run_dir / es.PROJECT_NAME
