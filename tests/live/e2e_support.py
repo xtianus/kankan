@@ -106,6 +106,14 @@ def live_credentials_path() -> Optional[Path]:
     return path if path.exists() else None
 
 
+def live_notify() -> Optional[str]:
+    """``kankan.test.notify`` from the test properties: the human who answers when the token is the bot's."""
+    from kankan.properties import PropertiesFile
+    path = live_credentials_path()
+    value = PropertiesFile.load(path).get("kankan.test.notify") if path else None
+    return value.strip().lstrip("@") or None if value else None
+
+
 def _answer(question: str) -> str:
     if "adopt it?" in question:
         return "y"

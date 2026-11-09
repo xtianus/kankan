@@ -338,3 +338,12 @@ def test_clean_leftovers(board, tmp_path):
     assert leftover["id"] not in fake.state["cards"] and registry_block(fake.state["boards"][b["id"]]["desc"]) is None
     assert not (tmp_path / "kankan-e2e-ke-1-abc").exists() and (tmp_path / "unrelated").exists()
     assert any("killed" in a for a in actions)
+
+
+def test_live_notify_from_properties(tmp_path, monkeypatch):
+    creds = tmp_path / "test.properties"
+    creds.write_text("kankan.trello.key=k\nkankan.trello.token=t\n")
+    monkeypatch.setenv("KANKAN_TEST_CREDENTIALS", str(creds))
+    assert es.live_notify() is None
+    creds.write_text("kankan.trello.key=k\nkankan.trello.token=t\nkankan.test.notify=@xtian\n")
+    assert es.live_notify() == "xtian"

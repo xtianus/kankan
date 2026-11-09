@@ -56,9 +56,12 @@ The configuration stays outside the repository. Either create `~/.config/kankan/
 
 ```properties
 kankan.test.board.url=https://trello.com/b/<shortLink>/<name>
-kankan.trello.key=<key>
-kankan.trello.token=<token>
+kankan.trello.key=<the bot's key>
+kankan.trello.token=<the bot's token>
+kankan.test.notify=<your Trello username>
 ```
+
+`kankan.test.notify` is the human who answers questions in the live run of [section 3.5](#35-live-run-with-real-agents) (the `--notify` option overrides it). Without it, kankan mentions the owner of the token, the bot, and accepts answers only from the bot: your replies would be ignored and the run would time out. The runner warns when the notify user owns the token.
 
 or set environment variables:
 

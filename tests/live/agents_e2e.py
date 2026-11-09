@@ -252,7 +252,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok = False
     try:
         clone, origin = es.make_repos(run_dir)
-        cfg = es.bind(clone, run_dir, board_url, creds, args.notify, say)
+        cfg = es.bind(clone, run_dir, board_url, creds, args.notify or es.live_notify(), say)
+        if client.me().get("id") == cfg.notify_id:
+            alert(f"kankan will accept answers only from @{cfg.notify_username}, the owner of the Trello token. If "
+                  "that is the kankan bot, stop now (Ctrl-C) and rerun with --notify <your username>, or add "
+                  "kankan.test.notify=<your username> to the test properties.")
         from kankan import doctor
         from kankan.integrate import merge_request
         from kankan.project import Project
