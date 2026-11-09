@@ -336,3 +336,14 @@ def test_create_card_top(fake_trello):
     top = client.create_card(lst["id"], "top", pos="top")
     cards = sorted((c for c in fake_trello.state["cards"].values() if c["idList"] == lst["id"]), key=lambda c: c["pos"])
     assert [c["id"] for c in cards] == [top.id, first["id"]]
+
+
+def test_merge_request_remote_fetch_failure_refuses(kp, fake_trello, tmp_path):
+    """M3: a failed fetch never falls back to a stale remote-tracking ref."""
+    repo = kp.paths.repo
+    git(repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
+    stale = user_commit(repo, "feat1", "stale.txt")
+    git(repo, "update-ref", "refs/remotes/origin/feat1", stale)
+    with pytest.raises(KankanError) as exc:
+        integrate.merge_request(kp, "feat1", remote=True)
+    assert exc.value.status == Status.NETWORK_ERROR

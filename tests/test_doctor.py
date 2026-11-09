@@ -86,7 +86,8 @@ def test_preflight_ignores_login(fakebin, monkeypatch):
     monkeypatch.setattr(doctor, "check_kankan_path", lambda: doctor.Check("kankan-path", doctor.OK, "x"))
     fakebin("codex", 'exit 1')  # logged out
     doctor.preflight(["codex"])
-    assert all(t.is_symlink() for t in skill_install.targets())  # the skill was installed on the way
+    assert skill_install.targets()[1].is_symlink()  # the codex link was installed on the way
+    assert not skill_install.targets()[0].exists()  # only for the type being started
 
 
 # ---------------------------------------------------------------- project
@@ -277,12 +278,9 @@ def test_preflight_custom_adapter(kproject, fakebin):
 
 
 def test_agent_session_path(kproject, tmp_path, monkeypatch):
-    bindir = tmp_path / "venv" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "kankan").write_text("")
-    monkeypatch.setattr(sys, "executable", str(bindir / "python"))
-    assert agents_cmd.agent_path("/usr/bin:/bin").split(":")[0] == str(bindir)
-    assert agents_cmd.agent_path(f"/usr/bin:{bindir}") == f"{bindir}:/usr/bin"
+    wrapper_dir = str(kproject.paths.kankan_dir / "bin")
+    assert agents_cmd.agent_path("/usr/bin:/bin", kproject.paths).split(":")[0] == wrapper_dir
+    assert agents_cmd.agent_path(f"/usr/bin:{wrapper_dir}", kproject.paths) == f"{wrapper_dir}:/usr/bin"
 
     class StubTmux:
         def __init__(self):
@@ -302,4 +300,61 @@ def test_agent_session_path(kproject, tmp_path, monkeypatch):
     stub = StubTmux()
     monkeypatch.setenv("PATH", "/stale/bin:/usr/bin")
     agents_cmd.agent(kproject, "claude", tmux=stub, preflight=False)
-    assert stub.env["PATH"].split(":")[0] == str(bindir) and "/stale/bin" in stub.env["PATH"]
+    assert stub.env["PATH"].split(":")[0] == wrapper_dir and "/stale/bin" in stub.env["PATH"]
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_agent_path_holds_only_kankan(kproject, tmp_path):
+    """I1: the agents' PATH gets a private directory with only a kankan wrapper, never the venv's python/pip."""
+    path = agents_cmd.agent_path("/usr/bin:/bin", kproject.paths)
+    first = Path(path.split(":")[0])
+    assert sorted(p.name for p in first.iterdir()) == ["kankan"]
+    assert sys.executable in (first / "kankan").read_text()
+    assert str(Path(sys.executable).parent) not in path.split(":")[:1]
+
+
+def test_old_config_does_not_block_user_push(git_repo, fake_trello, monkeypatch, fakebin):
+    """I2: integration branch == user branch (pre-1.2 config): no kankan.integrationBranch, so pushes of main pass."""
+    from tests.helpers import bind_project
+    project = bind_project(git_repo, fake_trello, monkeypatch, integration_branch="main")
+    git(git_repo, "config", "kankan.integrationBranch", "main")
+    all_checks = doctor.run(git_repo, fix=True, online=False)
+    checks = by_name(all_checks)
+    assert any(c.name == "integration-branch" and c.status == doctor.FIXED for c in all_checks)
+    assert git(git_repo, "config", "--get", "kankan.integrationBranch", check=False) == ""
+    assert checks["branches"].status == doctor.SKIPPED and "does not exist" not in checks["branches"].detail
+
+
+def test_preflight_keeps_existing_skill_links(fakebin, monkeypatch, tmp_path):
+    """M2: preflight installs a missing link but never re-points or refuses an existing one."""
+    monkeypatch.delenv("KANKAN_SKIP_PREFLIGHT")
+    monkeypatch.setattr(doctor, "check_kankan_path", lambda: doctor.Check("kankan-path", doctor.OK, "x"))
+    fakebin("claude")
+    claude_target, codex_target = skill_install.targets()
+    claude_target.parent.mkdir(parents=True)
+    claude_target.symlink_to(tmp_path)  # a deliberate dev link
+    codex_target.mkdir(parents=True)    # a real directory, for the other agent type
+    doctor.preflight(["claude"])
+    assert os.readlink(claude_target) == str(tmp_path) and codex_target.is_dir()
+    claude_target.unlink()
+    doctor.preflight(["claude"])
+    assert os.readlink(claude_target) == str(skill_install.skill_dir())
+
+
+def test_label_fix_keeps_concurrent_seat(bound, fake_trello, fakebin, monkeypatch):
+    """M6: the label fix reloads the configuration under the lock."""
+    from kankan import seats
+    del fake_trello.state["labels"][bound.cfg.label_question]
+    from kankan.trello import TrelloClient
+    real_snapshot = TrelloClient.snapshot
+    added = []
+
+    def snapshot_and_add_seat(self, board_id):
+        if not added:  # a launcher registers a seat after doctor read the configuration
+            added.append(True)
+            seats.ensure_created(bound, "claude-1", "claude")
+        return real_snapshot(self, board_id)
+    monkeypatch.setattr(TrelloClient, "snapshot", snapshot_and_add_seat)
+    doctor.run(bound.paths.repo, fix=True, online=True)
+    assert "claude-1" in load_config(bound.paths).seats

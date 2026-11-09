@@ -653,8 +653,11 @@ def merge_request(project, branch: Optional[str] = None, remote: bool = False, t
     local = gitutil.rev(repo, f"refs/heads/{branch}")
     if remote or local is None:
         if "origin" in gitutil.out(repo, ["remote"], check=False).split():
-            gitutil.run(repo, ["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
-                        check=False, timeout=120)
+            proc = gitutil.run(repo, ["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                               check=False, timeout=120)
+            if proc.returncode != 0:
+                raise KankanError(Status.NETWORK_ERROR, f"cannot fetch {branch} from origin: "
+                                  f"{proc.stderr.strip()[-300:]}")
         sha = gitutil.rev(repo, f"refs/remotes/origin/{branch}")
         source = f"origin/{branch}"
     else:

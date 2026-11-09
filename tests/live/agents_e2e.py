@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from kankan.trello import TrelloClient
 from tests.live import e2e_support as es
 
 POLL = 10
@@ -143,6 +145,41 @@ def stop_agents(project, tmux) -> bool:
     return False
 
 
+def teardown(args, client, board_id, tmux, project, cfg, card_ids, clone, run_dir, ok) -> None:
+    """Best effort, immune to a second Ctrl-C: diagnostics, agents, this run's cards and registry block."""
+    if args.keep:
+        say(f"--keep: agents, cards, registry and {run_dir} left as they are")
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    stopped = True
+    try:
+        if project is not None:
+            if not ok:
+                try:
+                    say(f"diagnostics: {save_diagnostics(project, tmux, run_dir)}")
+                except Exception as err:  # noqa: BLE001
+                    say(f"diagnostics failed: {err}")
+            try:
+                stopped = stop_agents(project, tmux)
+            except Exception as err:  # noqa: BLE001
+                stopped = False
+                say(f"stopping the agents failed: {err}")
+            if not stopped:
+                say("some agent processes are still alive: the run directory is kept")
+        try:
+            for action in es.teardown_board(client, board_id, card_ids, cfg.registry_id if cfg else None,
+                                            clone_path=str(clone)):
+                say(f"  {action}")
+        except Exception as err:  # noqa: BLE001
+            say(f"board cleanup failed ({err}): run `python -m tests.live.cleanup`")
+        if ok and stopped:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        else:
+            say(f"run directory kept: {run_dir}")
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tests.live.agents_e2e", description=__doc__.splitlines()[0])
     parser.add_argument("--no-ask", action="store_true", help="skip the card that asks you a question")
@@ -154,7 +191,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     from kankan.init import parse_board_url
-    from kankan.trello import TrelloClient
     from tests.live.conftest import MARKER
 
     pre = prerequisites()
@@ -185,19 +221,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_dir = Path(args.base or tempfile.gettempdir()) / f"kankan-e2e-{run_id}"
     run_dir.mkdir(parents=True)
     say(f"run {run_id} in {run_dir}")
-    clone, origin = es.make_repos(run_dir)
-    cfg = es.bind(clone, run_dir, board_url, creds, args.notify, say)
-    from kankan import doctor
-    from kankan.integrate import merge_request
-    from kankan.project import Project
-    project_checks = [c for c in doctor.run(clone, fix=False, online=True) if c.status == doctor.MANUAL]
-    if project_checks:
-        say(doctor.report_text(project_checks))
-        return 2
-    project = Project.open(clone)
+    clone = run_dir / es.PROJECT_NAME
+    cfg = project = None
     card_ids: List[str] = []
     ok = False
     try:
+        clone, origin = es.make_repos(run_dir)
+        cfg = es.bind(clone, run_dir, board_url, creds, args.notify, say)
+        from kankan import doctor
+        from kankan.integrate import merge_request
+        from kankan.project import Project
+        project_checks = [c for c in doctor.run(clone, fix=False, online=True) if c.status == doctor.MANUAL]
+        if project_checks:
+            say(doctor.report_text(project_checks))
+            return 2
+        project = Project.open(clone)
         cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold))
         card_ids += [c.id for c in cards.values()]
         wt = run_dir / "feat1-wt"
@@ -243,20 +281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except (KeyboardInterrupt, TimeoutError):
         say("\ninterrupted")
     finally:
-        if args.keep:
-            say(f"--keep: agents, cards, registry and {run_dir} left as they are")
-        else:
-            if not ok:
-                say(f"diagnostics: {save_diagnostics(project, tmux, run_dir)}")
-            stopped = stop_agents(project, tmux)
-            if not stopped:
-                say("some agent processes are still alive: the run directory is kept")
-            for action in es.teardown_board(client, board["id"], card_ids, cfg.registry_id):
-                say(f"  {action}")
-            if ok and stopped:
-                shutil.rmtree(run_dir, ignore_errors=True)
-            else:
-                say(f"run directory kept: {run_dir}")
+        teardown(args, client, board["id"], tmux, project, cfg, card_ids, clone, run_dir, ok)
     return 0 if ok else 1
 
 

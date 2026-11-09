@@ -228,8 +228,16 @@ def _ensure_integration_branch(paths: Paths, cfg: Config, cfg_old: Optional[Conf
             say(f"Branch {name} created from {cfg.user_branch if start != 'HEAD' else 'HEAD'}")
     if name == cfg.user_branch:
         warnings.append(f"the agents integrate into your branch {name}: never keep it checked out while they work")
-    gitutil.run(repo, ["config", "kankan.integrationBranch", name])
+    set_hook_branch(paths, cfg)
     return warnings
+
+
+def set_hook_branch(paths: Paths, cfg: Config) -> None:
+    """The pre-push hook protects the integration branch, unless it is also the user's branch (pre-1.2 setup)."""
+    if cfg.integration_branch != cfg.user_branch:
+        gitutil.run(paths.repo, ["config", "kankan.integrationBranch", cfg.integration_branch])
+    else:
+        gitutil.run(paths.repo, ["config", "--unset", "kankan.integrationBranch"], check=False)
 
 
 def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict, takeover: bool,

@@ -276,3 +276,38 @@ def test_runner_prerequisites_missing_config(monkeypatch, isolated_home, capsys)
     monkeypatch.delenv("KANKAN_TEST_CREDENTIALS", raising=False)
     assert agents_e2e.main([]) == 2
     assert "no test board configured" in capsys.readouterr().out
+
+
+def test_ask_check_ignores_blank_answers():
+    """M9: an empty comment is not an answer."""
+    path, check, _ = es.EXPECTED_FILES["ask"]
+    assert not check("red\n", {"answers": ["", "   "]})
+    assert check("red\n", {"answers": ["", "Red"]})
+
+
+def test_teardown_board_by_clone_path(board):
+    """I3: before the configuration exists, the registry block is removed only if it names this run's clone."""
+    fake, b, _ = board
+    fake.state["boards"][b["id"]]["desc"] = write_registry_block(f"{MARKER}", {"registry-id": "x", "path": "/run/clone"})
+    es.teardown_board(client(fake), b["id"], [], None, clone_path="/other")
+    assert registry_block(fake.state["boards"][b["id"]]["desc"])
+    es.teardown_board(client(fake), b["id"], [], None, clone_path="/run/clone")
+    assert registry_block(fake.state["boards"][b["id"]]["desc"]) is None
+
+
+def test_runner_failure_after_bind_tears_down(board, tmp_path, monkeypatch, capsys, virtual_time):
+    """I3: a manual project check after bind still removes the run's registry block."""
+    from tests.live import agents_e2e
+    from kankan import doctor as doctor_mod
+    fake, b, creds = board
+    monkeypatch.setattr(agents_e2e, "prerequisites", lambda: (b["url"], KEY, TOKEN, creds))
+    monkeypatch.setattr(agents_e2e, "_tmux", lambda: type("T", (), {"sessions": lambda self: []})())
+    real_client = TrelloClient
+
+    def fake_client(key, token, **kw):
+        return real_client(key, token, base_url=fake.url, timeout=0.5)
+    monkeypatch.setattr(agents_e2e, "TrelloClient", fake_client)
+    monkeypatch.setattr(doctor_mod, "run", lambda *a, **k: [doctor_mod.Check("hook", doctor_mod.MANUAL, "x", "y")])
+    assert agents_e2e.main(["--base", str(tmp_path)]) == 2
+    assert registry_block(fake.state["boards"][b["id"]]["desc"]) is None
+    assert "run directory kept" in capsys.readouterr().out

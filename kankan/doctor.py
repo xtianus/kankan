@@ -77,10 +77,12 @@ def check_kankan_path() -> Check:
     found = shutil.which("kankan")
     here = Path(sys.executable).parent
     if found is None:
-        if (here / "kankan").exists():
-            return Check("kankan-path", OK, f"agents get {here} first on their PATH")
-        return Check("kankan-path", MANUAL, "kankan is not on PATH",
-                     "add the directory of the kankan command to PATH (with pipx: `pipx ensurepath`)")
+        proc = _run([sys.executable, "-c", "import kankan"])
+        if proc is not None and proc.returncode == 0:
+            return Check("kankan-path", WARN, "kankan is not on your PATH (agents get their own wrapper)",
+                         "add the directory of the kankan command to PATH (with pipx: `pipx ensurepath`)")
+        return Check("kankan-path", MANUAL, f"{sys.executable} cannot import kankan",
+                     "install kankan (pipx install /path/to/kankan)")
     interpreter = _shebang(found)
     if interpreter and os.path.realpath(interpreter) != os.path.realpath(sys.executable):
         return Check("kankan-path", WARN, f"{found} belongs to another installation ({interpreter})",
@@ -144,6 +146,20 @@ def check_skill(fix: bool) -> Check:
         return Check("skill", MANUAL, f"not installed or stale: {', '.join(map(str, stale))}", "kankan skill install --force")
     skill_install(force=True)
     return Check("skill", FIXED, f"linked to {source}")
+
+
+def _ensure_skill_links(types: Sequence[str]) -> Check:
+    """Preflight: link the skill only where it is missing for the types being started; never re-point a link."""
+    from kankan.skill_install import skill_dir, targets
+    by_type = dict(zip(("claude", "codex"), targets()))
+    created = []
+    for agent_type in types:
+        target = by_type.get(agent_type)
+        if target is not None and not target.exists() and not target.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(skill_dir(), target_is_directory=True)
+            created.append(str(target))
+    return Check("skill", FIXED if created else OK, f"linked {', '.join(created)}" if created else "present")
 
 
 def check_logind() -> Check:
@@ -242,19 +258,26 @@ def _check_branches(paths, cfg, fix: bool) -> List[Check]:
         return [Check("integration-branch", MANUAL, f"{branch} does not exist", "kankan init (creates or adopts it)"),
                 Check("branches", SKIPPED, f"{branch} does not exist")]
     checks = []
+    from kankan.init import set_hook_branch
     configured = gitutil.run(repo, ["config", "--get", "kankan.integrationBranch"], check=False).stdout.strip()
+    expected = branch if branch != cfg.user_branch else ""  # never block pushes of the user's own branch
     checked_out = worktrees.main_checked_out(repo, branch)
+    if configured != expected and fix:
+        set_hook_branch(paths, cfg)
+        checks.append(Check("integration-branch", FIXED, f"{branch} (git config kankan.integrationBranch "
+                            f"{'set' if expected else 'removed: it is your branch too'})"))
+    elif configured != expected:
+        checks.append(Check("integration-branch", MANUAL, "git config kankan.integrationBranch does not match",
+                            f"git config kankan.integrationBranch {branch}" if expected else
+                            "git config --unset kankan.integrationBranch"))
     if checked_out:
         checks.append(Check("integration-branch", WARN, f"{branch} is checked out in {checked_out[0]}",
                             f"switch {checked_out[0]} to one of your branches: only kankan may move {branch}"))
-    elif configured != branch and fix:
-        gitutil.run(repo, ["config", "kankan.integrationBranch", branch])
-        checks.append(Check("integration-branch", FIXED, f"{branch} (git config kankan.integrationBranch set)"))
-    elif configured != branch:
-        checks.append(Check("integration-branch", MANUAL, "git config kankan.integrationBranch is not set",
-                            f"git config kankan.integrationBranch {branch}"))
-    else:
+    elif not checks:
         checks.append(Check("integration-branch", OK, branch))
+    if branch == cfg.user_branch:
+        checks.append(Check("branches", SKIPPED, f"the agents integrate into your branch {branch}"))
+        return checks
     data = diag.branch_divergence(SimpleNamespace(cfg=cfg, paths=paths))
     if data["user"] is None:
         checks.append(Check("branches", SKIPPED, f"your branch {cfg.user_branch} does not exist"))
@@ -329,9 +352,11 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     elif not fix:
         checks.append(Check("labels", MANUAL, f"missing: {', '.join(missing)}", "kankan doctor (without --no-fix)"))
     else:
+        from kankan.config import load_config
         with project_lock(paths):
-            ensure_labels(cfg, project.trello, snap)
-            save_config(paths, cfg)
+            fresh = load_config(paths)  # a launcher may have registered a seat meanwhile
+            ensure_labels(fresh, project.trello, snap)
+            save_config(paths, fresh)
         checks.append(Check("labels", FIXED, f"recreated {', '.join(missing)}"))
         checks.append(Check("labels-restart", WARN, "running launchers read label IDs at startup; a recreated HOLD "
                             "does not restore which cards were held",
@@ -363,7 +388,7 @@ def preflight(types: Sequence[str], paths=None) -> None:
     if os.environ.get("KANKAN_SKIP_PREFLIGHT") == "1":
         return
     checks = [check_kankan_path(), *[c for c in check_agents(paths, types) if c.name.startswith("agent:")],
-              check_skill(True)]
+              _ensure_skill_links(types)]
     manual = [c for c in checks if c.status == MANUAL or (c.name.startswith("agent:") and c.status == WARN)]
     if manual:
         raise KankanError(Status.CONFIG_ERROR, "cannot start the agents:\n" + "\n".join(

@@ -51,12 +51,20 @@ def supervisor_argv(agent_type: str, seat: Optional[str]) -> List[str]:
     return argv
 
 
-def agent_path(path: Optional[str] = None) -> str:
-    """PATH for agents: this installation's script directory first, so agents run the launcher's kankan."""
+def agent_path(path: Optional[str], paths) -> str:
+    """PATH for agents: a private directory holding only a ``kankan`` wrapper for this installation comes first,
+    so agents run the launcher's kankan without seeing its interpreter's python, pip or pytest."""
     path = os.environ.get("PATH", "/usr/bin:/bin") if path is None else path
-    here = str(Path(sys.executable).parent)
-    if not (Path(here) / "kankan").exists():
-        return path
+    bin_dir = paths.kankan_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bin_dir / "kankan"
+    content = f"#!/bin/sh\nexec '{sys.executable}' -m kankan \"$@\"\n"
+    if not wrapper.exists() or wrapper.read_text() != content:
+        tmp = bin_dir / f".kankan.{os.getpid()}"
+        tmp.write_text(content)
+        tmp.chmod(0o755)
+        os.replace(tmp, wrapper)
+    here = str(bin_dir)
     return os.pathsep.join([here] + [p for p in path.split(os.pathsep) if p and p != here])
 
 
@@ -74,7 +82,7 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
     if seat is not None and tmux.has_session(session_name("ai-", project.paths.project, seat)):
         raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is already running")
     name = f"ai-{sanitize(project.paths.project)}-{agent_type}-starting-{secrets.token_hex(3)}"
-    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env={"PATH": agent_path()})
+    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env={"PATH": agent_path(None, project.paths)})
     tmux.set_option(name, "@kankan_repo", str(project.paths.repo))
     project.log("agent_started", session=name, type=agent_type, seat=seat)
     if attach:

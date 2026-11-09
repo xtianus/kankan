@@ -155,7 +155,7 @@ class Launcher:
         env.update(KANKAN_SEAT=self.lease.seat, KANKAN_SESSION=self.lease.session,
                    KANKAN_PROJECT=self.project.paths.project)
         from kankan.agents_cmd import agent_path
-        env["PATH"] = agent_path(env.get("PATH", "/usr/bin:/bin"))
+        env["PATH"] = agent_path(env.get("PATH", "/usr/bin:/bin"), self.project.paths)
         env.pop("KANKAN_SUPERVISOR_PID", None)
         launcher_pid = os.getpid()
 

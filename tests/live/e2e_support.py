@@ -162,8 +162,10 @@ def strip_registry_block(desc: str) -> str:
     return pattern.sub("\n", desc or "").strip() + "\n"
 
 
-def teardown_board(client: TrelloClient, board_id: str, card_ids: List[str], registry_id: str) -> List[str]:
-    """Delete only this run's cards; remove the registry block only if it is still this run's."""
+def teardown_board(client: TrelloClient, board_id: str, card_ids: List[str], registry_id: Optional[str],
+                   clone_path: Optional[str] = None) -> List[str]:
+    """Delete only this run's cards; remove the registry block only if it is still this run's (by registry id, or
+    by the clone path when the run failed before its configuration was read)."""
     actions = []
     for card_id in card_ids:
         try:
@@ -173,7 +175,9 @@ def teardown_board(client: TrelloClient, board_id: str, card_ids: List[str], reg
             actions.append(f"could not delete card {card_id}: {err}")
     desc = client.board(board_id).get("desc", "")
     block = registry_block(desc)
-    if block and block.get("registry-id") == registry_id:
+    mine = block and ((registry_id and block.get("registry-id") == registry_id) or
+                      (registry_id is None and clone_path and block.get("path") == clone_path))
+    if mine:
         client.set_board_desc(board_id, strip_registry_block(desc))
         actions.append("removed the registry block")
     elif block:
@@ -211,7 +215,7 @@ EXPECTED_FILES = {
              "exactly one lowercase word"),
     "name": ("names.txt", lambda text, ctx: len(text.splitlines()) == 1 and
              bool(re.fullmatch(r"(?i)(claude|codex)", text.strip())), "one line `claude` or `codex`"),
-    "ask": ("colors.txt", lambda text, ctx: any(a.strip().lower() in text.lower() for a in ctx["answers"]),
+    "ask": ("colors.txt", lambda text, ctx: any(a.strip() and a.strip().lower() in text.lower() for a in ctx["answers"]),
             "one of the user's answers"),
     "merge": ("user.txt", lambda text, ctx: text == "from the user\n", "`from the user`"),
     "hold": ("count.txt", lambda text, ctx: text == "1\n2\n3\n4\n5\n", "the numbers 1 to 5"),
