@@ -248,7 +248,7 @@ In `idle`, with no work, the launcher does not involve the agent and spends no t
 
 `kankan stop <seat>` records a stop request: the launcher exits after the current task (even if the request arrives in `limited`).
 
-If in `waiting_human` the agent goes back to "working" without the launcher having forwarded anything, the user answered from tmux: the launcher removes the label set by `ask`/`fail` and comments "resumed".
+If in `waiting_human` the agent, after stopping ("ready"), goes back to "working" without the launcher having forwarded anything, the user answered from tmux (the "working" right after `ask` is the agent finishing its own turn and does not count): the launcher removes the label set by `ask`/`fail` and comments "resumed".
 
 ### 8.6 Pane observation and writes
 

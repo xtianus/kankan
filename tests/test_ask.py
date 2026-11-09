@@ -113,9 +113,24 @@ def test_no_inactivity_error_while_waiting(waiting):
     assert project.cfg.label_error not in labels_of(fake, card)
 
 
-def test_tmux_reply_detected(waiting):
+def test_still_working_after_ask_is_not_a_reply(waiting):
+    """Right after `kankan ask` the agent is still finishing its turn: that is not an answer from the terminal."""
     project, fake, card, launcher, tmux = waiting
     tmux.screen = WORKING
+    launcher.step()
+    launcher.step()
+    assert launcher.state == "waiting_human"
+    assert project.cfg.label_question in labels_of(fake, card)
+    assert not any("resumed" in c for c in fake.card_comments(card["id"]))
+
+
+def test_tmux_reply_detected(waiting):
+    project, fake, card, launcher, tmux = waiting
+    tmux.screen = WORKING  # the agent finishes its turn after asking…
+    launcher.step()
+    tmux.screen = READY    # …stops and waits…
+    launcher.step()
+    tmux.screen = WORKING  # …and works again: someone answered in the terminal
     launcher.step()
     assert launcher.state == "working"
     assert project.cfg.label_question not in labels_of(fake, card)

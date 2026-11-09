@@ -91,7 +91,11 @@ def step(launcher, cls) -> None:
         launcher.ready_since = None
         launcher.set_state("working")
         return
-    if cls.state == "working":
+    if cls.state == "ready":
+        launcher.waiting_saw_ready = True
+    # an answer typed in the terminal: the agent stopped (ready) after asking and now works again; the "working"
+    # right after `kankan ask` is the agent finishing its own turn
+    if cls.state == "working" and getattr(launcher, "waiting_saw_ready", False):
         _clear_waiting_label(launcher)
         try:
             launcher.project.trello.add_comment(launcher.task["card"], messages.RESUMED,

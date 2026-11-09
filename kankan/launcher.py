@@ -345,6 +345,7 @@ class Launcher:
             if sig["kind"] in ("ask", "fail"):
                 self.set_state("waiting_human")
                 self.waiting_since = clock.monotonic()
+                self.waiting_saw_ready = False  # the agent usually keeps working a moment after asking
             else:
                 self.set_state("closing")
                 self.closing_since = clock.monotonic()
