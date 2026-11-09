@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from kankan import cards, labels, messages, worktrees
+from kankan import attachments, cards, labels, messages, worktrees
 from kankan.cards import CardMeta, Phase, target_list_for, transition
 from kankan.errors import KankanError, Status
 from kankan.project import Project
@@ -71,6 +71,15 @@ def _own_ref(ctx: AgentContext, phases) -> RefValue:
     return value
 
 
+def _still_own(ctx: AgentContext, phases) -> bool:
+    """The rule of ``_own_ref`` without raising: False also when the ref cannot be read."""
+    try:
+        value = _card_ref(ctx)
+    except KankanError:
+        return False
+    return value is not None and value.meta.get("owner") == ctx.seat and value.meta.get("phase") in phases
+
+
 def task(ctx: AgentContext) -> dict:
     current = ctx.task
     phases = {"impl": (Phase.IMPL.value,), "review": (Phase.REVIEW.value,)}.get(current["kind"], cards.OWNED_PHASES)
@@ -78,6 +87,7 @@ def task(ctx: AgentContext) -> dict:
     card = ctx.project.trello.card(current["card"])
     if card is None or card.closed:
         raise KankanError(Status.INELIGIBLE, "the card was deleted or archived")
+    inputs = attachments.for_task(ctx.project, card, still_held=lambda: _still_own(ctx, phases))
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
         "title": card.name, "url": card.url, "desc": card.desc, "phase": value.meta.get("phase"),
@@ -85,7 +95,7 @@ def task(ctx: AgentContext) -> dict:
         "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),
         "hold": ctx.project.cfg.label_hold in card.label_ids,
-        "instructions": messages.INSTRUCTIONS.get(current["kind"], ""),
+        "instructions": messages.INSTRUCTIONS.get(current["kind"], ""), "attachments": inputs,
     }
 
 

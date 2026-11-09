@@ -7,7 +7,7 @@ written by kankan's account is an answer for the agent.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 from kankan.errors import KankanError
 
@@ -39,6 +39,13 @@ def mention(project, card_id: str) -> str:
     return " ".join(f"@{username}" for _, username in people if username)
 
 
+def input_members(project) -> Set[str]:
+    """Ids of the board members whose comments and card attachments reach the agent: every member but kankan's
+    own account (spec §13.3, §14.3)."""
+    members = {member_id for member_id, _, _ in project.trello.board_members(project.cfg.board_id)}
+    return members - {kankan_member_id(project)}
+
+
 def answers(project, comments) -> list:
     """Comments the agent should receive: written by a board member other than kankan's account, without kankan's
     marker. Comments by people outside the board are never forwarded (open commenting would let anyone type into
@@ -47,5 +54,5 @@ def answers(project, comments) -> list:
     candidates = [c for c in comments if c.member_id != kankan_member_id(project) and f"`{MARKER_PREFIX}" not in c.text]
     if not candidates:
         return []
-    members = {member_id for member_id, _, _ in project.trello.board_members(project.cfg.board_id)}
+    members = input_members(project)
     return [c for c in candidates if c.member_id in members]

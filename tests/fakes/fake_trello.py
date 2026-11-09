@@ -277,6 +277,8 @@ class FakeTrello:
                 if fault in ("500", "429"):
                     headers = {"Retry-After": "1"} if fault == "429" else {}
                     return self._send(int(fault), {"message": "injected"}, headers)
+                if fault == "404":  # a hostile server echoing the credential in its error body
+                    return self._send(404, {"message": "not found", "echo": auth})
                 if f'oauth_consumer_key="{fake.key}"' not in auth or f'oauth_token="{fake.token}"' not in auth:
                     return self._send(401, "invalid token")
                 with fake.lock:

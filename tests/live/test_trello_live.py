@@ -37,3 +37,29 @@ def test_live_snapshot_move_label_comment(live_board, run_prefix):
     created["labels"].remove(label.id)
     client.archive_list(second.id)
     assert client.list_info(second.id).closed
+
+
+def test_live_attachments(live_board, run_prefix):
+    """Upload, link, listing and download on real Trello; pins the download URL shape `download_path` accepts."""
+    import io
+
+    from kankan import attachments, clock
+    from kankan.trello import DownloadTooLarge
+    client, board, created = live_board
+    lst = client.create_list(board["id"], f"{run_prefix} attachments")
+    created["lists"].append(lst.id)
+    card = client.create_card(lst.id, f"{run_prefix} attachments")
+    created["cards"].append(card.id)
+    content = b"hello attachments\n"
+    client.upload_attachment(card.id, "kankan probe.txt", content, "text/plain")
+    client.attach_link(card.id, "https://example.com/spec.html", "spec link")
+    upload, link = client.attachments(card.id)
+    assert upload.is_upload and upload.bytes == len(content) == 18 and upload.member_id == client.me()["id"]
+    assert not link.is_upload and link.url == "https://example.com/spec.html"
+    path = attachments.download_path(client.base_url, upload.url, card.id, upload.id)
+    assert path is not None, upload.url
+    buf = io.BytesIO()
+    assert client.download(path, buf, 1024, clock.monotonic() + 30) == len(content)
+    assert buf.getvalue() == content
+    with pytest.raises(DownloadTooLarge):
+        client.download(path, io.BytesIO(), 4, clock.monotonic() + 30)

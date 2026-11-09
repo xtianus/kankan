@@ -39,8 +39,21 @@ def test_task_fields(agent, capsys):
     code, out = run(capsys, "task")
     assert code == 0 and out["ok"]
     assert set(out["data"]) == {"task_id", "kind", "card_id", "short", "title", "url", "desc", "phase", "branch",
-                                "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions"}
+                                "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions", "attachments"}
+    assert out["data"]["attachments"] == []
     assert out["data"]["title"] == "Feature" and out["data"]["task_id"] == task["id"]
+
+
+def test_task_text_lists_attachments(agent, capsys):
+    project, fake, lease, task, wt, card = agent
+    fake.upload(card["id"], "spec.txt", b"spec\n", "text/plain")
+    fake.add_attachment(card["id"], "https://example.com/spec.html", name="spec")
+    assert cli.main(["task"]) == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith("attachments: "))
+    files = json.loads(line[len("attachments: "):])
+    assert [(e["kind"], e["status"]) for e in files] == [("file", "ok"), ("link", "ok")]
+    assert Path(files[0]["path"]).read_bytes() == b"spec\n"
 
 
 def test_done_needs_commit(agent, capsys):

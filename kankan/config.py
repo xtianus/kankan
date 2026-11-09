@@ -125,6 +125,7 @@ class Config:
     new_conversation: Dict[str, str] = field(default_factory=dict)
     kankan_member_id: str = ""  # kankan's own Trello account (the token owner)
     kankan_username: str = ""
+    attachment_max_bytes: int = 26214400  # per downloaded card attachment (spec §13.3)
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
