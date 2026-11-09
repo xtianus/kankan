@@ -97,7 +97,7 @@ Files and links the user attaches to a card are task inputs for the agent ([spec
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
 | F1 | SHOULD | A user can attach files and links to a card from the UI. Without it, the user puts text in the description or links it there. | Trello "Add > Attachment" (computer upload or link) |
-| F2 | SHOULD | List a card's attachments with ID, name, URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | planned |
+| F2 | SHOULD | List a card's attachments with ID, name, file name (stable when the attachment is renamed), URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | planned |
 | F3 | SHOULD | Download the content of an uploaded file with the API credential, from a URL on the API host, without sending the credential to another host. Without it, the agent sees only the attachments' names and URLs. | planned |
 
 ## 10. Authentication bootstrap

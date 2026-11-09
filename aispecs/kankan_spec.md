@@ -106,6 +106,7 @@ kankan is a Python 3 package that uses **only the standard library** (pytest for
 | `notify` | Who is mentioned and whose comments are forwarded ([14.2](#142-notifications), [14.3](#143-answers-through-comments)). |
 | `diag` | `status`, `claims`, `reconcile`, administration commands. |
 | `doctor` | Installation and project checks, the preflight of `agent` and `up`. |
+| `attachments` | Card attachments as task inputs ([13.3](#133-card-attachments)): classification, download, local copies. |
 | `cli` | Commands, text and JSON output, exit codes. |
 
 The **shared skill** ([`SKILL.md`](../kankan/skill/SKILL.md), for Claude Code and Codex) explains to the agent how to carry out an assigned task. The work cycle belongs to the launcher.
@@ -468,15 +469,15 @@ The user can attach files and links to a card (screenshots, mock-ups, logs, docu
 
 **Who can supply inputs.** Only attachments added by board members other than kankan's own account are task inputs, the same rule as for forwarded comments ([14.3](#143-answers-through-comments)). Other attachments are listed with status `not_member`, without URL and without download.
 
-**Download.** `kankan task` reads the card's attachments (ID, name, URL, size, MIME type, uploader, upload flag) and downloads every file that is not already present:
+**Download.** `kankan task` reads the card's attachments (ID, name, file name, URL, size, MIME type, uploader, upload flag) and the board's members, and downloads every file that is not already present:
 - into `<gcd>/kankan/attachments/<shortLink>/<attachment-id>/<file name>`, outside every worktree: the files never dirty a worktree, are never committed by accident and are shared by the implementer's and the reviewer's seats; the agent reads them by path and, when a file belongs in the repository (e.g. an image asset), copies it there and commits it;
-- with the file name sanitized (path separators, `..`, leading dots and control characters replaced; an empty name becomes `file`);
-- writing to a temporary file in the same directory and renaming it atomically; a file already present with the expected size is not downloaded again;
+- under the file name Trello records for the upload (renaming the attachment does not change it), sanitized (path separators, `..`, leading dots and control characters replaced; an empty name becomes `file`);
+- writing to a temporary file in the same directory and renaming it atomically; a file already present with the expected size is not downloaded again (when Trello reports no size, a copy not larger than `attachment_max_bytes` is reused);
 - only from the URL Trello gives for that card's attachment (`https://trello.com/1/cards/<card-id>/attachments/<attachment-id>/download/…`, also accepted with the API host); any other URL on a file attachment gives status `unexpected_url`;
 - authenticating with the API credential in an HTTP header, never in the URL; the credential is sent only to the Trello API host and never follows a redirect to another host;
-- only up to `attachment_max_bytes` per file (configuration, default 25 MB); a larger file gets status `too_large` and is not downloaded.
+- only up to `attachment_max_bytes` per file (configuration, default 25 MiB, 26 214 400 bytes); a larger file gets status `too_large` and is not downloaded.
 
-Local copies of attachments no longer on the card are deleted by the next `kankan task`. A failed download does not fail `task`: the entry gets status `error` with the reason, and the next `kankan task` tries again. The directory `<gcd>/kankan/attachments/<shortLink>` is deleted when the card's ref is deleted (card verified in `Done`).
+The next `kankan task` deletes every local copy that is not a file with status `ok` (attachment removed from the card, uploader no longer a board member, limit lowered). A failure to read the card's attachments or the board's members fails `task` like a failed card read (`network_error` when temporary); a failed download does not fail `task`: the entry gets status `error` with the reason, and the next `kankan task` tries again. `task` starts no download after about 60 seconds, so that it returns within the agents' shell-command timeout; the files not reached get status `error` and are downloaded by the next `kankan task` (a file that cannot be downloaded within that time never is: the user links it instead). The directory `<gcd>/kankan/attachments/<shortLink>` is deleted when the card's ref is deleted (card verified in `Done`).
 
 **Task output.** `kankan task` adds the field `attachments`, in the card's order, one entry per non-dependency attachment:
 
@@ -735,7 +736,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 **Attachments**
 
-41. Card attachments: `task` lists files and links but not dependency card links; a file is downloaded once into the card's attachment directory and reused by the reviewer's seat; a file larger than `attachment_max_bytes` is `too_large`; an attachment by a non-member is `not_member` and not downloaded; a file name with `../` stays inside the directory; a file whose URL points elsewhere is `unexpected_url` and gets no credential; a redirect to another host gets no credential; a failed download is `error` and is retried by the next `task`; an attachment removed from the card loses its local copy; the directory is deleted when the card reaches `Done`.
+41. Card attachments: `task` lists files and links but not dependency card links; a file is downloaded once into the card's attachment directory and reused by the reviewer's seat; a file larger than `attachment_max_bytes` is `too_large`; an attachment by a non-member is `not_member` and not downloaded; a file name with `../` stays inside the directory; a file whose URL points elsewhere is `unexpected_url` and gets no credential; a redirect to another host gets no credential; a failed download is `error` and is retried by the next `task`; an attachment removed from the card, or whose uploader left the board, loses its local copy; the directory is deleted when the card reaches `Done`.
 
 ## 19. Out of scope
 
