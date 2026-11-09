@@ -238,15 +238,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         project = Project.open(clone)
         cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold))
         card_ids += [c.id for c in cards.values()]
-        wt = run_dir / "feat1-wt"
-        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "feat1", str(wt), "main"], check=True)
+        wt = run_dir / "user-work-wt"
+        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "user-work", str(wt), "main"], check=True)
         (wt / "user.txt").write_text("from the user\n")
         subprocess.run(["git", "-C", str(wt), "add", "user.txt"], check=True)
-        subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "user work on feat1"], check=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", "user work"], check=True)
         subprocess.run(["git", "-C", str(clone), "worktree", "remove", str(wt)], check=True)
         user_refs = {name: subprocess.run(["git", "-C", str(clone), "rev-parse", name], check=True, capture_output=True,
-                                          text=True).stdout.strip() for name in ("main", "feat1")}
-        cards["merge"] = merge_request(project, "feat1", top=False, title_prefix=f"{run_id} ")
+                                          text=True).stdout.strip() for name in ("main", "user-work")}
+        cards["merge"] = merge_request(project, "user-work", top=False, title_prefix=f"{run_id} ")
         card_ids.append(cards["merge"].id)
 
         from kankan import agents_cmd
