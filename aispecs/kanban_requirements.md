@@ -1,6 +1,6 @@
 # Kanban backend requirements for kankan
 
-**Status:** v1.1 (v1.1: card attachments, [section 9](#9-card-attachments), planned for spec v1.3)
+**Status:** v1.2 (v1.1: card attachments, [section 9](#9-card-attachments), planned for spec v1.3; v1.2: card attachment endpoints in use)
 **Date:** 2026-11-09
 **Related:** [`kankan_spec.md`](kankan_spec.md)
 
@@ -92,13 +92,13 @@ Requirement levels:
 
 ## 9. Card attachments
 
-Files and links the user attaches to a card are task inputs for the agent ([spec §13.3](kankan_spec.md#133-card-attachments)). Card-to-card links are dependencies ([section 8](#8-card-to-card-links-dependencies)), not task inputs. The endpoints are planned: the commit that implements spec v1.3 replaces "planned" with the endpoints the code uses.
+Files and links the user attaches to a card are task inputs for the agent ([spec §13.3](kankan_spec.md#133-card-attachments)). Card-to-card links are dependencies ([section 8](#8-card-to-card-links-dependencies)), not task inputs.
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| F1 | SHOULD | A user can attach files and links to a card from the UI. Without it, the user puts text in the description or links it there. | Trello "Add > Attachment" (computer upload or link) |
-| F2 | SHOULD | List a card's attachments with ID, name, file name (stable when the attachment is renamed), URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | planned |
-| F3 | SHOULD | Download the content of an uploaded file with the API credential, from a URL on the API host, without sending the credential to another host. Without it, the agent sees only the attachments' names and URLs. | planned |
+| F1 | SHOULD | A user can attach files and links to a card from the UI. Without it, the user puts text in the description or links it there. | Trello "Add > Attachment" (computer upload or link); live test suite only: `POST /1/cards/{id}/attachments` (multipart `file`, or `url` + `name`) |
+| F2 | SHOULD | List a card's attachments with ID, name, file name (stable when the attachment is renamed), URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | `GET /1/cards/{id}/attachments?fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos`, plus [B6](#3-boards) for membership |
+| F3 | SHOULD | Download the content of an uploaded file with the API credential, from a URL on the API host, without sending the credential to another host. Without it, the agent sees only the attachments' names and URLs. | `GET /1/cards/{id}/attachments/{idAttachment}/download/{fileName}` on the API host with the `Authorization` header. The path is taken from the attachment's `url` after validation; a redirect to another origin is followed without the credential, https only. |
 
 ## 10. Authentication bootstrap
 

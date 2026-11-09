@@ -8,7 +8,10 @@ per request with ``inject``.
 
 from __future__ import annotations
 
+import collections
 import copy
+import email.parser
+import email.policy
 import itertools
 import json
 import re
@@ -18,10 +21,17 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 KEY = "fakekey0123456789abcdef0123456789"
 TOKEN = "faketoken" + "0" * 55
+
+
+class _Raw:
+    """A non-JSON response body: an attachment download."""
+
+    def __init__(self, att_id: str, content: bytes, mime_type, omit_length: bool):
+        self.att_id, self.content, self.mime_type, self.omit_length = att_id, content, mime_type, omit_length
 
 
 def _short() -> str:
@@ -37,6 +47,12 @@ class FakeTrello:
         self.request_count = 0
         self.requests = []  # (method, path)
         self.faults = []  # [method, regex, fault, remaining]
+        self.redirects = []  # [method, regex, location]: 302 to any matching request
+        self.auth_log = []  # (method, path, has_auth)
+        self.downloads = collections.Counter()  # attachment id -> complete downloads served
+        self.contents = {}  # attachment id -> (bytes, mime type): kept out of ``state`` (JSON)
+        self.download_redirects = {}  # attachment id -> Location
+        self.omit_length = set()  # attachment ids served without Content-Length
         self.timeout_delay = 0.6
         self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}  # the token owner
         self.owner = {"id": self.new_id(), "username": "boardowner", "fullName": "Board Owner"}  # the human
@@ -110,9 +126,61 @@ class FakeTrello:
             self.state["cards"][card["id"]] = card
             return card
 
-    def add_attachment(self, card_id: str, url: str) -> None:
+    def _next_attachment_pos(self, card_id: str) -> float:
+        return 16384 * (1 + len(self.state["cards"][card_id]["attachments"]))
+
+    def add_attachment(self, card_id: str, url: str, name: str = None, member_id: str = None) -> dict:
+        """A link attachment, as Trello reports it (no size, empty MIME type)."""
         with self.lock:
-            self.state["cards"][card_id]["attachments"].append({"id": self.new_id(), "url": url})
+            attachment = {"id": self.new_id(), "name": name if name is not None else url, "fileName": None, "url": url,
+                          "bytes": None, "mimeType": "", "idMember": member_id or self.owner["id"], "isUpload": False,
+                          "pos": self._next_attachment_pos(card_id)}
+            self.state["cards"][card_id]["attachments"].append(attachment)
+            return attachment
+
+    def upload(self, card_id: str, file_name: str, content: bytes, mime_type: str = None, member_id: str = None,
+               name: str = None, url: str = None, bytes_reported="actual") -> dict:
+        """An uploaded file; ``bytes_reported`` is the size Trello reports ("actual", None or a number)."""
+        with self.lock:
+            att_id = self.new_id()
+            attachment = {"id": att_id, "name": name if name is not None else file_name, "fileName": file_name,
+                          "url": url or f"https://trello.com/1/cards/{card_id}/attachments/{att_id}/download/"
+                                        f"{quote(file_name, safe='')}",
+                          "bytes": len(content) if bytes_reported == "actual" else bytes_reported,
+                          "mimeType": mime_type, "idMember": member_id or self.owner["id"], "isUpload": True,
+                          "pos": self._next_attachment_pos(card_id)}
+            self.state["cards"][card_id]["attachments"].append(attachment)
+            self.contents[att_id] = (content, mime_type)
+            return attachment
+
+    def remove_attachment(self, card_id: str, att_id: str) -> None:
+        with self.lock:
+            card = self.state["cards"][card_id]
+            card["attachments"] = [a for a in card["attachments"] if a["id"] != att_id]
+            self.contents.pop(att_id, None)
+
+    def redirect_download(self, att_id: str, location: str) -> None:
+        with self.lock:
+            self.download_redirects[att_id] = location
+
+    def redirect_route(self, method: str, path_regex: str, location: str) -> None:
+        with self.lock:
+            self.redirects.append([method.upper(), re.compile(path_regex), location])
+
+    def download_omit_length(self, att_id: str) -> None:
+        with self.lock:
+            self.omit_length.add(att_id)
+
+    def join_board(self, board_id: str, member_id: str) -> None:
+        with self.lock:
+            memberships = self.state["boards"][board_id]["memberships"]
+            if all(m["idMember"] != member_id for m in memberships):
+                memberships.append({"idMember": member_id, "memberType": "normal"})
+
+    def leave_board(self, board_id: str, member_id: str) -> None:
+        with self.lock:
+            board = self.state["boards"][board_id]
+            board["memberships"] = [m for m in board["memberships"] if m["idMember"] != member_id]
 
     def user_move(self, card_id: str, list_id: str) -> None:
         with self.lock:
@@ -180,20 +248,28 @@ class FakeTrello:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length:
                     body = self.rfile.read(length)
-                    try:
-                        params.update(json.loads(body))
-                    except ValueError:
-                        params.update({k: v[-1] for k, v in parse_qs(body.decode()).items()})
+                    content_type = self.headers.get("Content-Type", "")
+                    if content_type.startswith("multipart/form-data"):
+                        params.update(_multipart(content_type, body))
+                    else:
+                        try:
+                            params.update(json.loads(body))
+                        except ValueError:
+                            params.update({k: v[-1] for k, v in parse_qs(body.decode()).items()})
                 auth = self.headers.get("Authorization", "")
                 with fake.lock:
                     fake.request_count += 1
                     fake.requests.append((method, parsed.path))
+                    fake.auth_log.append((method, parsed.path, bool(auth)))
                     fault = None
                     for entry in fake.faults:
                         if entry[3] > 0 and entry[0] == method and entry[1].search(parsed.path):
                             entry[3] -= 1
                             fault = entry[2]
                             break
+                    redirect = next((r[2] for r in fake.redirects if r[0] == method and r[1].search(parsed.path)), None)
+                if redirect is not None:
+                    return self._redirect(redirect)
                 if fault == "timeout":
                     time.sleep(fake.timeout_delay)
                     self.close_connection = True
@@ -219,9 +295,19 @@ class FakeTrello:
                     time.sleep(fake.timeout_delay)
                     self.close_connection = True
                     return
-                self._send(status, payload)
+                if status == 302:
+                    return self._redirect(payload)
+                if isinstance(payload, _Raw):
+                    return self._send_raw(payload, truncate=fault == "truncate")
+                self._send(status, payload, truncate=fault == "truncate")
 
-            def _send(self, status, payload, headers=None):
+            def _redirect(self, location):
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def _send(self, status, payload, headers=None, truncate=False):
                 data = json.dumps(payload).encode() if not isinstance(payload, str) else payload.encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -229,10 +315,32 @@ class FakeTrello:
                 for k, v in (headers or {}).items():
                     self.send_header(k, v)
                 self.end_headers()
+                self._write(data, truncate)
+
+            def _send_raw(self, raw, truncate=False):
+                self.send_response(200)
+                self.send_header("Content-Type", raw.mime_type or "application/octet-stream")
+                if raw.omit_length:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                else:
+                    self.send_header("Content-Length", str(len(raw.content)))
+                self.end_headers()
+                if self._write(raw.content, truncate):
+                    with fake.lock:
+                        fake.downloads[raw.att_id] += 1
+
+            def _write(self, data, truncate):
+                """Send ``data`` (only its first half and close, if ``truncate``); True when all was sent."""
+                if truncate:
+                    data = data[:len(data) // 2]
+                    self.close_connection = True
                 try:
                     self.wfile.write(data)
+                    self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
-                    pass
+                    return False
+                return not truncate
 
             def do_GET(self):
                 self._handle("GET")
@@ -392,6 +500,36 @@ class FakeTrello:
                     comments = [c for c in comments if c["id"] < p["before"]]
                 return 200, comments[:int(p.get("limit", 50))]
             if parts[2:] == ["attachments"] and method == "POST":
-                self.add_attachment(card["id"], p["url"])
-                return 200, card["attachments"][-1]
+                if "file" in p:
+                    file_name, content, mime_type = p["file"]
+                    return 200, self.upload(card["id"], file_name, content, mime_type, member_id=self.me["id"],
+                                            name=p.get("name"))
+                return 200, self.add_attachment(card["id"], p["url"], p.get("name"), member_id=self.me["id"])
+            if parts[2:] == ["attachments"] and method == "GET":
+                fields = [f for f in p.get("fields", "").split(",") if f]
+                return 200, [{k: v for k, v in a.items() if not fields or k == "id" or k in fields}
+                             for a in card["attachments"]]
+            if len(parts) == 6 and parts[2] == "attachments" and parts[4] == "download" and method == "GET":
+                attachment = next((a for a in card["attachments"] if a["id"] == parts[3]), None)
+                if attachment is None or parts[3] not in self.contents or unquote(parts[5]) != attachment["fileName"]:
+                    return 404, "not found"
+                if parts[3] in self.download_redirects:
+                    return 302, self.download_redirects[parts[3]]
+                content, mime_type = self.contents[parts[3]]
+                return 200, _Raw(parts[3], content, mime_type, parts[3] in self.omit_length)
         return 404, "not found"
+
+
+def _multipart(content_type: str, body: bytes) -> dict:
+    """Fields of a multipart/form-data body; a file field becomes (file name, bytes, MIME type)."""
+    message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+        f"Content-Type: {content_type}\r\n\r\n".encode() + body)
+    fields = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        payload = part.get_payload(decode=True)
+        if part.get_filename() is not None:
+            fields[name] = (part.get_filename(), payload, part.get_content_type())
+        else:
+            fields[name] = payload.decode()
+    return fields

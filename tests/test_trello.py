@@ -1,8 +1,12 @@
+import io
+from urllib.parse import urlparse
+
 import pytest
 
 from kankan import clock
+from kankan import trello as trello_mod
 from kankan.errors import KankanError, Status
-from kankan.trello import TrelloClient
+from kankan.trello import DownloadTooLarge, TrelloClient
 from tests.fakes.fake_trello import KEY, TOKEN, FakeTrello
 
 
@@ -186,3 +190,159 @@ def test_create_card_with_description(fake, board):
     card = c.create_card(backlog["id"], "t", desc="do X")
     assert card.desc == "do X"
     assert c.card(card.id).desc == "do X"
+
+
+# ---------------------------------------------------------------------- attachments
+CONTENT = bytes(range(256)) * 600  # 153 600 bytes, several socket reads
+
+
+def _api_path(attachment) -> str:
+    url = attachment["url"] if isinstance(attachment, dict) else attachment.url
+    return urlparse(url).path
+
+
+def _download(fake, attachment, max_bytes=10 ** 7, budget=15.0, **kwargs):
+    out = io.BytesIO()
+    written = client(fake, **kwargs).download(_api_path(attachment), out, max_bytes, clock.monotonic() + budget)
+    return written, out.getvalue()
+
+
+def test_attachments_fields_and_order(fake, board, virtual_time):
+    card = board[2]
+    link = fake.add_attachment(card["id"], "https://example.com/spec", name="Spec")
+    upload = fake.upload(card["id"], "notes.txt", b"hello")
+    link["pos"] = upload["pos"] + 1000
+    found = client(fake).attachments(card["id"])
+    assert [a.id for a in found][-2:] == [upload["id"], link["id"]]
+    got_upload, got_link = found[-2], found[-1]
+    assert got_upload.is_upload and got_upload.bytes == 5 and got_upload.file_name == "notes.txt"
+    assert got_upload.member_id == fake.owner["id"] and got_upload.mime_type is None
+    assert got_upload.url.endswith(f"/attachments/{upload['id']}/download/notes.txt")
+    assert got_link.bytes is None and not got_link.is_upload and got_link.name == "Spec"
+    assert got_link.url == "https://example.com/spec"
+    assert fake.requests[-1] == ("GET", f"/1/cards/{card['id']}/attachments")
+
+
+def test_download_streams_content(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT, mime_type="application/octet-stream")
+    assert _download(fake, att) == (len(CONTENT), CONTENT)
+    assert fake.downloads[att["id"]] == 1
+
+
+def test_download_too_large_by_content_length(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT)
+    with pytest.raises(DownloadTooLarge):
+        _download(fake, att, max_bytes=len(CONTENT) - 1)
+
+
+def test_download_too_large_while_streaming(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT)
+    fake.download_omit_length(att["id"])
+    with pytest.raises(DownloadTooLarge):
+        _download(fake, att, max_bytes=100_000)
+    assert _download(fake, att, max_bytes=len(CONTENT)) == (len(CONTENT), CONTENT)
+
+
+def test_download_retries_500_then_succeeds(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT)
+    fake.inject("GET", "/download/", "500", times=2)
+    assert _download(fake, att) == (len(CONTENT), CONTENT)
+
+
+def test_download_truncated_is_retried_then_error(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT)
+    fake.inject("GET", "/download/", "truncate", times=1)
+    assert _download(fake, att) == (len(CONTENT), CONTENT)
+    fake.inject("GET", "/download/", "truncate", times=1000)
+    with pytest.raises(KankanError) as exc:
+        _download(fake, att)
+    assert exc.value.status == Status.NETWORK_ERROR
+    assert fake.downloads[att["id"]] == 1
+
+
+def test_download_404_is_error(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "data.bin", CONTENT)
+    fake.remove_attachment(board[2]["id"], att["id"])
+    with pytest.raises(KankanError) as exc:
+        _download(fake, att)
+    assert exc.value.message == "HTTP 404"
+    assert KEY not in repr(exc.value.data) and TOKEN not in str(exc.value)
+
+
+def test_download_same_origin_redirect_keeps_credential(fake, board, virtual_time):
+    first = fake.upload(board[2]["id"], "a.bin", b"first")
+    second = fake.upload(board[2]["id"], "b.bin", CONTENT)
+    fake.redirect_download(first["id"], _api_path(second))  # relative Location, same origin
+    assert _download(fake, first) == (len(CONTENT), CONTENT)
+    downloads = [entry for entry in fake.auth_log if "/download/" in entry[1]]
+    assert downloads == [("GET", _api_path(first), True), ("GET", _api_path(second), True)]
+
+
+def test_download_cross_origin_redirect_drops_credential(fake, board, external_host, virtual_time):
+    att = fake.upload(board[2]["id"], "a.bin", b"first")
+    fake.redirect_download(att["id"], external_host.url + "/files/a.bin")
+    assert _download(fake, att) == (len(external_host.content), external_host.content)
+    path, headers = external_host.requests[0]
+    assert path == "/files/a.bin"
+    assert "authorization" not in {name.lower() for name in headers}
+
+
+def test_download_too_many_redirects(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "a.bin", b"first")
+    fake.redirect_download(att["id"], _api_path(att))
+    with pytest.raises(KankanError) as exc:
+        _download(fake, att)
+    assert exc.value.message == "too many redirects"
+
+
+def test_download_refused_redirect_scheme(fake, board, virtual_time):
+    att = fake.upload(board[2]["id"], "a.bin", b"first")
+    fake.redirect_download(att["id"], "file:///etc/passwd")
+    with pytest.raises(KankanError):
+        _download(fake, att)
+
+
+def test_download_path_must_be_absolute(fake, virtual_time):
+    with pytest.raises(KankanError):
+        client(fake).download("@example.com/x", io.BytesIO(), 100, clock.monotonic() + 5)
+
+
+def test_redirect_auth_policy():
+    auth = trello_mod._redirect_auth
+    assert auth("https://api.trello.com", "http://x.example/f") is None
+    assert auth("https://api.trello.com", "https://x.example/f") is False
+    assert auth("https://api.trello.com", "https://api.trello.com/1/x") is True
+    assert auth("https://api.trello.com", "https://API.trello.com:443/1/x") is True
+    assert auth("https://api.trello.com", "https://api.trello.com:8443/1/x") is False
+    assert auth("http://127.0.0.1:1", "http://localhost:2/f") is False
+    assert auth("https://api.trello.com", "file:///etc/passwd") is None
+    assert auth("https://api.trello.com", "ftp://api.trello.com/x") is None
+
+
+def test_json_call_does_not_follow_redirect(fake, external_host, virtual_time):
+    fake.redirect_route("GET", "/1/members/me$", external_host.url)
+    with pytest.raises(KankanError):
+        client(fake).me()
+    assert external_host.requests == []
+
+
+def test_attach_link_and_upload(fake, board, virtual_time):
+    card = board[2]
+    trello = client(fake)
+    link = trello.attach_link(card["id"], "https://example.com/doc", "Doc")
+    assert link.url == "https://example.com/doc" and link.name == "Doc" and not link.is_upload
+    assert link.member_id == fake.me["id"]
+    upload = trello.upload_attachment(card["id"], 'my "notes".txt', b"line\r\n--x\r\n", "text/plain")
+    assert upload.is_upload and upload.bytes == 11 and upload.mime_type == "text/plain"
+    assert upload.file_name == 'my "notes".txt'
+    assert _download(fake, upload) == (11, b"line\r\n--x\r\n")
+    assert [a.id for a in trello.attachments(card["id"])][-2:] == [link.id, upload.id]
+
+
+@pytest.mark.parametrize("location", ["http://[bad", "/1/café/x", "/1/a b"])
+def test_download_malformed_redirect_is_error(fake, board, virtual_time, location):
+    att = fake.upload(board[2]["id"], "a.bin", b"first")
+    fake.redirect_download(att["id"], location)
+    with pytest.raises(KankanError) as exc:
+        _download(fake, att)
+    assert exc.value.status == Status.TRELLO_ERROR

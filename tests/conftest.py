@@ -105,3 +105,11 @@ def agent_path(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     return bindir
+
+
+@pytest.fixture
+def external_host():
+    """An HTTP server on ``localhost``: another origin than the fake Trello server on ``127.0.0.1``."""
+    from tests.fakes.external_host import ExternalHost
+    with ExternalHost(b"external content\n" * 1000) as server:
+        yield server

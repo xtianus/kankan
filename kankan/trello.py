@@ -2,12 +2,16 @@
 
 This is the only module that talks to Trello (see ``aispecs/kanban_requirements.md``).
 Credentials travel in the ``Authorization`` header, never in URLs, so they cannot
-leak into error messages or logs.
+leak into error messages or logs. The header is never re-sent by urllib on a redirect
+(``add_unredirected_header``), and no request follows redirects automatically: JSON calls
+fail on a 3xx, downloads follow it themselves (``_redirect_auth``).
 """
 
 from __future__ import annotations
 
+import http.client
 import json
+import secrets
 import socket
 import threading
 import urllib.error
@@ -15,7 +19,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import BinaryIO, Callable, Dict, List, Optional, Tuple
 
 from kankan import clock
 from kankan.errors import KankanError, Status
@@ -76,6 +80,67 @@ class Comment:
     text: str
 
 
+@dataclass
+class Attachment:
+    id: str
+    name: str
+    file_name: str
+    url: str
+    bytes: Optional[int]
+    mime_type: Optional[str]
+    member_id: str
+    is_upload: bool
+    pos: float
+
+
+ATTACHMENT_FIELDS = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos"
+
+
+class DownloadTooLarge(Exception):
+    """The content is larger than the download's ``max_bytes``."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Turn every 3xx into an ``HTTPError``: redirects are never followed automatically."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+_MAX_REDIRECTS = 3
+
+
+def _origin(url: str) -> Optional[Tuple[str, str, Optional[int]]]:
+    """(scheme, host, effective port) of ``url``, or None when it cannot be parsed."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if port is None:
+        port = {"https": 443, "http": 80}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def _redirect_auth(base_url: str, new_url: str) -> Optional[bool]:
+    """Whether a download request to ``new_url`` carries the credential of ``base_url``.
+
+    True for the origin of ``base_url`` (scheme, host, effective port), False for another
+    http(s) origin, None (refuse) for any other scheme or for a downgrade from https to http.
+    """
+    base, new = _origin(base_url), _origin(new_url)
+    if base is None or new is None or new[0] not in ("http", "https") or not new[1]:
+        return None
+    if new == base:
+        return True
+    if base[0] == "https" and new[0] != "https":
+        return None
+    return False
+
+
 class _Transient(Exception):
     def __init__(self, reason: str, retry_after: Optional[float] = None):
         super().__init__(reason)
@@ -123,6 +188,23 @@ def _label(data: dict) -> Label:
     return Label(id=data["id"], name=data.get("name", ""), color=data.get("color"))
 
 
+def _attachment(data: dict) -> Attachment:
+    size = data.get("bytes")
+    return Attachment(id=data["id"], name=data.get("name") or "", file_name=data.get("fileName") or "",
+                      url=data.get("url") or "", bytes=size if isinstance(size, int) and not isinstance(size, bool) else None,
+                      mime_type=data.get("mimeType") or None, member_id=data.get("idMember") or "",
+                      is_upload=bool(data.get("isUpload", False)), pos=data.get("pos") or 0)
+
+
+def _multipart(file_name: str, content: bytes, mime_type: str) -> Tuple[bytes, str]:
+    """A multipart/form-data body with one ``file`` field, and its Content-Type."""
+    boundary = "kankan-" + secrets.token_hex(16)
+    quoted = file_name.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
+    head = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{quoted}\"\r\n"
+            f"Content-Type: {mime_type}\r\n\r\n").encode()
+    return head + content + f"\r\n--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
 def _comment(data: dict) -> Comment:
     member = data.get("memberCreator") or {}
     return Comment(id=data["id"], member_id=data.get("idMemberCreator", ""), username=member.get("username", ""),
@@ -139,19 +221,23 @@ class TrelloClient:
         self.budget = budget
 
     # ------------------------------------------------------------------ transport
-    def _once(self, method: str, path: str, params: Optional[dict], body: Optional[dict]):
+    def _once(self, method: str, path: str, params: Optional[dict], body: Optional[dict],
+              raw: Optional[Tuple[bytes, str]] = None):
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         data = json.dumps(body).encode() if body is not None else None
+        content_type = "application/json"
+        if raw is not None:
+            data, content_type = raw
         request = urllib.request.Request(url, data=data, method=method)
-        request.add_header("Authorization", self._auth)
+        request.add_unredirected_header("Authorization", self._auth)
         request.add_header("Accept", "application/json")
         if data is not None:
-            request.add_header("Content-Type", "application/json")
+            request.add_header("Content-Type", content_type)
         _BUCKET.take()
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _OPENER.open(request, timeout=self.timeout) as response:
                 raw = response.read()
                 return response.status, json.loads(raw) if raw else None
         except urllib.error.HTTPError as err:
@@ -169,7 +255,7 @@ class TrelloClient:
             raise KankanError(Status.TRELLO_ERROR, f"{method} {path}: response is not JSON")
 
     def _request(self, method: str, path: str, params: Optional[dict] = None, body: Optional[dict] = None,
-                 retry: bool = True, ok_codes=(200,)):
+                 retry: bool = True, ok_codes=(200,), raw: Optional[Tuple[bytes, str]] = None):
         """Send a request, retrying transient failures (if ``retry``) within the time budget.
 
         Returns ``(status, payload)`` for status codes in ``ok_codes`` or 404/400; maps the
@@ -179,7 +265,7 @@ class TrelloClient:
         attempt = 0
         while True:
             try:
-                status, payload = self._once(method, path, params, body)
+                status, payload = self._once(method, path, params, body, raw)
             except _Transient as err:
                 attempt += 1
                 delay = err.retry_after if err.retry_after is not None else min(0.5 * 2 ** (attempt - 1), 4.0)
@@ -194,8 +280,9 @@ class TrelloClient:
                 raise KankanError(Status.CONFIG_ERROR, f"Trello refused the credentials ({status}) on {method} {path}")
             return status, payload
 
-    def _ok(self, method: str, path: str, params: Optional[dict] = None, body: Optional[dict] = None, retry: bool = True):
-        status, payload = self._request(method, path, params, body, retry)
+    def _ok(self, method: str, path: str, params: Optional[dict] = None, body: Optional[dict] = None, retry: bool = True,
+            raw: Optional[Tuple[bytes, str]] = None):
+        status, payload = self._request(method, path, params, body, retry, raw=raw)
         if status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello {method} {path}: HTTP {status}: {str(payload)[:120]}",
                               {"status": status})
@@ -293,6 +380,95 @@ class TrelloClient:
         if status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello GET card: HTTP {status}")
         return _card(payload)
+
+    def attachments(self, card_id: str) -> List[Attachment]:
+        """The card's attachments (uploads and links) in the card's order."""
+        data = self._ok("GET", f"/1/cards/{card_id}/attachments", {"fields": ATTACHMENT_FIELDS})
+        return sorted((_attachment(a) for a in data), key=lambda a: a.pos)
+
+    def download(self, api_path: str, out: BinaryIO, max_bytes: int, deadline: float) -> int:
+        """Stream an attachment's content from ``api_path`` on the API host into ``out``; return its size.
+
+        The first request goes to ``base_url + api_path`` with the credential. Redirects are followed
+        by hand (at most 3) under ``_redirect_auth``. Transient failures (5xx, 429, connection errors,
+        truncation) are retried, rewriting ``out`` from the start, until ``deadline`` (``clock.monotonic``).
+        Raises ``DownloadTooLarge`` past ``max_bytes``, or ``KankanError`` whose message is a fixed reason
+        (never a response body or a URL).
+        """
+        if not api_path.startswith("/"):
+            raise KankanError(Status.TRELLO_ERROR, "invalid download path")
+        attempt = 0
+        while True:
+            try:
+                return self._download_once(api_path, out, max_bytes, deadline)
+            except _Transient as err:
+                attempt += 1
+                delay = err.retry_after if err.retry_after is not None else min(0.5 * 2 ** (attempt - 1), 4.0)
+                if attempt > self.max_retries or clock.monotonic() + delay >= deadline:
+                    raise KankanError(Status.NETWORK_ERROR, err.reason)
+                clock.sleep(delay)
+
+    def _download_once(self, api_path: str, out: BinaryIO, max_bytes: int, deadline: float) -> int:
+        out.seek(0)
+        out.truncate()
+        url = self.base_url + api_path
+        for _hop in range(_MAX_REDIRECTS + 1):
+            send_auth = _redirect_auth(self.base_url, url)
+            if send_auth is None:
+                scheme = urllib.parse.urlsplit(url).scheme.lower()
+                raise KankanError(Status.TRELLO_ERROR, "redirect to a non-https URL" if scheme == "http"
+                                  else "redirect refused")
+            remaining = deadline - clock.monotonic()
+            if remaining <= 0:
+                raise KankanError(Status.NETWORK_ERROR, "download timed out")
+            request = urllib.request.Request(url, method="GET")
+            if send_auth:
+                request.add_unredirected_header("Authorization", self._auth)
+                _BUCKET.take()
+            try:
+                response = _OPENER.open(request, timeout=max(1.0, min(10.0, remaining)))
+            except urllib.error.HTTPError as err:
+                code, location = err.code, err.headers.get("Location") if err.headers else None
+                err.close()
+                if code in _REDIRECT_CODES and location:
+                    url = urllib.parse.urljoin(url, location)
+                    continue
+                if code == 429 or code >= 500:
+                    raise _Transient(f"HTTP {code}")
+                raise KankanError(Status.TRELLO_ERROR, f"HTTP {code}")
+            except (ValueError, http.client.InvalidURL):
+                # a malformed or non-ASCII URL; urllib parses a Location before _NoRedirect sees it
+                raise KankanError(Status.TRELLO_ERROR, "invalid URL")
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as err:
+                reason = getattr(err, "reason", err)
+                raise _Transient(f"connection failed: {type(reason).__name__}")
+            with response:
+                return self._stream(response, out, max_bytes, deadline)
+        raise KankanError(Status.TRELLO_ERROR, "too many redirects")
+
+    @staticmethod
+    def _stream(response, out: BinaryIO, max_bytes: int, deadline: float) -> int:
+        length = response.headers.get("Content-Length")
+        expected = int(length) if length and length.strip().isdigit() else None
+        if expected is not None and expected > max_bytes:
+            raise DownloadTooLarge(f"larger than {max_bytes} bytes")
+        total = 0
+        while True:
+            try:
+                chunk = response.read1(65536)
+            except (http.client.HTTPException, OSError) as err:
+                raise _Transient(f"connection failed: {type(err).__name__}")
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise DownloadTooLarge(f"larger than {max_bytes} bytes")
+            out.write(chunk)
+            if clock.monotonic() > deadline:
+                raise KankanError(Status.NETWORK_ERROR, "download timed out")
+        if expected is not None and total != expected:
+            raise _Transient("incomplete download")
+        return total
 
     def list_info(self, list_id: str) -> Optional[TList]:
         status, payload = self._request("GET", f"/1/lists/{list_id}", {"fields": "name,closed,pos"})
@@ -401,3 +577,13 @@ class TrelloClient:
 
     def delete_card(self, card_id: str) -> None:
         self._ok("DELETE", f"/1/cards/{card_id}")
+
+    def attach_link(self, card_id: str, url: str, name: str) -> Attachment:
+        """Attach a link to a card (used only by the live test suite)."""
+        return _attachment(self._ok("POST", f"/1/cards/{card_id}/attachments", body={"url": url, "name": name},
+                                    retry=False))
+
+    def upload_attachment(self, card_id: str, file_name: str, content: bytes, mime_type: str) -> Attachment:
+        """Upload a file to a card (used only by the live test suite)."""
+        return _attachment(self._ok("POST", f"/1/cards/{card_id}/attachments",
+                                    raw=_multipart(file_name, content, mime_type), retry=False))
