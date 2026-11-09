@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from kankan import auditlog, clock, diag, labels, seats, workflow
+from kankan import attachments, auditlog, clock, diag, labels, seats, workflow
 from kankan.config import write_registry_block
 from kankan.refstore import card_ref
 from kankan.seatstate import update_state
@@ -139,3 +139,61 @@ def test_fix_only_certain_cases(kproject, fake_trello, monkeypatch):
     assert project.refs.read(card_ref(card["id"])) is None
     assert fake.state["cards"][card["id"]]["idLabels"] == [project.cfg.label_hold]
     assert resume["id"] not in fake.state["labels"]
+
+
+def _make_dir(project, name):
+    path = attachments.root(project.paths) / name / "x"
+    path.mkdir(parents=True)
+    (path / "f").write_text("data")
+    return path.parent
+
+
+def test_reconcile_reports_and_fixes_orphan_attachment_dirs(board):
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "c")
+    workflow.tick(project, lease)
+    orphan = _make_dir(project, "Ab12Cd34")
+    other = _make_dir(project, "not-a-short")
+    mine = _make_dir(project, card["shortLink"])
+    report = find(diag.reconcile(project), "attachment_dir_without_ref")
+    assert sorted(i.subject for i in report) == ["Ab12Cd34", "not-a-short"]
+    fixed = find(diag.reconcile(project, fix=True), "attachment_dir_deleted")
+    assert [(i.subject, i.fixed) for i in fixed] == [("Ab12Cd34", True)]
+    assert not orphan.exists() and other.exists() and mine.exists()
+
+
+@pytest.mark.parametrize("blob", [
+    lambda project: project.refs.write_blob({"schema": 1, "kind": "card", "card": "a" * 24}),
+    lambda project: project.refs.write_blob({"schema": 1, "card": "a" * 24, "phase": "parked"}),
+], ids=["no-short", "other-shape"])
+def test_reconcile_fix_skips_attachment_dirs_with_malformed_ref(board, blob):
+    project, fake, lease = board
+    orphan = _make_dir(project, "Ab12Cd34")
+    project.refs.create(card_ref("a" * 24), blob(project))
+    report = diag.reconcile(project, fix=True)
+    assert find(report, "attachment_dir_without_ref")[0].subject == "Ab12Cd34"
+    assert not find(report, "attachment_dir_deleted")
+    assert orphan.exists()
+
+
+def test_reconcile_fix_unparsable_blob_skips_attachment_dirs(board):
+    project, fake, lease = board
+    orphan = _make_dir(project, "Ab12Cd34")
+    git(project.paths.repo, "update-ref", card_ref("a" * 24), git(project.paths.repo, "rev-parse", "HEAD"))
+    report = diag.reconcile(project, fix=True)
+    assert find(report, "malformed_blob")
+    assert not find(report, "attachment_dir_deleted")
+    assert orphan.exists()
+
+
+def test_reconcile_fix_integrated_ref_also_discards(kproject, fake_trello, monkeypatch):
+    project, fake = kproject, fake_trello
+    card, codex, ctx = review_setup(project, fake, monkeypatch)
+    from kankan import integrate
+    integrate.integrate(ctx, git(ctx.worktree, "rev-parse", "HEAD"))
+    fake.user_move(card["id"], project.cfg.done)
+    directory = _make_dir(project, card["shortLink"])
+    issues = diag.reconcile(project, fix=True)
+    assert "integrated_ref_deleted" in {i.kind for i in issues if i.fixed}
+    assert project.refs.read(card_ref(card["id"])) is None
+    assert not directory.exists()

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from kankan import clock, faults, gitutil, labels, messages, worktrees
-from kankan.cards import CardMeta, Phase
+from kankan.cards import CardMeta, Phase, delete_integrated_ref
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import Main, Update, Verify, card_ref, seat_ref, validate_short_link
@@ -342,7 +342,7 @@ def done_review(ctx) -> dict:
                 project.log("human_moved", card=card.id, phase="integrated")
         if moved:
             _hold_after_integration(project, project.trello.card(card.id) or card, value.meta)
-            if project.refs.delete(ref, value.oid):
+            if delete_integrated_ref(project, ref, value):
                 project.log("ref_closed", card=ctx.task["card"])
             labels.clear_kankan_labels(project, project.trello.card(card.id) or card, None, ctx.seat)
     _leave_worktree(ctx, branch)

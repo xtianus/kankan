@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from kankan import agentcmds, attachments, auditlog, config, seats, workflow
+from kankan import agentcmds, attachments, auditlog, cards, config, diag, faults, integrate, seats, workflow
 from kankan.errors import KankanError, Status
 from kankan.refstore import card_ref
 from kankan.trello import TrelloClient
 from tests.conftest import git
-from tests.flow import agent_ctx, commit
+from tests.flow import agent_ctx, commit, review_setup
 from tests.helpers import bind_project
 
 CONTENT = b"hello attachment\n"
@@ -663,3 +663,73 @@ def test_input_members_excludes_kankan(env):
     from kankan import notify
     project, fake = env
     assert notify.input_members(project) == {fake.owner["id"]}
+
+
+# ---------------------------------------------------------------- removal after Done
+
+def _review_with_upload(project, fake, monkeypatch):
+    card, codex, ctx = review_setup(project, fake, monkeypatch)
+    fake.upload(card["id"], "spec.txt", CONTENT)
+    assert entries(ctx)[0]["status"] == "ok"
+    directory = attachments.card_dir(project.paths, card["shortLink"])
+    assert directory.exists()
+    return card, codex, ctx, directory
+
+
+def _tip(ctx):
+    return git(ctx.worktree, "rev-parse", "HEAD")
+
+
+def test_directory_deleted_when_card_reaches_done(env, monkeypatch):
+    """[41.10]"""
+    project, fake = env
+    card, codex, ctx, directory = _review_with_upload(project, fake, monkeypatch)
+    integrate.integrate(ctx, _tip(ctx))
+    assert directory.exists()
+    assert agentcmds.done(ctx)["phase"] == "done"
+    assert not directory.exists()
+    assert "attachments_discarded" in events(project)
+
+
+def test_directory_deleted_by_convergence(env, monkeypatch):
+    project, fake = env
+    card, codex, ctx, directory = _review_with_upload(project, fake, monkeypatch)
+    monkeypatch.setenv("KANKAN_FAULT", "after_main")
+    with pytest.raises(faults.SimulatedCrash):
+        integrate.integrate(ctx, _tip(ctx))
+    monkeypatch.delenv("KANKAN_FAULT")
+    assert directory.exists()
+    cards.converge(project, ctx.lease)
+    assert fake.card_list(card["id"]) == project.cfg.done
+    assert not directory.exists()
+
+
+def test_done_succeeds_when_discard_fails(env, monkeypatch):
+    project, fake = env
+    card, codex, ctx, directory = _review_with_upload(project, fake, monkeypatch)
+    integrate.integrate(ctx, _tip(ctx))
+
+    def failing(path, *args, **kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+    monkeypatch.setattr(shutil, "rmtree", failing)
+    assert agentcmds.done(ctx)["phase"] == "done"
+    assert directory.exists()
+    assert "attachments_discard_failed" in events(project)
+    issues = [i for i in diag.reconcile(project) if i.kind == "attachment_dir_without_ref"]
+    assert [i.subject for i in issues] == [card["shortLink"]]
+
+
+@pytest.mark.parametrize("make_root", [
+    lambda root: (root.parent.mkdir(parents=True, exist_ok=True), root.write_text("x")),
+    lambda root: (root.mkdir(parents=True), root.chmod(0)),
+], ids=["not-a-directory", "unreadable"])
+def test_directories_survives_bad_root(env, make_root):
+    project, _ = env
+    root = attachments.root(project.paths)
+    make_root(root)
+    try:
+        assert attachments.directories(project.paths) == []
+        assert diag.reconcile(project, fix=True) is not None
+    finally:
+        if root.is_dir():
+            root.chmod(0o700)

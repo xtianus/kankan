@@ -99,10 +99,17 @@ def download_path(base_url: str, url: str, card_id: str, att_id: str) -> Optiona
 
 def directories(paths: Paths) -> List[str]:
     """The names under the attachments root (none when it is missing or not a real directory)."""
-    top = _lstat(root(paths))
+    try:
+        top = _lstat(root(paths))
+    except OSError:
+        return []
     if top is None or not stat.S_ISDIR(top.st_mode):
         return []
-    return sorted(os.listdir(root(paths)))
+    try:
+        return sorted(os.listdir(root(paths)))
+    except OSError as err:  # unreadable, or replaced by a non-directory meanwhile
+        auditlog.append(paths, "attachments_root_unreadable", path=str(root(paths)), error=_os_message(err))
+        return []
 
 
 def discard(paths: Paths, short: str) -> bool:

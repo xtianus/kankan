@@ -6,7 +6,7 @@ import enum
 from dataclasses import asdict, dataclass, field, fields
 from typing import Dict, List, Optional, Union
 
-from kankan import clock, faults, labels
+from kankan import attachments, clock, faults, labels
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import (CARD_PREFIX, Create, Delete, RefValue, Update, Verify, card_ref, seat_ref)
@@ -184,6 +184,15 @@ def _parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
     return result
 
 
+def delete_integrated_ref(project, ref: str, value: RefValue) -> bool:
+    """Delete the ref of a card that is in Done (conditional on ``value.oid``) and, when that succeeds, its
+    attachment directory (best effort: ``attachments.discard`` never raises)."""
+    if not project.refs.delete(ref, value.oid):
+        return False
+    attachments.discard(project.paths, value.meta.get("short", ""))
+    return True
+
+
 def converge(project, lease: Lease, snap=None) -> List[str]:
     """Complete Trello moves lagging behind the refs (§10.4); never revert a human move.
 
@@ -214,7 +223,7 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
             target = meta.get("target_list")
             if phase == Phase.INTEGRATED.value and card.list_id == cfg.done:
                 _hold_after_integration(project, card, meta)
-                if project.refs.delete(ref, value.oid):
+                if delete_integrated_ref(project, ref, value):
                     labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
                     project.log("ref_closed", card=card_id)
                     events.append(f"deleted:{card_id}")
@@ -235,7 +244,7 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
                     value = confirm_move(project, ref, value)
                 if phase == Phase.INTEGRATED.value:
                     _hold_after_integration(project, card, meta)
-                if phase == Phase.INTEGRATED.value and project.refs.delete(ref, value.oid):
+                if phase == Phase.INTEGRATED.value and delete_integrated_ref(project, ref, value):
                     labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
                     events.append(f"deleted:{card_id}")
             except KankanError as err:

@@ -91,7 +91,7 @@ def claims_text(rows: List[Dict]) -> str:
 # ---------------------------------------------------------------------- reconcile
 from dataclasses import asdict, dataclass  # noqa: E402
 
-from kankan import auditlog, deps, gitutil, labels, worktrees  # noqa: E402
+from kankan import attachments, auditlog, cards, deps, gitutil, labels, worktrees  # noqa: E402
 from kankan.config import check_registry, project_lock, read_json, atomic_write_json  # noqa: E402
 from kankan.errors import KankanError  # noqa: E402
 from kankan.refstore import CARD_PREFIX, RefValue  # noqa: E402
@@ -197,6 +197,11 @@ def reconcile(project, fix: bool = False) -> List[Issue]:
         name = path.rsplit("/", 1)[-1]
         if name.startswith("blocked-") and name[len("blocked-"):] not in blocked_shorts:
             issues.append(Issue("stale_blocked_worktree", path, "its card is no longer in Blocked"))
+    # attachment directories of cards without a ref
+    ref_shorts = {value.meta.get("short") for value in refs.values()}
+    for name in attachments.directories(project.paths):
+        if name not in ref_shorts:
+            issues.append(Issue("attachment_dir_without_ref", name, "no card ref has this shortLink"))
     # old Error/Question labels
     limit = LABEL_AGE_HOURS * 3600
     for name in cfg.seats:
@@ -234,8 +239,9 @@ def _fix(project, snap, refs, liveness) -> List[Issue]:
                 continue
             card = snap.cards.get(card_id)
             if meta.get("phase") == "integrated" and card is not None and card.list_id == cfg.done:
-                if project.refs.delete(f"{CARD_PREFIX}{card_id}", value.oid):
+                if cards.delete_integrated_ref(project, f"{CARD_PREFIX}{card_id}", value):
                     fixed.append(Issue("integrated_ref_deleted", card_id, "card already in Done", True))
+        fixed += _fix_attachment_dirs(project)
         for label_id in labels.gc_resume_labels(project):
             fixed.append(Issue("resume_label_deleted", label_id, "unused or expired", True))
         snap = project.trello.snapshot(cfg.board_id)
@@ -250,6 +256,22 @@ def _fix(project, snap, refs, liveness) -> List[Issue]:
                 fixed.append(Issue("done_label_removed", card.id, label_id, True))
     project.log("reconcile_fix", fixed=len(fixed))
     return fixed
+
+
+def _fix_attachment_dirs(project) -> List[Issue]:
+    """Under the project lock: delete the attachment directories of cards without a ref. Deletes nothing when a
+    ref is malformed or has no valid shortLink (its directory could be wrongly taken for an orphan)."""
+    current = cards._parse_refs(project)
+    shorts = set()
+    for value in current.values():
+        short = None if isinstance(value, KankanError) else value.meta.get("short")
+        if not attachments._valid_short(short):
+            project.log("attachment_fix_skipped", reason="a card ref is malformed or has no valid shortLink")
+            return []
+        shorts.add(short)
+    return [Issue("attachment_dir_deleted", name, "no card ref has this shortLink", True)
+            for name in attachments.directories(project.paths)
+            if name not in shorts and attachments._valid_short(name) and attachments.discard(project.paths, name)]
 
 
 def issues_text(issues: List[Issue]) -> str:
