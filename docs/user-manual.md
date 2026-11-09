@@ -22,22 +22,7 @@ kankan uses only the Python standard library. `kankan` must be on your **login**
 
 ## 3. Binding a project to a board
 
-Run once in the project clone (for example `~/coding/myproject`):
-
-```bash
-kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.properties>] [--notify <user>]
-```
-
-`init` (§6.1):
-
-- checks the Trello credentials, and if they are missing asks for the API key (from `https://trello.com/apps/admin`, logged in as kankan's own Trello account, §3.1), prints the authorization URL and asks for the token. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
-- writes a `kankan-registry` block into the board description (the rest of the description is yours);
-- finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
-- asks for the project's **test command** (run by `kankan verify`; may be empty);
-- asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
-- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out.
-
-`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
+kankan works on Trello with its own Trello account (§3.1); then `kankan init` binds the project clone to the board (§3.2).
 
 ### 3.1 A Trello account for kankan
 
@@ -52,11 +37,32 @@ Trello never notifies you about your own actions. If kankan uses **your** token,
    3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. Copy the **API key** (kankan does not need the *Secret*).
 4. Still logged in as the bot, get the token: on the same **Trello Auth** tab click the **Token** link next to the API key, check that the page names your app, press **Allow** and copy the token. Key, app and token all belong to the bot; your own account only owns the boards.
    - This token also has the `account` scope (it could change the bot's own profile), which kankan does not need; for a dedicated bot account that is harmless. For the minimal scope, open instead the URL that `kankan init` prints when it asks for the token (`scope=read,write`).
-5. Store the bot's key and token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which is now the bot.
+5. Keep the key and the token at hand: `kankan init` asks for them (§3.2), or put them in a `.properties` file and pass it with `--credentials`. Run `init` with `--notify <your Trello username>`: by default kankan mentions the token's owner, which is the bot.
+
+If a clone already uses your own token, switch it to the bot with `kankan init --reauth`, then `kankan init --notify <your Trello username>`.
 
 Trello does not let you reset an API key, so keep the key and the token private; the token stays valid until it is revoked from the bot's account settings.
 
 Your answers keep working: kankan forwards to the agent only comments written by the notify user (you) without kankan's marker, and ignores the bot's own comments. `kankan init` and `kankan doctor` warn while the notify user is the token owner.
+
+### 3.2 `kankan init`
+
+Run once in the project clone (for example `~/coding/myproject`):
+
+```bash
+kankan init https://trello.com/b/<shortLink>/<name> --notify <your Trello username> [--credentials <file.properties>]
+```
+
+`init` (§6.1):
+
+- checks the Trello credentials, and if they are missing asks for the bot's API key and token (§3.1); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
+- writes a `kankan-registry` block into the board description (the rest of the description is yours);
+- finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
+- asks for the project's **test command** (run by `kankan verify`; may be empty);
+- asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
+- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out.
+
+`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`.
 
