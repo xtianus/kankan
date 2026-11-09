@@ -66,7 +66,8 @@ def task(ctx: AgentContext) -> dict:
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
         "title": card.name, "url": card.url, "desc": card.desc, "phase": value.meta.get("phase"),
-        "branch": value.meta.get("branch"), "worktree": str(ctx.worktree), "main": ctx.project.cfg.main_branch,
+        "branch": value.meta.get("branch"), "worktree": str(ctx.worktree), "main": ctx.project.cfg.integration_branch,
+        "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),
         "hold": ctx.project.cfg.label_hold in card.label_ids,
         "instructions": messages.INSTRUCTIONS.get(current["kind"], ""),
@@ -122,7 +123,7 @@ def done(ctx: AgentContext) -> dict:
     value = _own_ref(ctx, (Phase.IMPL.value,))
     branch = value.meta["branch"]
     require_clean(ctx.worktree)
-    main = ctx.project.cfg.main_branch
+    main = ctx.project.cfg.integration_branch
     if worktrees.commits_ahead(ctx.project.paths.repo, branch, main) < 1:
         raise KankanError(Status.NEEDS_ACTION, f"branch {branch} has no commit beyond {main}: commit your work first")
     if worktrees.current_branch(ctx.worktree) == branch:

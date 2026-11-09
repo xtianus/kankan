@@ -2,6 +2,7 @@
   "_comment": "Default adapters. Override only the keys that change in ~/.config/kankan/agents.json or <gcd>/kankan/agents.json. Patterns are case-insensitive Python regexes applied per line (multiline) to the last lines of the pane, with colours and URLs stripped. Answers are lists of tmux keys; text is sent literally.",
   "claude": {
     "command": ["claude"],
+    "login_check": ["claude", "auth", "status"],
     "new_conversation": "/clear",
     "submit_key": "Enter",
     "queue_while_working": true,
@@ -38,6 +39,7 @@
   },
   "codex": {
     "command": ["codex"],
+    "login_check": ["codex", "login", "status"],
     "new_conversation": "/new",
     "submit_key": "Enter",
     "queue_while_working": false,

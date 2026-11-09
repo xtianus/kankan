@@ -11,7 +11,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from kankan import auditlog, clock, gitutil, worktrees
+from kankan import auditlog, clock, gitutil, seats, worktrees
+from kankan.refstore import CARD_PREFIX, RefStore
 from kankan.config import (Config, Paths, load_config, load_credentials, project_lock, registry_block, save_config,
                            user_credentials_path, write_registry_block)
 from kankan.errors import KankanError, Status
@@ -83,17 +84,28 @@ def _blank_config(cfg_old: Optional[Config]) -> Config:
                   label_question="", label_error="", notify_id="", notify_username="", test_command="")
 
 
-def install_hook(paths: Paths) -> Optional[str]:
+def hook_path(paths: Paths) -> Path:
     hooks_path = gitutil.run(paths.repo, ["config", "--get", "core.hooksPath"], check=False).stdout.strip()
     hooks_dir = Path(hooks_path) if hooks_path else paths.gcd / "hooks"
     if not hooks_dir.is_absolute():
         hooks_dir = paths.repo / hooks_dir
-    hook = hooks_dir / "pre-push"
-    content = resources.files("kankan").joinpath("hooks/pre-push").read_text()
+    return hooks_dir / "pre-push"
+
+
+def hook_content() -> str:
+    return resources.files("kankan").joinpath("hooks/pre-push").read_text()
+
+
+def install_hook(paths: Paths) -> Optional[str]:
+    hook = hook_path(paths)
+    hooks_dir = hook.parent
+    content = hook_content()
     if hook.exists():
         if HOOK_MARKER in hook.read_text(errors="replace"):
             if hook.read_text() != content:
                 hook.write_text(content)
+            if not os.access(hook, os.X_OK):
+                os.chmod(hook, 0o755)
             return None
         return (f"a pre-push hook already exists at {hook}; it was not changed. Add a check that refuses "
                 f"refs/agent-* (see kankan/hooks/pre-push).")
@@ -103,7 +115,7 @@ def install_hook(paths: Paths) -> Optional[str]:
     return None
 
 
-def _add_excludes(paths: Paths) -> None:
+def add_excludes(paths: Paths) -> None:
     exclude = paths.gcd / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     text = exclude.read_text() if exclude.exists() else ""
@@ -147,7 +159,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Op
         _bind_registry(paths, cfg, client, board, takeover, say)
         snap = client.snapshot(cfg.board_id)
         _ensure_lists(cfg, cfg_old, client, snap, prompt)
-        _ensure_labels(cfg, client, snap)
+        ensure_labels(cfg, client, snap)
         if notify:
             member = client.member(notify.lstrip("@"))
             if member is None:
@@ -160,16 +172,64 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Op
         answer = prompt(f"Test command run by `kankan verify`{hint}: ").strip()
         if answer:
             cfg.test_command = answer
+        warnings += _ensure_integration_branch(paths, cfg, cfg_old, prompt, say)
         save_config(paths, cfg)
         hook_warning = install_hook(paths)
         if hook_warning:
             warnings.append(hook_warning)
-        _add_excludes(paths)
-        for path in worktrees.main_checked_out(paths.repo, cfg.main_branch):
-            warnings.append(f"{cfg.main_branch} is checked out in {path}: while agents work, keep a user branch "
-                            f"or a detached HEAD there (its files fall behind when {cfg.main_branch} advances)")
+        add_excludes(paths)
+        for path in worktrees.main_checked_out(paths.repo, cfg.integration_branch):
+            warnings.append(f"{cfg.integration_branch} is checked out in {path}: only kankan moves it, so switch that "
+                            f"worktree to one of your branches (its files fall behind when {cfg.integration_branch} "
+                            "advances)")
         auditlog.append(paths, "init", board=cfg.board_id, registry=cfg.registry_id)
     return cfg, warnings
+
+
+def _current_branch(repo: Path) -> Optional[str]:
+    proc = gitutil.run(repo, ["symbolic-ref", "-q", "--short", "HEAD"], check=False)
+    return proc.stdout.strip() or None
+
+
+def _ensure_integration_branch(paths: Paths, cfg: Config, cfg_old: Optional[Config], prompt: Callable[[str], str],
+                               say: Callable[[str], None]) -> List[str]:
+    """§6.1: choose, create or adopt the branch the agents integrate into; returns warnings."""
+    warnings: List[str] = []
+    repo = paths.repo
+    if cfg_old is None or not gitutil.rev(repo, f"refs/heads/{cfg.user_branch}"):
+        if gitutil.rev(repo, "refs/heads/main"):
+            cfg.user_branch = "main"
+        else:
+            current = _current_branch(repo)
+            cfg.user_branch = current or prompt("Your main branch: ").strip() or "main"
+    old = cfg_old.integration_branch if cfg_old is not None else None
+    default = old or "kankan-agents"
+    name = prompt(f"Branch where the agents integrate [{default}]: ").strip() or default
+    if gitutil.run(repo, ["check-ref-format", "--branch", name], check=False).returncode != 0:
+        raise KankanError(Status.USAGE_ERROR, f"{name!r} is not a valid branch name")
+    if old is not None and name != old:
+        held = seats.any_held(paths)
+        refs = RefStore(repo, old).list_raw(CARD_PREFIX)
+        if held or refs:
+            raise KankanError(Status.NEEDS_ACTION,
+                              f"the agents integrate into {old}: stop the agents and finish or release their cards "
+                              f"before changing it (alive: {', '.join(held) or 'none'}; cards in progress: {len(refs)})")
+    cfg.integration_branch = name
+    if not gitutil.rev(repo, f"refs/heads/{name}"):
+        remotes = gitutil.out(repo, ["remote"], check=False).split()
+        if "origin" in remotes:
+            gitutil.run(repo, ["fetch", "-q", "origin", f"+refs/heads/{name}:refs/remotes/origin/{name}"], check=False)
+        if gitutil.rev(repo, f"refs/remotes/origin/{name}"):
+            gitutil.run(repo, ["branch", "--no-track", name, f"refs/remotes/origin/{name}"])
+            say(f"Branch {name} created from origin/{name}")
+        else:
+            start = f"refs/heads/{cfg.user_branch}" if gitutil.rev(repo, f"refs/heads/{cfg.user_branch}") else "HEAD"
+            gitutil.run(repo, ["branch", "--no-track", name, start])
+            say(f"Branch {name} created from {cfg.user_branch if start != 'HEAD' else 'HEAD'}")
+    if name == cfg.user_branch:
+        warnings.append(f"the agents integrate into your branch {name}: never keep it checked out while they work")
+    gitutil.run(repo, ["config", "kankan.integrationBranch", name])
+    return warnings
 
 
 def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict, takeover: bool,
@@ -210,7 +270,7 @@ def _ensure_lists(cfg: Config, cfg_old: Optional[Config], client: TrelloClient, 
             setattr(cfg, attr, client.create_list(cfg.board_id, name).id)
 
 
-def _ensure_labels(cfg: Config, client: TrelloClient, snap) -> None:
+def ensure_labels(cfg: Config, client: TrelloClient, snap) -> None:
     for attr, name, color in LABELS:
         current = getattr(cfg, attr)
         if current and current in snap.labels:

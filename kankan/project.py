@@ -24,7 +24,7 @@ class Project:
         cfg = load_config(paths)
         key, token = load_credentials(paths, cfg)
         trello = TrelloClient(key, token, base_url=cfg.trello_base_url, timeout=cfg.trello_timeout)
-        return cls(paths=paths, cfg=cfg, refs=RefStore(paths.repo, cfg.main_branch), trello=trello)
+        return cls(paths=paths, cfg=cfg, refs=RefStore(paths.repo, cfg.integration_branch), trello=trello)
 
     def reload_config(self) -> Config:
         self.cfg = load_config(self.paths)

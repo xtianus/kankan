@@ -8,7 +8,10 @@ kankan skill install
 cd ~/coding/myproject
 kankan init https://trello.com/b/<shortLink>/<name>
 kankan up claude=2 codex=1
+kankan doctor               # when something does not start
 ```
+
+The agents integrate into the branch `kankan-agents`; `main` stays yours: `git merge kankan-agents` takes their work, `kankan merge-request <branch>` gives them yours.
 
 - User manual: [docs/user-manual.md](docs/user-manual.md)
 - Developer manual: [docs/developer-manual.md](docs/developer-manual.md)

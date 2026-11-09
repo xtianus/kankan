@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -13,6 +14,14 @@ from kankan.refstore import validate_short_link
 def branch_name(short: str, year: Optional[int] = None) -> str:
     year = clock.now().year if year is None else year
     return f"{year % 100:02d}kankan-{validate_short_link(short)}"
+
+
+CARD_BRANCH = re.compile(r"^\d\dkankan-[A-Za-z0-9]{8}$")
+
+
+def reserved_branch(cfg, name: str) -> bool:
+    """The integration branch and the card branches belong to kankan; every other branch is the user's."""
+    return name == cfg.integration_branch or bool(CARD_BRANCH.match(name))
 
 
 def find_branches(repo, short: str) -> List[str]:

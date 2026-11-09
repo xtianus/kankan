@@ -108,7 +108,7 @@ class Launcher:
         check_registry(self.cfg, snap.desc)
         check_lists(self.cfg, snap.lists)
         from kankan import worktrees
-        main_wts = worktrees.main_checked_out(self.project.paths.repo, self.cfg.main_branch)
+        main_wts = worktrees.main_checked_out(self.project.paths.repo, self.cfg.integration_branch)
         pids = {"launcher": os.getpid(), "supervisor": _supervisor_pid(), "sid": seats.pane_sid()}
         self.lease = seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
         self.project.reload_config()
@@ -154,6 +154,8 @@ class Launcher:
         env = dict(os.environ)
         env.update(KANKAN_SEAT=self.lease.seat, KANKAN_SESSION=self.lease.session,
                    KANKAN_PROJECT=self.project.paths.project)
+        from kankan.agents_cmd import agent_path
+        env["PATH"] = agent_path(env.get("PATH", "/usr/bin:/bin"))
         env.pop("KANKAN_SUPERVISOR_PID", None)
         launcher_pid = os.getpid()
 

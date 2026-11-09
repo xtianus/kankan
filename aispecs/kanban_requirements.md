@@ -57,7 +57,7 @@ Requirement levels:
 | C3 | MUST | Move a card to another list of the same board and place it at the top. kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top`) then `GET /1/cards/{id}` |
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
-| C6 | SHOULD | Card creation and deletion through the API. Not used by kankan in production; required by the live test suite. | `POST /1/cards`, `DELETE /1/cards/{id}` |
+| C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; deletion is used only by the live test suites. Without it, merge requests are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
 
 ## 6. Labels
 

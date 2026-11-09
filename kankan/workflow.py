@@ -152,7 +152,7 @@ def claim_impl(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
                                                            target_list=project.cfg.backlog)
         transition(project, lease, card, result.ref, park, messages.HOLD_AFTER_CLAIM)
         return None
-    branch = worktrees.prepare_branch(repo, card.short, project.cfg.main_branch)
+    branch = worktrees.prepare_branch(repo, card.short, project.cfg.integration_branch)
     worktrees.checkout(worktree, branch)
     return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
 

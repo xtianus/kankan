@@ -46,7 +46,7 @@ def _resolve_hash(ctx, tested: str) -> str:
 def sync(ctx) -> dict:
     """Merge the current main into the review branch (§12.2 step 1)."""
     value = _review_ref(ctx)
-    branch, main = value.meta["branch"], ctx.project.cfg.main_branch
+    branch, main = value.meta["branch"], ctx.project.cfg.integration_branch
     if worktrees.merge_in_progress(ctx.worktree):
         found = conflicts(ctx.worktree)
         raise KankanError(Status.NEEDS_ACTION, "a merge is in progress: resolve the conflicts, `git add` and "
@@ -62,7 +62,8 @@ def sync(ctx) -> dict:
             raise KankanError(Status.NEEDS_ACTION, "merge conflicts: resolve them on the branch, `git add` and "
                               "`git commit` (or `kankan block` if you cannot resolve them safely)", {"conflicts": found})
         raise KankanError(Status.INTERNAL_ERROR, f"git merge failed: {proc.stderr.strip()}")
-    return {"branch": branch, "head": gitutil.rev(ctx.worktree, "HEAD"), "main": gitutil.rev(ctx.worktree, main)}
+    return {"branch": branch, "head": gitutil.rev(ctx.worktree, "HEAD"), "main": gitutil.rev(ctx.worktree, main),
+            "integration_branch": main}
 
 
 def _preconditions(ctx, tested: str) -> List[str]:
@@ -178,13 +179,13 @@ def _merge_message(card, short: str, tested: str) -> str:
 
 def _push(ctx, merge: str) -> None:
     project = ctx.project
-    proc = gitutil.run(project.paths.repo, ["push", "origin", f"{merge}:refs/heads/{project.cfg.main_branch}"],
-                       check=False, timeout=120)
+    proc = gitutil.run(project.paths.repo, ["push", "origin", f"{merge}:refs/heads/{project.cfg.integration_branch}"],
+                       check=False, timeout=120, env={**os.environ, "KANKAN_PUSH": "1"})
     if proc.returncode != 0:
         project.log("push_failed", merge=merge, error=proc.stderr.strip()[-500:])
         try:
             project.trello.add_comment(ctx.task["card"], messages.PUSH_FAILED.format(
-                main=project.cfg.main_branch, error=proc.stderr.strip()[-300:]), f"pushfail-{merge}")
+                main=project.cfg.integration_branch, error=proc.stderr.strip()[-300:]), f"pushfail-{merge}")
         except KankanError as err:
             project.log("comment_failed", error=err.message)
 
@@ -212,7 +213,7 @@ def integrate(ctx, tested: str) -> dict:
                               "and run `kankan yield`")
         if cfg.label_hold in card.label_ids:
             raise KankanError(Status.ON_HOLD, "the card is on HOLD: commit WIP and run `kankan yield`")
-        for merge in merges_on_main(repo, cfg.main_branch):
+        for merge in merges_on_main(repo, cfg.integration_branch):
             if merge["card"] == short and merge["tested"] == tested:
                 return _record_integrated(ctx, value, merge["merge"], tested, repaired=True)
         branch = meta["branch"]
@@ -230,7 +231,7 @@ def integrate(ctx, tested: str) -> dict:
                 problems.append(f"no successful `kankan verify --tested {tested}`")
         if problems:
             raise KankanError(Status.NEEDS_ACTION, "cannot integrate: " + "; ".join(problems), {"problems": problems})
-        main_oid = gitutil.rev(repo, f"refs/heads/{cfg.main_branch}")
+        main_oid = gitutil.rev(repo, f"refs/heads/{cfg.integration_branch}")
         if not gitutil.is_ancestor(repo, main_oid, tested):
             _main_moved(ctx, card)
         tree = gitutil.out(repo, ["rev-parse", f"{tested}^{{tree}}"])
@@ -256,7 +257,7 @@ def integrate(ctx, tested: str) -> dict:
         project.log("integrated", card=ctx.task["card"], merge=merge, tested=tested, main_old=main_oid)
         try:
             project.trello.add_comment(ctx.task["card"], messages.INTEGRATED.format(
-                seat=ctx.seat, main=cfg.main_branch, merge=merge), f"integrated-{merge}")
+                seat=ctx.seat, main=cfg.integration_branch, merge=merge), f"integrated-{merge}")
         except KankanError as err:
             project.log("comment_failed", error=err.message)
     if cfg.push_main:
@@ -277,7 +278,7 @@ def _main_moved(ctx, card) -> None:
                              comment=messages.MAIN_MOVED_LIMIT.format(count=count), op_id=f"mainmoved-{ctx.task['id']}")
         except KankanError as err:
             project.log("label_failed", error=err.message)
-    raise KankanError(Status.MAIN_MOVED, f"{project.cfg.main_branch} moved: run `kankan sync`, the tests, "
+    raise KankanError(Status.MAIN_MOVED, f"{project.cfg.integration_branch} moved: run `kankan sync`, the tests, "
                       "`kankan verify` and `kankan integrate` again", {"attempt": count})
 
 
@@ -320,7 +321,7 @@ def done_review(ctx) -> dict:
         value = project.refs.read(ref)
         card = project.trello.card(ctx.task["card"])
         if value is None:
-            if card is not None and card.list_id == cfg.done and card_merged(project.paths.repo, cfg.main_branch,
+            if card is not None and card.list_id == cfg.done and card_merged(project.paths.repo, cfg.integration_branch,
                                                                               ctx.task.get("short", "")):
                 _leave_worktree(ctx, branch)
                 send_signal(ctx, "done")
@@ -636,3 +637,36 @@ def resolve(project, short: str, done: bool, tmux=None) -> dict:
                                                                             implementer))
     transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
     return {"short": short, "phase": "implemented"}, f"card {short} is back in {implementer}'s Implemented list"
+
+
+def merge_request(project, branch: Optional[str] = None, remote: bool = False, top: bool = True,
+                  title_prefix: str = ""):
+    """Create a Backlog card asking the agents to merge a snapshot of a user branch (spec §12.5)."""
+    cfg = project.cfg
+    repo = project.paths.repo
+    branch = branch or cfg.user_branch
+    if gitutil.run(repo, ["check-ref-format", "--branch", branch], check=False).returncode != 0 or \
+            branch.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+        raise KankanError(Status.USAGE_ERROR, f"{branch!r} is not a branch name")
+    if worktrees.reserved_branch(cfg, branch):
+        raise KankanError(Status.USAGE_ERROR, f"{branch} belongs to kankan: a merge request takes one of your branches")
+    local = gitutil.rev(repo, f"refs/heads/{branch}")
+    if remote or local is None:
+        if "origin" in gitutil.out(repo, ["remote"], check=False).split():
+            gitutil.run(repo, ["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                        check=False, timeout=120)
+        sha = gitutil.rev(repo, f"refs/remotes/origin/{branch}")
+        source = f"origin/{branch}"
+    else:
+        sha, source = local, branch
+    if sha is None:
+        raise KankanError(Status.USAGE_ERROR, f"branch {branch} exists neither locally nor on origin")
+    sha = gitutil.out(repo, ["rev-parse", f"{sha}^{{commit}}"])
+    if gitutil.is_ancestor(repo, sha, f"refs/heads/{cfg.integration_branch}"):
+        raise KankanError(Status.NEEDS_ACTION, f"nothing to merge: {cfg.integration_branch} already contains {source}")
+    title = messages.MERGE_REQUEST_TITLE.format(prefix=title_prefix, branch=source, integration=cfg.integration_branch)
+    desc = messages.MERGE_REQUEST_DESC.format(sha=sha, short_sha=sha[:12], branch=source,
+                                              integration=cfg.integration_branch)
+    card = project.trello.create_card(cfg.backlog, title, desc=desc, pos="top" if top else "bottom")
+    project.log("merge_request", card=card.id, branch=source, sha=sha)
+    return card

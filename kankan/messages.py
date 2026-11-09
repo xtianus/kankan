@@ -14,7 +14,7 @@ REVIEW_YIELDED = "kankan: {seat} stopped reviewing this card (yield); it goes ba
 
 INSTRUCTIONS = {
     "impl": "Implement the card on the prepared branch in your worktree, commit, run the tests, then run `kankan done --json`.",
-    "review": ("Review the branch against main, fix problems with separate commits and summarize them with "
+    "review": ("Review the branch against the integration branch, fix problems with separate commits and summarize them with "
                "`kankan note`, then `kankan sync`, run the tests, `kankan verify --tested <hash>`, "
                "`kankan integrate --tested <hash>` and finally `kankan done`."),
     "hold_wip": "The card is on HOLD: commit your work in progress (WIP commit) and run `kankan yield --json`.",
@@ -35,7 +35,17 @@ BRANCH_ELSEWHERE = "kankan: branch `{branch}` is checked out in `{path}`; free i
 HOLD_AFTER_CLAIM_REVIEW = "kankan: HOLD found right after the review claim; the card goes back to the implementer's list."
 
 INTEGRATED = "kankan: {seat} integrated this card into `{main}` with merge `{merge}`."
-MAIN_MOVED_LIMIT = "kankan: main kept moving during integration ({count} attempts); the card needs a look."
+MAIN_MOVED_LIMIT = "kankan: the integration branch kept moving during integration ({count} attempts); the card needs a look."
+MERGE_REQUEST_TITLE = "{prefix}Merge branch {branch} into {integration}"
+MERGE_REQUEST_DESC = (
+    "Merge request created by `kankan merge-request`.\n\n"
+    "Merge exactly commit `{sha}` (branch `{branch}` when the request was made) into your card branch: "
+    "`git merge {sha}`. Do not fetch: the commit is already in the repository.\n\n"
+    "Resolve conflicts keeping the intent of both sides, run the project's tests and commit.\n\n"
+    "If there is nothing new to merge (Git says \"Already up to date\", or `kankan done` answers needs_action "
+    "because the branch has no commit beyond {integration}), create an empty commit: "
+    "`git commit --allow-empty -m \"Nothing new to merge from {branch} ({short_sha})\"`, then run `kankan done` again.\n\n"
+    "Then `kankan done --json`.")
 PUSH_FAILED = "kankan: the integration is done locally but `git push origin {main}` failed: {error}"
 
 BLOCKED = ("kankan: {seat} blocked this card: {reason}\nConflicting files: {files}\n"

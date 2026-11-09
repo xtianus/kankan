@@ -106,7 +106,8 @@ class Config:
     notify_username: str
     test_command: str
     test_timeout: int = 1800
-    main_branch: str = "main"
+    integration_branch: str = "kankan-agents"
+    user_branch: str = "main"
     push_main: bool = False
     credentials_path: Optional[str] = None
     credentials_keys: Tuple[str, str] = ("kankan.trello.key", "kankan.trello.token")
@@ -133,6 +134,8 @@ class Config:
     @classmethod
     def from_dict(cls, data: dict) -> "Config":
         data = dict(data)
+        if "main_branch" in data:  # pre-1.2 key: the agents integrated into this branch
+            data.setdefault("integration_branch", data["main_branch"])
         known = {f.name for f in dataclasses.fields(cls)}
         data = {k: v for k, v in data.items() if k in known}
         data["seats"] = {name: SeatConfig(**seat) for name, seat in (data.get("seats") or {}).items()}

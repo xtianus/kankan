@@ -106,9 +106,9 @@ def _check_ref(ref: str) -> str:
 
 
 class RefStore:
-    def __init__(self, repo: Path, main_branch: str):
+    def __init__(self, repo: Path, integration_branch: str):
         self.repo = Path(repo)
-        self.main_branch = main_branch
+        self.integration_branch = integration_branch
 
     def write_blob(self, meta: dict) -> str:
         meta = dict(meta)
@@ -193,7 +193,7 @@ class RefStore:
             elif isinstance(op, Delete):
                 lines.append(f"delete {_check_ref(op.ref)} {op.old}")
             elif isinstance(op, Main):
-                lines.append(f"update refs/heads/{self.main_branch} {op.new} {op.old}")
+                lines.append(f"update refs/heads/{self.integration_branch} {op.new} {op.old}")
             else:
                 raise KankanError(Status.INTERNAL_ERROR, f"unknown op {op!r}")
         lines += ["prepare", "commit", ""]

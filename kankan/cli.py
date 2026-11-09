@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from kankan import auditlog
@@ -64,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["enable", "disable"])
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
     add("status", "seats, launcher states, tasks and waiting cards")
+    p = add("doctor", "check the installation and this project, fix what is safe, list manual steps")
+    p.add_argument("--no-fix", action="store_true", help="only report, change nothing")
+    p.add_argument("--offline", action="store_true", help="skip the checks that need Trello")
+    p = add("merge-request", "ask the agents to merge one of your branches into their integration branch")
+    p.add_argument("branch", nargs="?", help="your branch (default: user_branch from the configuration)")
+    p.add_argument("--remote", action="store_true", help="take the branch from origin (fetched now)")
+    p.add_argument("--bottom", action="store_true", help="put the card at the bottom of the Backlog")
     add("claims", "card refs with phase, holder, age and branch")
     p = add("release", "administration: park a card's ref (needs --force)")
     p.add_argument("card")
@@ -390,6 +398,25 @@ def _cmd_status(args):
     from kankan import diag
     data = diag.status(_project())
     return data, diag.status_text(data)
+
+
+@command("doctor")
+def _cmd_doctor(args):
+    from dataclasses import asdict
+    from kankan import doctor
+    checks = doctor.run(Path(os.getcwd()), fix=not args.no_fix, online=not args.offline)
+    data = {"checks": [asdict(c) for c in checks]}
+    text = doctor.report_text(checks)
+    if any(c.status == doctor.MANUAL for c in checks):
+        raise KankanError(Status.NEEDS_ACTION, "manual steps needed\n" + text, data)
+    return data, text
+
+
+@command("merge-request")
+def _cmd_merge_request(args):
+    from kankan.integrate import merge_request
+    card = merge_request(_project(), args.branch, remote=args.remote, top=not args.bottom)
+    return {"card": card.id, "short": card.short, "url": card.url, "title": card.name}, f"created {card.url}: {card.name}"
 
 
 @command("claims")

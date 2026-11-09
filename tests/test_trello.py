@@ -178,3 +178,11 @@ def test_rate_bucket_waits(monkeypatch, virtual_time):
     for _ in range(4):
         bucket.take()
     assert virtual_time[0] >= 9.0
+
+
+def test_create_card_with_description(fake, board):
+    _, backlog, _ = board
+    c = client(fake)
+    card = c.create_card(backlog["id"], "t", desc="do X")
+    assert card.desc == "do X"
+    assert c.card(card.id).desc == "do X"

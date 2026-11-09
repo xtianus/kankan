@@ -38,7 +38,7 @@ def test_task_fields(agent, capsys):
     code, out = run(capsys, "task")
     assert code == 0 and out["ok"]
     assert set(out["data"]) == {"task_id", "kind", "card_id", "short", "title", "url", "desc", "phase", "branch",
-                                "worktree", "main", "dirty_files", "resumed", "hold", "instructions"}
+                                "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions"}
     assert out["data"]["title"] == "Feature" and out["data"]["task_id"] == task["id"]
 
 

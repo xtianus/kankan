@@ -330,7 +330,10 @@ class FakeTrello:
                 return 200, {}
         if parts[0] == "cards":
             if len(parts) == 1 and method == "POST":
-                return 200, self.add_card(p["idList"], p.get("name", ""))
+                if p.get("pos") == "top":
+                    others = [c["pos"] for c in st["cards"].values() if c["idList"] == p["idList"]]
+                    return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""), pos=min(others or [1024]) / 2)
+                return 200, self.add_card(p["idList"], p.get("name", ""), p.get("desc", ""))
             card = self._find("cards", parts[1])
             if card is None:
                 return 404, "The requested resource was not found."

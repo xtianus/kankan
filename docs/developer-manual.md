@@ -8,6 +8,7 @@ For using kankan see the [user manual](user-manual.md). The design is in [`aispe
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q                 # everything except the live Trello tests
 .venv/bin/python -m pytest -q -m trello_live  # live Trello tests only (§3)
+.venv/bin/python -m tests.live.agents_e2e     # live run with real agents, manual (§3.5)
 ```
 
 Runtime code uses the Python standard library only (Python ≥ 3.10); pytest is a dev dependency. Test markers (`pyproject.toml`):
@@ -71,13 +72,36 @@ Without a complete configuration the live tests are skipped with "no test board 
 .venv/bin/python -m pytest -q -m trello_live
 ```
 
-Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item from the test board with:
+Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item (and the `ke-` cards and registry block of an interrupted §3.5 run) from the test board with:
 
 ```bash
 .venv/bin/python -m tests.live.cleanup
 ```
 
-It deletes `kt-` cards and labels and archives `kt-` lists, and refuses to touch a board without the marker.
+It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any kankan registry block, and refuses to touch a board without the marker. The runner of §3.5 instead removes only its own cards and its own registry block, and refuses to start while `Backlog`, `Done`, `Blocked` or seat lists hold other cards.
+
+### 3.5 Live run with real agents
+
+`tests/live/agents_e2e.py` drives one real Claude Code agent and one real Codex agent through the whole workflow on the test board, while you watch and take part. It is never run by `pytest`; start it by hand:
+
+```bash
+.venv/bin/pip install -e '.[dev]'            # .venv/bin/kankan must exist: the agents call it
+.venv/bin/python -m tests.live.agents_e2e    # options: --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
+```
+
+What it does:
+
+1. Checks the machine with `kankan doctor` (git, tmux, both agents and their login, skill links, `kankan` reachable), the test board configuration (§3.3) and its marker, and that `Backlog`, `Done`, `Blocked` and the seat lists hold no cards.
+2. Creates a throw-away clone on `main` with a local bare `origin` in `<temp>/kankan-e2e-<run-id>/`, binds it to the test board with `kankan init` (taking over the registry block, after printing who held it), with the real list and label names (`Backlog`, `Done`, `Blocked`, `claude-1 · …`, `codex-1 · …`, `HOLD`, `Question`, `Error`): they are adopted by name and **stay on the board** between runs. The agents integrate into `kankan-agents`, which is pushed to the bare origin.
+3. Creates the cards, named `ke-<timestamp>-<random> <title>`: *Say hello*, *Type one random word*, *What's your name* (each appends to a file), *Ask for a colour* (the agent asks you), *Count slowly* (counts to 5 with pauses, for HOLD), and a merge request of a branch `feat1` holding a `user.txt` commit.
+4. Starts `kankan up claude=1 codex=1` on your default tmux server and prints the board URL and `tmux attach -t ai-kankan-e2e-claude-1` / `ai-kankan-e2e-codex-1` (detach with `Ctrl-b d`).
+5. Watches the board every 10 s, printing each card's list and labels when they change, and rings the bell when you are needed:
+   - the colour card gets `Question`: answer with a comment on the card, from the Trello account that owns the token (or the one given with `--notify`);
+   - the slow card enters an `In Progress` list: add `HOLD` to it; when it is back in `Backlog`, remove `HOLD` so it resumes from its branch.
+6. When every card is in `Done` it waits up to 5 minutes for the side effects (ref deletion, labels, push), then verifies: one merge per card on `kankan-agents` with correct trailers, file contents, `main` and `feat1` untouched, origin up to date, each card reviewed by the other agent type, the HOLD suspension and resumption on the same branch, a clean `kankan reconcile`.
+7. Stops the agents, deletes its cards and its registry block, and removes the run directory on success. On failure, timeout or Ctrl-C it first saves pane captures, `log.jsonl` and `kankan status` in `<run dir>/diagnostics/` and keeps the run directory.
+
+It spends real tokens and takes about 15–30 minutes. The agents load your global `CLAUDE.md`/`AGENTS.md`, so your personal instructions apply to them too; the card descriptions tell them that the kankan workflow takes precedence and that they must never push `main`.
 
 ## 4. Rules for changes
 

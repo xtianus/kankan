@@ -51,18 +51,30 @@ def supervisor_argv(agent_type: str, seat: Optional[str]) -> List[str]:
     return argv
 
 
+def agent_path(path: Optional[str] = None) -> str:
+    """PATH for agents: this installation's script directory first, so agents run the launcher's kankan."""
+    path = os.environ.get("PATH", "/usr/bin:/bin") if path is None else path
+    here = str(Path(sys.executable).parent)
+    if not (Path(here) / "kankan").exists():
+        return path
+    return os.pathsep.join([here] + [p for p in path.split(os.pathsep) if p and p != here])
+
+
 def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = False,
-          tmux: Optional[Tmux] = None) -> str:
+          tmux: Optional[Tmux] = None, preflight: bool = True) -> str:
     """Create a tmux session running the supervisor; the launcher renames it to ai-<project>-<seat>."""
     tmux = tmux or Tmux()
     seats.validate_type(agent_type)
+    if preflight:
+        from kankan import doctor
+        doctor.preflight([agent_type], project.paths)
     if seat is not None and seats.seat_type(seat) != agent_type:
         raise KankanError(Status.USAGE_ERROR, f"seat {seat} is not of type {agent_type}")
     _check_collision(project, tmux)
     if seat is not None and tmux.has_session(session_name("ai-", project.paths.project, seat)):
         raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is already running")
     name = f"ai-{sanitize(project.paths.project)}-{agent_type}-starting-{secrets.token_hex(3)}"
-    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat))
+    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env={"PATH": agent_path()})
     tmux.set_option(name, "@kankan_repo", str(project.paths.repo))
     project.log("agent_started", session=name, type=agent_type, seat=seat)
     if attach:
@@ -72,8 +84,8 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
 
 
 def warnings_for(project) -> List[str]:
-    return [f"{project.cfg.main_branch} is checked out in {path}; keep a user branch or a detached HEAD there "
-            "while agents work" for path in worktrees.main_checked_out(project.paths.repo, project.cfg.main_branch)]
+    return [f"{project.cfg.integration_branch} is checked out in {path}; only kankan moves it: switch that worktree "
+            "to one of your branches" for path in worktrees.main_checked_out(project.paths.repo, project.cfg.integration_branch)]
 
 
 def live_counts(project) -> Dict[str, int]:
@@ -90,10 +102,15 @@ def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None) -> List[str
     tmux = tmux or Tmux()
     started: List[str] = []
     with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
+        live = live_counts(project)
+        missing = [t for t, n in wanted.items() if live.get(t, 0) < n]
+        if missing:
+            from kankan import doctor
+            doctor.preflight(missing, project.paths)
         for agent_type, count in wanted.items():
             while live_counts(project).get(agent_type, 0) < count:
                 before = live_counts(project).get(agent_type, 0)
-                started.append(agent(project, agent_type, tmux=tmux))
+                started.append(agent(project, agent_type, tmux=tmux, preflight=False))
                 deadline = time.monotonic() + UP_WAIT_SECONDS
                 while time.monotonic() < deadline and live_counts(project).get(agent_type, 0) <= before:
                     time.sleep(0.3)

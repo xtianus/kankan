@@ -28,7 +28,8 @@ def bind_project(repo, fake, monkeypatch=None, board=None, **cfg_overrides) -> P
                  backlog=lists["Backlog"], done=lists["Done"], blocked=lists["Blocked"],
                  label_hold=labels["HOLD"], label_question=labels["Question"], label_error=labels["Error"],
                  notify_id=fake.me["id"], notify_username=fake.me["username"], test_command="",
-                 trello_base_url=fake.url, trello_timeout=0.5, settle_seconds=0)
+                 trello_base_url=fake.url, trello_timeout=0.5, settle_seconds=0,
+                 integration_branch="main")
     for key, value in cfg_overrides.items():
         setattr(cfg, key, value)
     paths = Paths.discover(repo)

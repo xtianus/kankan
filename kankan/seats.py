@@ -81,6 +81,22 @@ def _try_flock(project, seat: str) -> Optional[int]:
     return fd
 
 
+def any_held(paths) -> List[str]:
+    """Seats whose liveness lock is currently held by a launcher (no Project needed)."""
+    held = []
+    for lock in sorted(paths.seats_dir.glob("*.lock")) if paths.seats_dir.exists() else []:
+        fd = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held.append(lock.stem)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return held
+
+
 def _release_fd(fd: int) -> None:
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -219,7 +235,7 @@ def ensure_worktree(project, seat: str) -> Path:
         return path
     gitutil.run(project.paths.repo, ["worktree", "prune"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    gitutil.run(project.paths.repo, ["worktree", "add", "--detach", str(path), project.cfg.main_branch])
+    gitutil.run(project.paths.repo, ["worktree", "add", "--detach", str(path), project.cfg.integration_branch])
     return path
 
 

@@ -153,4 +153,6 @@ def test_notify_other_user(git_repo, env):
 def test_main_checked_out_warning(git_repo, env):
     fake, board = env
     _, warnings = run_init(git_repo, board)
-    assert any("checked out" in w for w in warnings)
+    assert not any("checked out" in w for w in warnings)  # main is the user's branch now
+    _, warnings = run_init(git_repo, board, prompt=answers("", "main"))
+    assert any("main is checked out" in w for w in warnings)

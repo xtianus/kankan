@@ -34,6 +34,7 @@ class Adapter:
     trust: List[str]
     trust_answer: List[str]
     known: List[dict] = field(default_factory=list)
+    login_check: List[str] = field(default_factory=list)
 
 
 @dataclass

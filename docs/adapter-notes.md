@@ -36,3 +36,9 @@ Checked on 2026-11-08 with `kankan up` against a fake Trello board, a scratch re
 
 - Real usage-limit screens of either agent (no limit was reached); the limit fixtures are synthetic, built from the airesumer patterns. Check them with `kankan adapter check <seat>` the first time a limit happens and add an override if needed.
 - The Codex model-switch dialog (fixture built from the airesumer patterns).
+
+## Login checks (`login_check`, used by `kankan doctor`)
+
+- Claude Code 2.1.319: `claude auth status` prints a JSON object with `"loggedIn": true` and exits 0 when logged in, without starting a session.
+- Codex CLI 0.167.0: `codex login status` prints `Logged in using ChatGPT` and exits 0 when logged in.
+- The logged-out exit codes were not observed; doctor treats any non-zero exit as a warning, never as a blocking error.

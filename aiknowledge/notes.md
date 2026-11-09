@@ -18,7 +18,9 @@
 
 ## Architecture
 
-- Module map: `refstore` (only module touching `refs/agent-*`), `trello` (only module talking to Trello), `config`/`properties`/`auditlog`, `seats`/`seatstate`/`procutil`, `cards` (transitions, convergence), `workflow` (choice, claims, `tick`), `integrate` (sync, verify, integrate, review done, block, resolve), `agentcmds` (agent commands), `launcher`/`supervisor`/`forward`/`tmux`/`adapters`, `agents_cmd` (agent, up, autostart), `diag` (status, claims, reconcile, admin), `init`, `cli`.
+- Module map: `refstore` (only module touching `refs/agent-*`), `trello` (only module talking to Trello), `config`/`properties`/`auditlog`, `seats`/`seatstate`/`procutil`, `cards` (transitions, convergence), `workflow` (choice, claims, `tick`), `integrate` (sync, verify, integrate, review done, block, resolve), `agentcmds` (agent commands), `launcher`/`supervisor`/`forward`/`tmux`/`adapters`, `agents_cmd` (agent, up, autostart), `diag` (status, claims, reconcile, admin), `doctor` (checks, fixes, preflight), `init`, `cli`.
+- The agents integrate into `cfg.integration_branch` (default `kankan-agents`; old configs with `main_branch` are read as an alias); `cfg.user_branch` is the user's. Only `integrate` moves/pushes the integration branch (`pre-push` hook + `KANKAN_PUSH=1`); user work enters through merge-request cards (`integrate.merge_request`, SHA pinned at request time). The JSON key `main`, `push_main` and `main_moved` keep their names for compatibility.
+- `doctor` checks and fixes the installation and project; its offline subset is the `up`/`agent` preflight. The launcher and `agent` put the interpreter's directory first on the agents' `PATH` (`agents_cmd.agent_path`).
 - `workflow.tick(project, lease)` is one launcher iteration without the agent (convergence, choice, preparation); the hidden `kankan tick --seat <s>` runs it for debugging.
 - Seat state (`<gcd>/kankan/seats/<seat>.state.json`) is changed only through `seatstate.update_state`.
 - The launcher shares the pane's terminal with the agent: it never prints while the agent runs; events go to `<gcd>/kankan/log.jsonl`.
@@ -32,4 +34,7 @@
 
 - Tests use a fake Trello server (`tests/fakes/fake_trello.py`, with fault injection), a scripted fake agent (`tests/fakes/fake_agent.py`, installed as `claude`/`codex` on a temporary PATH) and private tmux servers (`KANKAN_TMUX_SOCKET`).
 - Run the suite in its own session (`setsid -w .venv/bin/python -m pytest -q`): recovery tests kill process sessions. `-m "not slow"` skips the tmux process-chain tests.
+- Tests set `KANKAN_SKIP_PREFLIGHT=1` (autouse); `tests/test_doctor.py` unsets it where it matters. `tests/helpers.bind_project` binds with `integration_branch="main"`; new tests pass `integration_branch="kankan-agents"`.
+- `python -m tests.live.agents_e2e` is a manual live run with real Claude Code and Codex agents on the test board (developer manual §3.5); it is never collected by pytest. Its helpers (`tests/live/e2e_support.py`) are tested in `tests/test_e2e_support.py`.
+- Never call `monkeypatch.undo()` in a test: it also undoes the autouse isolated HOME.
 - Live Trello tests (`-m trello_live`) need `~/.config/kankan/test.properties` or `KANKAN_TEST_BOARD_URL` + `KANKAN_TEST_CREDENTIALS`, and a board whose description contains `kankan-test-board`.

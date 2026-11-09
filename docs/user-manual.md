@@ -1,6 +1,6 @@
 # kankan user manual
 
-kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into `main` and closes it. You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
+kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours (§4.1). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
 
 The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); section numbers below (§) refer to it.
 
@@ -15,9 +15,10 @@ The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); section 
 ```bash
 pipx install /path/to/kankan          # or: pip install --user -e /path/to/kankan
 kankan skill install                   # links the shared skill into ~/.claude/skills and ~/.codex/skills
+kankan doctor                          # checks git, tmux, the agents and their login, the skill, PATH; fixes what it can
 ```
 
-kankan uses only the Python standard library.
+kankan uses only the Python standard library. `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing, or when `kankan` itself or the skill cannot be found; a failed login check is only a warning.
 
 ## 3. Binding a project to a board
 
@@ -33,7 +34,8 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
-- installs a `pre-push` hook that refuses to push `refs/agent-*`, and warns if `main` is checked out.
+- asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
+- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
 
@@ -53,7 +55,15 @@ Each agent gets a **seat** (`claude-1`, `codex-2`…) with three lists on the bo
 
 The agent runs in the tmux session `ai-<project>-<seat>`; attach with `tmux attach -t ai-<project>-<seat>` to watch. Ctrl-C typed there reaches the agent (the launcher and supervisor ignore Ctrl-C, Ctrl-Z and Ctrl-\\). kankan never types while you are typing (it waits `write_quiet_seconds`, default 20 s) and never sends Esc or Ctrl-C. `airesumer.sh` finds these sessions and resumes agents after a usage limit.
 
-While agents work, keep `main` **not** checked out in your clone (use your own branch or a detached HEAD): kankan advances `main` directly, so a checked-out `main` would fall behind (§12.5).
+### 4.1 Working alongside the agents
+
+The agents integrate into `kankan-agents`; only kankan moves it, so never check it out (`init`, `up` and `doctor` warn if you do). `main` and all your other branches are yours: check them out, commit and pull as usual.
+
+- **Take the agents' work:** on your branch, `git merge kankan-agents`. From another clone (with `push_main` on): `git pull origin kankan-agents`. Never push to `kankan-agents` yourself: the `pre-push` hook blocks it in the kankan clone only.
+- **Give the agents your work:** `kankan merge-request feat1` (default: your `main`) creates a card at the top of `Backlog`, "Merge branch feat1 into kankan-agents", naming the exact commit to merge. An agent merges it and resolves conflicts, an agent of the other type reviews and integrates it. If you work in another clone, push `feat1` first and use `--remote`. `--bottom` queues it after the other cards.
+- **See how far apart they are:** `kankan status` prints `kankan-agents is N commits ahead / M behind main`; `kankan doctor` warns when an integration has waited more than 7 days for you to merge it.
+
+For the old behaviour (agents integrate straight into `main`) answer `main` at `kankan init`; then keep `main` **not** checked out while they work, because kankan advances it directly (§12.5).
 
 ## 5. The golden rule
 
@@ -71,7 +81,7 @@ If you move, archive or delete a card that is in progress anyway, kankan asks th
 
 1. An idle agent takes, in this order: its own unfinished cards; cards in an `Implemented` list implemented by an agent of the other type (review); the top eligible card of `Backlog` (implementation).
 2. Implementation happens on the branch `YYkankan-<shortLink>`; the card moves to the seat's `In Progress`, then to its `Implemented` list.
-3. A reviewer of the other type moves it to its `Review` list, fixes problems with separate commits, merges `main` into the branch, runs the tests (`kankan verify`) and integrates: `main` gets one merge commit per card, whose message holds the card title, URL and the trailers `Kankan-Card` and `Kankan-Tested`. To undo a card: `git revert -m 1 <merge>`.
+3. A reviewer of the other type moves it to its `Review` list, fixes problems with separate commits, merges `kankan-agents` into the branch, runs the tests (`kankan verify`) and integrates: `kankan-agents` gets one merge commit per card, whose message holds the card title, URL and the trailers `Kankan-Card` and `Kankan-Tested`. To undo a card: `git revert -m 1 <merge>`.
 4. The card goes to `Done`.
 
 With only one agent type running, implemented cards wait in `Implemented`; `kankan status` says why.
@@ -106,6 +116,7 @@ kankan resolve <shortLink> --done   # checks the merge, removes the worktree, se
 ```bash
 kankan status             # seats (alive, free, dead, unavailable), launcher state, current task, waiting cards
 kankan claims             # card refs: phase, holder, age, branch
+kankan doctor             # installation and project checks, fixes and manual steps (§15.5); --no-fix, --offline
 kankan reconcile          # report inconsistencies (§15.3)
 kankan reconcile --fix    # repair only the certain cases
 kankan adapter check claude-1         # how kankan reads that agent's screen
@@ -133,13 +144,15 @@ How kankan reads each agent's screen (ready, working, usage limit, trust window,
 {"codex": {"queue_while_working": true}}
 ```
 
+`login_check` is the command `kankan doctor` runs to see whether an agent is logged in (exit 0 = logged in): `claude auth status` and `codex login status` by default; set it to `[]` to skip the check.
+
 See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the installed agent versions.
 
 ## 12. Limits
 
 - Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`) (§7.5).
 - Human changes to a card's list are honoured on a best-effort basis (§14.5); `reconcile` reports leftovers.
-- A clone with `main` checked out falls behind when `main` advances (§12.5).
+- If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances (§12.5).
 - Exclusion between two clones bound to the same board relies on the registry check; it is not absolute (§6.3).
 
 ## 13. Publishing kankan's repository

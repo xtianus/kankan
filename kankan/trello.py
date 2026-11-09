@@ -371,8 +371,11 @@ class TrelloClient:
                 return comment
         return None
 
-    def create_card(self, list_id: str, name: str) -> Card:
-        return _card(self._ok("POST", "/1/cards", body={"idList": list_id, "name": name}, retry=False))
+    def create_card(self, list_id: str, name: str, desc: str = "", pos: str = "bottom") -> Card:
+        body = {"idList": list_id, "name": name, "pos": pos}
+        if desc:
+            body["desc"] = desc
+        return _card(self._ok("POST", "/1/cards", body=body, retry=False))
 
     def delete_card(self, card_id: str) -> None:
         self._ok("DELETE", f"/1/cards/{card_id}")

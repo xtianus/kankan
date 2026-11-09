@@ -37,13 +37,15 @@ def test_card_goes_from_backlog_to_done(git_repo, fake_trello, monkeypatch, agen
     cfg = load_config(paths)
     cfg.poll_seconds, cfg.write_quiet_seconds, cfg.settle_seconds = 1, 0, 0
     save_config(paths, cfg)
-    git(git_repo, "checkout", "-q", "--detach")
+    main_before = git(git_repo, "rev-parse", "main")
     project = Project.open(git_repo)
     card = fake.add_card(cfg.backlog, "Add the feature")
     agents_cmd.up(project, {"claude": 1, "codex": 1})
     assert wait_for(lambda: fake.card_list(card["id"]) == cfg.done and project.refs.read(card_ref(card["id"])) is None,
                     timeout=120)
-    log = git(git_repo, "log", "--first-parent", "--format=%s%n%b", "main")
+    log = git(git_repo, "log", "--first-parent", "--format=%s%n%b", "kankan-agents")
     assert "Add the feature" in log and f"Kankan-Card: {card['shortLink']}" in log
-    assert git(git_repo, "show", "main:feature.txt") == "feature"
+    assert git(git_repo, "show", "kankan-agents:feature.txt") == "feature"
+    assert git(git_repo, "rev-parse", "main") == main_before
+    assert git(git_repo, "symbolic-ref", "--short", "HEAD") == "main"
     assert diag.reconcile(project) == []

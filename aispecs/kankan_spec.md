@@ -1,7 +1,7 @@
 # kankan — coordinating AI agents on a Kanban board
 
-**Status:** specification v1.1
-**Date:** 2026-11-08
+**Status:** specification v1.2
+**Date:** 2026-11-09
 **Related documents:** `kanban_requirements.md` (requirements for backends other than Trello)
 **Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual.
 
@@ -17,7 +17,7 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 
 - All agents run **on the same Linux server**, in the same process namespace.
 - A **project** is a Git clone in `~/coding/<project>` bound to **one** Trello board. All agents of a project work on worktrees of the same clone and therefore share the same Git ref store. Several projects can coexist on the same server, each with its own state.
-- The main branch is called `main` (configurable).
+- The agents integrate into a dedicated **integration branch**, `kankan-agents` by default (`integration_branch` in the configuration); only kankan moves it and nobody checks it out. Every other branch belongs to the user, except the card branches `??kankan-<shortLink>` (12.5). **In this specification `main` denotes the integration branch**; the user's own main branch is called the *user branch* (`user_branch`, default `main`). Configurations written before v1.2 with `main_branch` keep integrating into that branch.
 - Agents run in **interactive** mode inside **tmux** sessions, so the user can attach and watch them, and the external tool `airesumer.sh` can resume them after a usage limit.
 - tmux sessions survive SSH disconnection. Requirements: `KillUserProcesses=no` in logind (Ubuntu default) and, for automatic start, lingering enabled (`loginctl enable-linger`).
 - Trello is reachable via REST with a user API key and token. Trello does **not** offer conditional updates.
@@ -116,10 +116,11 @@ Run once in the project clone (e.g. URL `https://trello.com/b/s5C4vWbG/test1`; k
 4. creates the labels `HOLD`, `Question`, `Error`;
 5. determines the Trello user to notify (`GET /1/members/me`), overridable with `--notify <user>`;
 6. asks for the project's `test_command` (may be left empty; see 12.2);
-7. writes `config.json`;
-8. installs a `pre-push` hook that refuses pushing `refs/agent-*`; if a hook already exists, reports it without overwriting it;
-9. adds the necessary exclusions to `<gcd>/info/exclude`;
-10. warns if `main` is checked out in any worktree (12.5).
+7. asks for the integration branch (default `kankan-agents`) and records the user branch (`main` if it exists, otherwise the checked-out branch); if the integration branch does not exist locally it adopts `origin/<name>` when present, otherwise creates it from the user branch, never resetting or force-pushing; changing the integration branch of a configured clone is refused while a seat is alive or a card ref exists;
+8. writes `config.json` and `git config kankan.integrationBranch`;
+9. installs a `pre-push` hook that refuses pushing `refs/agent-*` and pushing to the integration branch except from `integrate` (`KANKAN_PUSH=1`); if a foreign hook already exists, reports it without overwriting it;
+10. adds the necessary exclusions to `<gcd>/info/exclude`;
+11. warns if the integration branch is checked out in any worktree (12.5).
 
 `init` is idempotent. `init --reauth` repeats only the credential acquisition.
 
@@ -269,7 +270,7 @@ In `working`, if the screen is "ready" with no signal for N minutes (configurabl
 
 ### 8.7 Adapters
 
-An adapter per agent type defines: start command, new-conversation command, submit key, and groups of indicators — *ready*, *working*, *limit* (with the patterns to derive the resume time), *trust* (with the answer), *known dialogs* (with the answer). Each group is a list of regular expressions applied case-insensitively to the text stripped of colour codes; one match is enough, except for groups marked "all" (e.g. dialogs recognizable only by several texts together).
+An adapter per agent type defines: start command, an optional login check command (exit 0 = logged in; used by `doctor`), new-conversation command, submit key, and groups of indicators — *ready*, *working*, *limit* (with the patterns to derive the resume time), *trust* (with the answer), *known dialogs* (with the answer). Each group is a list of regular expressions applied case-insensitively to the text stripped of colour codes; one match is enough, except for groups marked "all" (e.g. dialogs recognizable only by several texts together).
 
 The defaults ship with kankan and start from the patterns of `airesumer.sh`. They are overridden, only for the parts that change, in `~/.config/kankan/agents.json` (user) and `<gcd>/kankan/agents.json` (project).
 
@@ -405,7 +406,7 @@ The reviewing agent integrates, before `Done`, without human approval. The revie
 ### 12.4 Unresolvable conflicts and `block`
 
 If the agent cannot resolve a conflict safely it calls `block "<reason>"`. With a merge in progress kankan:
-1. notes the hash of `main` used in the merge and copies the files the agent was working on;
+1. notes the hash being merged (`MERGE_HEAD`: the integration branch for a `sync`, the requested commit for a merge-request card) and copies the files the agent was working on;
 2. aborts the merge in the seat's worktree, which becomes free again;
 3. creates the worktree `~/coding/.kankan/<project>/blocked-<shortLink>` on the branch, redoes the same merge with the same hash, puts back the copied files and marks as resolved those the agent had already resolved: the state is identical to the one where the agent stopped;
 4. brings the card's ref to `parked` with destination `Blocked` and comments: reason, conflicting files and `To resolve: kankan resolve <shortLink>`.
@@ -414,9 +415,15 @@ Without a merge in progress, `block` requires a clean worktree and moves the car
 
 **`kankan resolve <shortLink>`** prints the files still in conflict, the steps to follow (edit, `git add`, `git commit`) and how to finish, then opens a tmux session `kankan-resolve-<project>-<shortLink>` (without the `ai-` prefix) in the blocked worktree, where the same instructions are repeated. **`kankan resolve <shortLink> --done`** checks that the merge is complete and the worktree clean (otherwise it repeats the instructions), removes the worktree and moves the card to the implementer's `Implemented`. The reviewer's next `sync` brings in only the changes to `main` that arrived in the meantime; tests and `integrate` guarantee as always that only the updated and tested version enters `main`.
 
-### 12.5 Main worktree
+### 12.5 Integration branch and user branches
 
-No agent checks out `main`. If the user has `main` checked out, their files fall behind when `main` advances: while the agents work, the main worktree should hold a user branch or be at a detached HEAD. `init` and `agent` report it.
+**One writer per branch.** Only kankan moves the integration branch (through `integrate`'s transaction) and nobody checks it out; `init`, `agent` and `doctor` warn if it is checked out. The user's branches are never changed by kankan or the agents, so the user can check them out and commit freely. Cross-merges only read the other side:
+
+- **Agents → user:** `git merge kankan-agents` on any user branch (or `git pull origin kankan-agents` from another clone, when `push_main` publishes it).
+- **User → agents:** `kankan merge-request [<branch>] [--remote] [--bottom]` creates a card at the top of `Backlog` titled `Merge branch <branch> into <integration>`. The branch must be a plain branch name that is not reserved (the integration branch, `??kankan-<shortLink>`); it is resolved to a commit at request time (local branch, or with `--remote` or when only the remote has it, a fetch into `refs/remotes/origin/<branch>` that never touches user branches) and the card names that SHA. A commit already contained in the integration branch is refused ("nothing to merge"). The card goes through the normal workflow: the implementer merges the SHA and resolves conflicts, the reviewer checks the resolutions, `sync`, `verify` and `integrate` apply as for any card. If there is nothing new to merge when the card runs, the implementer makes an empty commit so that `done` succeeds.
+- **Divergence:** `kankan status` and `kankan doctor` report how many commits the integration branch is ahead of and behind the user branch, and `doctor` warns when an integration has been waiting more than 7 days.
+
+The `pre-push` hook enforces the single writer only for pushes from the kankan clone; a push to `origin/<integration>` from another clone is not prevented.
 
 ## 13. Interaction with the agent
 
@@ -532,6 +539,16 @@ Under the project lock, conditional on the value read, recorded in the log:
 - `kankan seat recover <seat> [--kill]`: recovers a seat that is alive but stuck; with `--kill` it first terminates the processes of the recorded session;
 - `kankan purge-remote`: deletes from the remote any `refs/agent-*` published by mistake.
 
+### 15.5 `kankan doctor [--no-fix] [--offline]`
+
+Checks the machine and, inside a clone, the project; fixes what is safe and prints the manual steps for the rest. Exit 0 when no manual step remains, 14 (`needs_action`) otherwise; warnings do not fail.
+
+- **Machine:** Git ≥ 2.38, tmux ≥ 3.2, `kankan` reachable (on `PATH`, or next to the interpreter, whose directory the launcher puts first on the agents' `PATH`), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
+- **Project:** binding (`kankan init` if missing), adapters, `pre-push` hook (installed or made executable), `info/exclude`, integration branch (exists, not checked out), divergence from the user branch, autostart unit (a generated unit whose `PATH` lacks `kankan` or an agent is rewritten keeping its enabled state; an edited unit is reported).
+- **Online:** credentials (`kankan init --reauth`), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
+
+`--no-fix` changes nothing. **Preflight:** `kankan up` (once, before starting anything, for the types that need a new agent) and `kankan agent` run the offline checks for the requested types and refuse with the manual steps if an agent CLI or `kankan` is missing or the skill cannot be installed; the login check never blocks.
+
 ## 16. CLI
 
 ### 16.1 User commands
@@ -547,6 +564,8 @@ Under the project lock, conditional on the value read, recorded in the log:
 | `kankan claims` | Card refs with phase, holder, age and branch. |
 | `kankan resolve <shortLink> [--done]` | Manual resolution of a blocked card (12.4). |
 | `kankan reconcile [--fix]` | 15.3. |
+| `kankan doctor [--no-fix] [--offline]` | Checks the installation and the project, fixes what is safe, lists manual steps (15.5). |
+| `kankan merge-request [<branch>] [--remote] [--bottom]` | Asks the agents to merge a snapshot of a user branch into the integration branch (12.5). |
 | `kankan adapter check <seat>\|<file>` | Screen classification (8.7). |
 | `kankan seat remove <seat>` | 7.1. |
 | `kankan release <card> --force`, `kankan seat recover <s> [--kill]`, `kankan purge-remote` | 15.4. |
@@ -585,6 +604,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 - Credentials only in the sources of 6.2, never in configuration, logs, comments, blobs or output.
 - Write access to the clone limited to the user running the agents; whoever can write the refs can bypass the protocol.
 - Blobs contain hostname, user and paths: the refs must not be published (`pre-push` hook, `purge-remote`).
+- Only `integrate` pushes the integration branch: the `pre-push` hook refuses other pushes to it from the kankan clone.
 - Inputs validated before reaching Git or the shell; no Trello text interpolated into shell commands.
 - Text forwarded to the agent comes only from the configured members.
 - Automatic answer to the trust window limited to worktrees under the kankan root (real path).
@@ -604,6 +624,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 - Without configuration the `trello_live` tests are skipped with an explicit message.
 - Before any write the tests check that the board description contains the marker `kankan-test-board`; otherwise they stop.
 - Each run uses a unique prefix for lists, cards and labels; at the end it deletes cards and labels and archives the lists. A cleanup option archives the leftovers of interrupted runs.
+- A manual run with real agents (`tests/live/agents_e2e.py`) uses the workflow lists and labels with their real names, kept on the test board and adopted by name; it creates and deletes only its own cards (`ke-` prefix) and its own registry block.
 
 ### 18.3 Acceptance tests
 

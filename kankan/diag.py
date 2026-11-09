@@ -31,7 +31,24 @@ def status(project) -> dict:
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
     waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
                 "reason": reason} for card_id, reason in sorted(reasons.items(), key=lambda i: snap.cards[i[0]].pos)]
-    return {"seats": seat_rows, "waiting": waiting}
+    return {"seats": seat_rows, "waiting": waiting, "branches": branch_divergence(project)}
+
+
+def branch_divergence(project) -> dict:
+    """How far the integration branch and the user branch diverge, in commits (spec §12.5)."""
+    cfg, repo = project.cfg, project.paths.repo
+    integration, user = cfg.integration_branch, cfg.user_branch
+    result = {"integration": integration, "user": None, "ahead": None, "behind": None,
+              "oldest_unmerged_integration": None}
+    if integration == user or not gitutil.rev(repo, f"refs/heads/{integration}") or \
+            not gitutil.rev(repo, f"refs/heads/{user}"):
+        return result
+    counts = gitutil.out(repo, ["rev-list", "--left-right", "--count", f"refs/heads/{integration}...refs/heads/{user}"])
+    ahead, behind = (int(n) for n in counts.split())
+    dates = gitutil.out(repo, ["log", "--first-parent", "--merges", "--format=%cI",
+                               f"refs/heads/{user}..refs/heads/{integration}"]).splitlines()
+    result.update(user=user, ahead=ahead, behind=behind, oldest_unmerged_integration=dates[-1] if dates else None)
+    return result
 
 
 def status_text(data: dict) -> str:
@@ -43,6 +60,10 @@ def status_text(data: dict) -> str:
         task_text = f"{task['kind']} {task['short']}" if task else "-"
         stop = " (stop requested)" if row["stop_requested"] else ""
         lines.append(f"  {row['seat']:<10} {row['liveness']:<11} {row['launcher_state']:<13} {task_text}{stop}")
+    branches = data.get("branches") or {}
+    if branches.get("user"):
+        lines.append(f"Branches: {branches['integration']} is {branches['ahead']} commits ahead / "
+                     f"{branches['behind']} behind {branches['user']}")
     lines.append("Waiting cards:")
     if not data["waiting"]:
         lines.append("  (none)")
@@ -142,7 +163,7 @@ def reconcile(project, fix: bool = False) -> List[Issue]:
             if card.id in refs:
                 pass
             elif card.short not in merged:
-                issues.append(Issue("done_without_merge", card.id, f"{card.short} has no Kankan-Card merge on main"))
+                issues.append(Issue("done_without_merge", card.id, f"{card.short} has no Kankan-Card merge on the integration branch"))
     # seats
     for name, state in liveness.items():
         if state == "dead":
@@ -185,13 +206,13 @@ def reconcile(project, fix: bool = False) -> List[Issue]:
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
     # push failures
     if cfg.push_main:
-        remote_main = gitutil.rev(project.paths.repo, f"refs/remotes/origin/{cfg.main_branch}")
+        remote_main = gitutil.rev(project.paths.repo, f"refs/remotes/origin/{cfg.integration_branch}")
         for event in auditlog.read(project.paths):
             if event.get("event") == "push_failed" and event.get("merge"):
                 if not remote_main or not gitutil.is_ancestor(project.paths.repo, event["merge"], remote_main):
                     issues.append(Issue("push_failed", event["merge"], "the merge is not on origin"))
-    for path in worktrees.main_checked_out(project.paths.repo, cfg.main_branch):
-        issues.append(Issue("main_checked_out", str(path), f"{cfg.main_branch} is checked out"))
+    for path in worktrees.main_checked_out(project.paths.repo, cfg.integration_branch):
+        issues.append(Issue("main_checked_out", str(path), f"{cfg.integration_branch} is checked out"))
     if fix:
         issues += _fix(project, snap, refs, liveness)
     return issues
@@ -199,7 +220,7 @@ def reconcile(project, fix: bool = False) -> List[Issue]:
 
 def _all_merges(project):
     from kankan.integrate import merges_on_main
-    return merges_on_main(project.paths.repo, project.cfg.main_branch, 100000)
+    return merges_on_main(project.paths.repo, project.cfg.integration_branch, 100000)
 
 
 def _fix(project, snap, refs, liveness) -> List[Issue]:
