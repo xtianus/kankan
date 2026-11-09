@@ -47,8 +47,12 @@ def test_assignment_sends_new_conversation_then_prompt(chain):
     _, log = start_agent(tmux, project, scenario={"steps": [{"shell": COMMIT_AND_DONE, "sleep": 0.5}]})
     assert wait_for(lambda: fake.card_list(card["id"]) == project.reload_config().seats["claude-1"].implemented, timeout=40)
     assert inputs(log)[:2] == ["/clear", "Run the current kankan task (kankan skill)."]
-    assert wait_for(lambda: launcher_state(project, "claude-1") == "idle", timeout=20)
-    assert load_state(project.paths, "claude-1").task is None
+    # the fast fake agent can finish before the launcher records `working` (it pastes the prompt first), so the
+    # state may read `idle` while the task is still set: wait for the task to be closed, not just for `idle`
+    def closed():
+        state = load_state(project.paths, "claude-1")  # one snapshot: launcher state and task together
+        return state.launcher_state == "idle" and state.task is None
+    assert wait_for(closed, timeout=20)
 
 
 def test_codex_new_conversation_dialog_answered(chain):
@@ -205,3 +209,4 @@ def test_limit_left_on_ready_screen(kproject, fake_trello):
     launcher.step()
     assert launcher.state == "working"
     assert not any(n.startswith("Resume ") for n in label_names(fake, card))
+
