@@ -46,3 +46,7 @@ Checked on 2026-11-08 with `kankan up` against a fake Trello board, a scratch re
 ## Codex runs commands outside the agent's environment
 
 Observed on 2026-11-09 with codex-cli 0.167.0, in the first live run: `codex` hands shell commands to a shared, long-lived `codex app-server --listen unix:// --managed-daemon` (parent pid 1, started outside kankan). The commands get the daemon's environment: its own `PATH` (`…/codex-path:~/.local/bin:…`) and none of `KANKAN_SEAT`, `KANKAN_SESSION`, `KANKAN_PROJECT`. The agent reported `kankan: command not found` and stopped. kankan now requires `kankan` on the login `PATH` and the agent commands read seat and session from `<worktree git dir>/kankan-agent.json` when the variables are missing. Claude Code runs commands as its own children and inherits the environment.
+
+## Full-access mode
+
+Observed in the live run of 2026-11-09: Codex 0.167.0 with its default sandbox ran `kankan task --json` without network access, then stopped on an approval dialog ("May I let kankan access Trello outside the sandbox…") that kankan does not recognize; after 10 minutes the card got `Error`. kankan therefore starts every agent in full-access mode: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox` (both flags checked on Claude Code 2.1.319 and codex-cli 0.167.0). To verify on the next live run: the confirmation Claude Code may show the first time it starts with `--dangerously-skip-permissions` on an account that never accepted bypass mode.

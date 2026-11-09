@@ -115,6 +115,19 @@ def check_agents(paths, types: Sequence[str]) -> List[Check]:
                                 f"install {name} (or ignore it if you use only the other agent type)"))
     for agent_type in types:
         adapter = present.get(agent_type)
+        if adapter is None:
+            continue
+        missing = [arg for arg in adapter.full_access if arg not in adapter.command]
+        if missing:
+            checks.append(Check(f"full-access:{agent_type}", MANUAL,
+                                f"{AGENT_NAMES.get(agent_type, agent_type)} would run with permission prompts or a "
+                                f"sandbox: its command `{' '.join(adapter.command)}` lacks {' '.join(missing)}",
+                                f"add {' '.join(missing)} to the {agent_type} command in agents.json (kankan's agents "
+                                "need full-access mode: git, Trello and the network, without prompts)"))
+        else:
+            checks.append(Check(f"full-access:{agent_type}", OK, " ".join(adapter.full_access) or "no flag needed"))
+    for agent_type in types:
+        adapter = present.get(agent_type)
         if adapter is None or not adapter.login_check:
             checks.append(Check(f"login:{agent_type}", SKIPPED, "cannot verify the login"))
             continue
@@ -395,7 +408,8 @@ def preflight(types: Sequence[str], paths=None) -> None:
     """Offline checks before starting agents of ``types``: a missing CLI, kankan or skill stops the start."""
     if os.environ.get("KANKAN_SKIP_PREFLIGHT") == "1":
         return
-    checks = [check_kankan_path(), *[c for c in check_agents(paths, types) if c.name.startswith("agent:")],
+    checks = [check_kankan_path(),
+              *[c for c in check_agents(paths, types) if c.name.startswith(("agent:", "full-access:"))],
               _ensure_skill_links(types)]
     manual = [c for c in checks if c.status == MANUAL or (c.name.startswith("agent:") and c.status == WARN)]
     if manual:

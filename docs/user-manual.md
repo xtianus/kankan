@@ -171,11 +171,15 @@ How kankan reads each agent's screen (ready, working, usage limit, trust window,
 {"codex": {"queue_while_working": true}}
 ```
 
+`full_access` lists the arguments the agent's `command` must contain: kankan runs every agent in **full-access mode** (Claude Code with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox`), because a permission prompt or a sandbox stops the agent in the middle of a task (Codex's sandbox, for example, blocks the network kankan needs to reach Trello). If you override `command`, keep those arguments: otherwise `kankan up` refuses to start the agent and `kankan doctor` reports it.
+
 `login_check` is the command `kankan doctor` runs to see whether an agent is logged in (exit 0 = logged in): `claude auth status` and `codex login status` by default; set it to `[]` to skip the check.
 
 See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the installed agent versions.
 
 ## 12. Limits
+
+- The agents run in full-access mode: no permission prompts and no sandbox, with all the rights of the user running kankan. Use a dedicated user or machine (a VM or a container) if that is too much for your environment.
 
 - Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`) ([spec §7.5](../aispecs/kankan_spec.md#75-liveness-and-automatic-recovery)).
 - Human changes to a card's list are honoured on a best-effort basis ([spec §14.5](../aispecs/kankan_spec.md#145-precedence-of-human-changes)); `reconcile` reports leftovers.

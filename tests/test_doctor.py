@@ -375,3 +375,26 @@ def test_token_owner_as_board_admin_is_manual(bound, fakebin, fake_trello):
         {"idMember": fake_trello.me["id"], "memberType": "admin"}]
     check = by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"]
     assert check.status == doctor.MANUAL and "own Trello account" in check.action
+
+
+def test_agents_run_in_full_access_mode_by_default(fakebin):
+    """kankan's agents must run without permission prompts or sandbox (they need git, Trello and the network)."""
+    from kankan.adapters import load_adapter
+    assert "--dangerously-skip-permissions" in load_adapter(None, "claude").command
+    assert "--dangerously-bypass-approvals-and-sandbox" in load_adapter(None, "codex").command
+    fakebin("claude")
+    assert by_name(doctor.check_agents(None, ("claude",)))["full-access:claude"].status == doctor.OK
+
+
+def test_agent_without_full_access_refuses_to_start(fakebin, monkeypatch):
+    monkeypatch.delenv("KANKAN_SKIP_PREFLIGHT")
+    monkeypatch.setattr(doctor, "check_kankan_path", lambda: doctor.Check("kankan-path", doctor.OK, "x"))
+    fakebin("claude")
+    user_agents = Path(os.path.expanduser("~")) / ".config" / "kankan" / "agents.json"
+    user_agents.parent.mkdir(parents=True)
+    user_agents.write_text(json.dumps({"claude": {"command": ["claude"]}}))  # override without the flag
+    check = by_name(doctor.check_agents(None, ("claude",)))["full-access:claude"]
+    assert check.status == doctor.MANUAL and "--dangerously-skip-permissions" in check.action
+    with pytest.raises(KankanError) as exc:
+        doctor.preflight(["claude"])
+    assert exc.value.status == Status.CONFIG_ERROR and "full-access" in exc.value.message

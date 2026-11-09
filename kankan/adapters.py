@@ -35,6 +35,7 @@ class Adapter:
     trust_answer: List[str]
     known: List[dict] = field(default_factory=list)
     login_check: List[str] = field(default_factory=list)
+    full_access: List[str] = field(default_factory=list)  # arguments that must be in `command` (spec §8.7)
 
 
 @dataclass

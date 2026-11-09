@@ -270,7 +270,7 @@ In `working`, if the screen is "ready" with no signal for N minutes (configurabl
 
 ### 8.7 Adapters
 
-An adapter per agent type defines: start command, an optional login check command (exit 0 = logged in; used by `doctor`), new-conversation command, submit key, and groups of indicators — *ready*, *working*, *limit* (with the patterns to derive the resume time), *trust* (with the answer), *known dialogs* (with the answer). Each group is a list of regular expressions applied case-insensitively to the text stripped of colour codes; one match is enough, except for groups marked "all" (e.g. dialogs recognizable only by several texts together).
+An adapter per agent type defines: start command, the **full-access** arguments that command must contain (agents run without permission prompts or sandbox: they need git, the network and Trello; defaults `claude --dangerously-skip-permissions` and `codex --dangerously-bypass-approvals-and-sandbox`; `agent`, `up` and `doctor` refuse a command without them), an optional login check command (exit 0 = logged in; used by `doctor`), new-conversation command, submit key, and groups of indicators — *ready*, *working*, *limit* (with the patterns to derive the resume time), *trust* (with the answer), *known dialogs* (with the answer). Each group is a list of regular expressions applied case-insensitively to the text stripped of colour codes; one match is enough, except for groups marked "all" (e.g. dialogs recognizable only by several texts together).
 
 The defaults ship with kankan and start from the patterns of `airesumer.sh`. They are overridden, only for the parts that change, in `~/.config/kankan/agents.json` (user) and `<gcd>/kankan/agents.json` (project).
 
@@ -543,7 +543,7 @@ Under the project lock, conditional on the value read, recorded in the log:
 
 Checks the machine and, inside a clone, the project; fixes what is safe and prints the manual steps for the rest. Exit 0 when no manual step remains, 14 (`needs_action`) otherwise; warnings do not fail.
 
-- **Machine:** Git ≥ 2.38, tmux ≥ 3.2, `kankan` on the login `PATH` (Codex runs commands with it; agents that inherit their environment also get a private `<gcd>/kankan/bin` first on their `PATH`, holding only a `kankan` wrapper for this installation, so the interpreter's `python`/`pip` never shadow the project's), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
+- **Machine:** Git ≥ 2.38, tmux ≥ 3.2, each agent command in full-access mode (manual step otherwise), `kankan` on the login `PATH` (Codex runs commands with it; agents that inherit their environment also get a private `<gcd>/kankan/bin` first on their `PATH`, holding only a `kankan` wrapper for this installation, so the interpreter's `python`/`pip` never shadow the project's), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
 - **Project:** binding (`kankan init` if missing), adapters, `pre-push` hook (installed or made executable), `info/exclude`, integration branch (exists, not checked out), divergence from the user branch, autostart unit (a generated unit whose `PATH` lacks `kankan` or an agent is rewritten keeping its enabled state; an edited unit is reported).
 - **Online:** credentials (`kankan init --reauth`), kankan's account (manual step when the token's owner is an admin of the board: that is a person's token, and that person's answers would be ignored and never notified), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
 
@@ -609,6 +609,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 - Inputs validated before reaching Git or the shell; no Trello text interpolated into shell commands.
 - Text forwarded to the agent comes only from board members other than kankan's own account: board membership decides who can instruct the agents.
 - Automatic answer to the trust window limited to worktrees under the kankan root (real path).
+- Agents run in full-access mode (no permission prompts, no sandbox): they can do anything the user running them can. Run kankan under a user and on a machine where that is acceptable.
 
 ## 18. Tests
 
