@@ -1,7 +1,7 @@
 # Kanban backend requirements for kankan
 
-**Status:** v1.0
-**Date:** 2026-11-08
+**Status:** v1.1 (v1.1: card attachments, [section 9](#9-card-attachments), planned for spec v1.3)
+**Date:** 2026-11-09
 **Related:** [`kankan_spec.md`](kankan_spec.md)
 
 ## 1. Purpose
@@ -90,20 +90,30 @@ Requirement levels:
 | D3 | MUST | The API returns the links with the target card resolvable to its ID or short code, including targets on other boards and archived targets. | attachments with `url` = `https://trello.com/c/{shortLink}/...` |
 | D4 | MAY | Native typed relations ("blocks", "is blocked by"). An adapter can map them to D1–D3. | — |
 
-## 9. Authentication bootstrap
+## 9. Card attachments
+
+Files and links the user attaches to a card are task inputs for the agent ([spec §13.3](kankan_spec.md#133-card-attachments)). Card-to-card links are dependencies ([section 8](#8-card-to-card-links-dependencies)), not task inputs. The endpoints are planned: the commit that implements spec v1.3 replaces "planned" with the endpoints the code uses.
+
+| ID | Level | Capability | Trello endpoint |
+|---|---|---|---|
+| F1 | SHOULD | A user can attach files and links to a card from the UI. Without it, the user puts text in the description or links it there. | Trello "Add > Attachment" (computer upload or link) |
+| F2 | SHOULD | List a card's attachments with ID, name, URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | planned |
+| F3 | SHOULD | Download the content of an uploaded file with the API credential, from a URL on the API host, without sending the credential to another host. Without it, the agent sees only the attachments' names and URLs. | planned |
+
+## 10. Authentication bootstrap
 
 | ID | Level | Capability | Trello |
 |---|---|---|---|
 | A1 | MUST | A documented manual procedure through which a user obtains a non-expiring (or long-lived, renewable) token, which kankan stores in a properties file. | API key from `trello.com/apps/admin`; token from `trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=...` |
 | A2 | MUST | A cheap endpoint that validates the credential. | `GET /1/members/me` |
 
-## 10. Requirements outside the API
+## 11. Requirements outside the API
 
-- **UI:** users create and reorder cards, create extra lists, add and remove labels, link cards and write comments from a web or mobile UI. kankan provides no UI of its own.
+- **UI:** users create and reorder cards, create extra lists, add and remove labels, link cards, attach files and links, and write comments from a web or mobile UI. kankan provides no UI of its own.
 - **Visibility:** the UI shows labels, comments and list membership on the card front or in the card detail.
 - **Data model:** each card is in exactly one list at a time.
 - **Free tier:** the use case (one board per project, a few dozen lists, low thousands of cards) should fit a free or low-cost plan, as it does on Trello.
 
-## 11. Adapter checklist
+## 12. Adapter checklist
 
 An adapter for a new backend is complete when it implements every MUST above behind the interface of kankan's `trello` module, and the `trello_live` acceptance tests ([spec §18](kankan_spec.md#18-tests)) pass against a dedicated test board of that product.

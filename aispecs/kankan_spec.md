@@ -1,15 +1,15 @@
 # kankan — coordinating AI agents on a Kanban board
 
-**Status:** specification v1.2
+**Status:** specification v1.3 (v1.3: card attachments as task inputs, [13.3](#133-card-attachments))
 **Date:** 2026-11-09
 **Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (requirements for backends other than Trello)
 **Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual.
 
 ## 1. Purpose
 
-kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on the same project, taking tasks from a Trello board and handing work to each other: one agent implements a card, an agent of a different type reviews it, integrates it into the main branch and closes it.
+kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on the same project, taking tasks from a Trello board and handing work to each other: one agent implements a card, an agent of a different type reviews it, integrates it into the integration branch and closes it.
 
-The user creates and orders the cards on Trello, starts the agents and steps in only when an agent asks or when they decide to stop a card. kankan guarantees that two agents never work on the same card and that only reviewed and tested code enters the main branch.
+The user creates and orders the cards on Trello, starts the agents and steps in only when an agent asks or when they decide to stop a card. kankan guarantees that two agents never work on the same card and that only reviewed and tested code enters the integration branch, which the user merges into their own branches when they choose.
 
 kankan is meant to become an open source project: it contains no hard-wired references to a specific user's boards, paths or credentials.
 
@@ -17,19 +17,19 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 
 - All agents run **on the same Linux server**, in the same process namespace.
 - A **project** is a Git clone in `~/coding/<project>` bound to **one** Trello board. All agents of a project work on worktrees of the same clone and therefore share the same Git ref store. Several projects can coexist on the same server, each with its own state.
-- The agents integrate into a dedicated **integration branch**, `kankan-agents` by default (`integration_branch` in the configuration); only kankan moves it and nobody checks it out. Every other branch belongs to the user, except the card branches `??kankan-<shortLink>` ([12.5](#125-integration-branch-and-user-branches)). **In this specification `main` denotes the integration branch**; the user's own main branch is called the *user branch* (`user_branch`, default `main`). Configurations written before v1.2 with `main_branch` keep integrating into that branch.
+- The agents integrate into a dedicated **integration branch**, `kankan-agents` by default (`integration_branch` in the configuration); only kankan moves it and nobody checks it out. Every other branch belongs to the user, except the card branches `??kankan-<shortLink>` ([12.5](#125-integration-branch-and-user-branches)). The user's own main branch is called the *user branch* (`user_branch`, default `main`); kankan never changes it. Configurations written before v1.2 with `main_branch` keep integrating into that branch. Some names keep `main` for compatibility although they refer to the integration branch: the status `main_moved`, the configuration key `push_main` and the field `main` of `kankan task`.
 - Agents run in **interactive** mode inside **tmux** sessions, so the user can attach and watch them, and the external tool `airesumer.sh` can resume them after a usage limit.
 - tmux sessions survive SSH disconnection. Requirements: `KillUserProcesses=no` in logind (Ubuntu default) and, for automatic start, lingering enabled (`loginctl enable-linger`).
 - Trello is reachable via REST with a user API key and token. Trello does **not** offer conditional updates.
 - Participants cooperate: they change in-progress cards, claims and seats only through kankan.
-- Minimum versions (to be confirmed during planning): Python 3.10, Git 2.38, tmux 3.2.
+- Minimum versions: Python 3.10, Git 2.38, tmux 3.2 (`kankan doctor` checks Git and tmux, [15.5](#155-kankan-doctor---no-fix---offline)).
 
 ## 3. Principles
 
 1. **Git decides ownership.** A card belongs to whoever its ref names; every change of ownership is a conditional ref operation.
 2. **Trello expresses human intent.** The user communicates through labels and comments. Their changes to the list of an in-progress card are honoured on a *best effort* basis ([14.5](#145-precedence-of-human-changes)).
 3. **Git first, then Trello.** Every transition first records the new phase in the card's ref, then moves the card. An intermediate state is never eligible for other agents and is completed by convergence ([10.4](#104-convergence)).
-4. **Conditional atomic operations.** Creations, releases, phase changes and advancing `main` use compare-and-swap; when several refs are involved, a single Git transaction.
+4. **Conditional atomic operations.** Creations, releases, phase changes and advancing the integration branch use compare-and-swap; when several refs are involved, a single Git transaction.
 5. **Short, serialized critical sections.** Changes to a project's workflow happen under a project lock held for a few seconds.
 6. **Stable identifiers.** Cards, lists and labels are recognized by ID, never by name or position.
 7. **A single write channel.** Agents and the user change workflow state through the kankan CLI.
@@ -77,6 +77,7 @@ kankan recognizes lists and labels **only by ID**. The user may create other lis
 | Seat state | `<gcd>/kankan/seats/<seat>.state.json` (current task, signals, label causes, comment cursor, test verifications, stop request) |
 | Seat process data | `<gcd>/kankan/seats/<seat>.proc.json` |
 | Audit log | `<gcd>/kankan/log.jsonl` |
+| Downloaded card attachments | `<gcd>/kankan/attachments/<shortLink>/<attachment-id>/<file name>` ([13.3](#133-card-attachments)) |
 | Seat worktrees | `~/coding/.kankan/<project>/<seat>` (configurable root) |
 | Worktrees of blocked cards | `~/coding/.kankan/<project>/blocked-<shortLink>` |
 | Adapters (user override) | `~/.config/kankan/agents.json` |
@@ -101,6 +102,10 @@ kankan is a Python 3 package that uses **only the standard library** (pytest for
 | `integrate` | `sync`, `verify`, `integrate`, worktrees of blocked cards. |
 | `adapters` | Per-agent-type adapters and screen classification. |
 | `launcher` | Supervisor, launcher and its state machine, tmux, pane writes, comment forwarding. |
+| `agentcmds` | Agent commands ([16.2](#162-agent-commands)): `task`, `note`, `done`, `ask`, `fail`, `yield`. |
+| `notify` | Who is mentioned and whose comments are forwarded ([14.2](#142-notifications), [14.3](#143-answers-through-comments)). |
+| `diag` | `status`, `claims`, `reconcile`, administration commands. |
+| `doctor` | Installation and project checks, the preflight of `agent` and `up`. |
 | `cli` | Commands, text and JSON output, exit codes. |
 
 The **shared skill** ([`SKILL.md`](../kankan/skill/SKILL.md), for Claude Code and Codex) explains to the agent how to carry out an assigned task. The work cycle belongs to the launcher.
@@ -214,7 +219,7 @@ Starts the launcher as a child. If the launcher terminates abnormally, it writes
 
 ### 8.3 Launcher startup
 
-1. Checks configuration and the board↔registry binding; warns if `main` is checked out in any worktree.
+1. Checks configuration and the board↔registry binding; warns if the integration branch is checked out in any worktree.
 2. Occupies the seat ([7.3](#73-occupation)) and creates the worktree if missing.
 3. Renames the tmux session to `ai-<project>-<seat>`: the `ai-` prefix and the agent among the pane's descendants make the session visible to `airesumer.sh`.
 4. Starts the agent (the adapter's command) as a child, in the worktree, with `KANKAN_SEAT`, `KANKAN_SESSION`, `KANKAN_PROJECT` in the environment. In the child, before starting the agent: sets `PDEATHSIG` and checks that the parent is still the launcher, otherwise exits immediately.
@@ -242,7 +247,7 @@ In `idle`, with no work, the launcher does not involve the agent and spends no t
 
 1. **Convergence** ([10.4](#104-convergence)) and check of the board↔registry binding.
 2. **Task choice** ([chapter 9](#9-task-choice)) and preparation before involving the agent: ref transition, verified move, branch and worktree ([chapter 11](#11-branches-and-worktrees)).
-3. **Assignment:** the launcher generates a task ID, saves it in the seat state, sends the adapter's new-conversation command (default `/new` for both types) and a one-line prompt, for example `Run the current kankan task (kankan skill).` The agent reads the details with `kankan task --json`.
+3. **Assignment:** the launcher generates a task ID, saves it in the seat state, sends the adapter's new-conversation command (defaults: `/clear` for Claude Code, `/new` for Codex, whose location dialog is a known dialog answered by keeping the seat worktree) and a one-line prompt, for example `Run the current kankan task (kankan skill).` The agent reads the details with `kankan task --json`.
 4. **Execution:** the agent closes the task with a signal ([13.2](#132-signals)). Agent commands act only on the current task, and the signal written into the seat state carries the task ID; a signal with a different ID is ignored.
 5. **Closing:** convergence, waiting for the pane to be idle, back to step 1.
 
@@ -294,7 +299,7 @@ The implementer is read from the card's ref, not from the list. If only one agen
 
 ### 9.3 Dependencies
 
-A card depends on the Trello cards attached to it ("Add > Attachment" with a card). The attachment exists only on the card that holds it. Attachments whose URL is `https://trello.com/c/<shortLink>`, followed or not by the rest of the address, count as attached cards; other attachments are ignored. Attached cards not present in the board read (archived or on other boards) are read individually by shortLink.
+A card depends on the Trello cards attached to it ("Add > Attachment" with a card). The attachment exists only on the card that holds it. Attachments whose URL is `https://trello.com/c/<shortLink>`, followed or not by the rest of the address, count as attached cards; other attachments are not dependencies but task inputs for the agent ([13.3](#133-card-attachments)). Attached cards not present in the board read (archived or on other boards) are read individually by shortLink.
 
 A dependency is satisfied only if the attached card is in the `Done` list of the same board. An attached card that is deleted, unreadable, on another board or archived outside `Done`, or a cycle, make the card ineligible and are reported by `status` and `reconcile`.
 
@@ -307,7 +312,7 @@ A dependency is satisfied only if the attached card is in the `Done` list of the
 | During work | The launcher queues for the agent the request to commit WIP and `yield`, never interrupting it. |
 | During `limited` | The request is queued and read on resumption. |
 | `integrate` | Rechecks the labels under the project lock; with `HOLD` answers `on_hold` and does not integrate. |
-| After `main` has advanced | Irreversible: the card goes to `Done` with the comment "HOLD arrived after integration; to undo: `git revert -m 1 <merge>`". The label stays. |
+| After the integration branch has advanced | Irreversible: the card goes to `Done` with the comment "HOLD arrived after integration; to undo: `git revert -m 1 <merge>`". The label stays. |
 
 When the user removes `HOLD`, the card becomes eligible again and whoever picks it up restarts from the existing branch.
 
@@ -367,14 +372,14 @@ This way crashes between the Git transition and the Trello move (claim, `done`, 
 ## 11. Branches and worktrees
 
 - **Branch name:** `YYkankan-<shortLink>`, where `YY` is the two-digit year the branch was created and `<shortLink>` is the card's 8-character code present in its URL (`trello.com/c/<shortLink>/…`). Example: `26kankan-Ab12Cd34`. The shortLink is unique across all of Trello, does not change if the card moves to another board and allows finding the card through the API. Trello's interface shows only the title: the comment kankan writes at claim time reports the branch name, and merge commits report the card's title and URL.
-- **Start of implementation:** kankan looks for branches `??kankan-<shortLink>`; if one exists it reuses it (resumption after `HOLD`, `block` or a change of year), if more than one `Error`, otherwise it creates `YYkankan-<shortLink>` from the current `main`. Checkout in the seat's worktree, which must be clean.
+- **Start of implementation:** kankan looks for branches `??kankan-<shortLink>`; if one exists it reuses it (resumption after `HOLD`, `block` or a change of year), if more than one `Error`, otherwise it creates `YYkankan-<shortLink>` from the current integration branch. Checkout in the seat's worktree, which must be clean.
 - **Start of review:** checks with `git worktree list` where the branch is checked out. If it is in a clean `blocked-…` worktree with no merge in progress, it removes that worktree; if the merge is not completed it does not assign the card and comments "merge not completed in `<path>`"; if it is checked out elsewhere, `Error`.
 - **Clean worktree:** no modified tracked files and no untracked files not ignored by `.gitignore`. `done`, `yield` and `block` require it (with the exception of an in-progress merge for `block`) and, if it is not, answer `needs_action` listing the files.
 - **Leaving every task:** `done`, `yield` and `block` leave the worktree at a detached HEAD, so the branch is free.
 - **Resuming with a dirty worktree** (previous session died): `kankan task` reports it and the agent evaluates the changes.
 - Branches are not deleted by kankan (deletion after `Done` available as an option, disabled by default).
 
-## 12. Integration into `main`
+## 12. Integration
 
 ### 12.1 Who and when
 
@@ -382,26 +387,26 @@ The reviewing agent integrates, before `Done`, without human approval. The revie
 
 ### 12.2 Steps
 
-1. **`kankan sync`:** merge of the current `main` into the branch. Conflicts are resolved on the branch and committed; they stay saved for later attempts.
+1. **`kankan sync`:** merge of the current integration branch into the card branch. Conflicts are resolved on the branch and committed; they stay saved for later attempts.
 2. **Tests** on the tip of the branch, whose hash the agent notes.
 3. **`kankan verify --tested <hash>`** (required if `test_command` is configured): runs `test_command` in the worktree at that hash, with a configurable timeout, and records the outcome in the seat state. It is separate from `integrate` because it may last longer than the agents' shell command timeout; the agent runs it like any long test command.
 4. **`kankan integrate --tested <hash>`**, under the project lock:
    - rechecks `HOLD` ([9.4](#94-hold)) → `on_hold`;
    - if the card's ref is already `integrated`, returns the recorded merge and exits (idempotency);
    - checks that the branch tip is exactly `<hash>`, that the worktree is clean and, if `test_command` is configured, that a successful verification exists for `<hash>` → otherwise `needs_action`;
-   - reads `M` = `main`; if `M` is not an ancestor of `<hash>` → `main_moved`;
+   - reads `M` = the integration branch; if `M` is not an ancestor of `<hash>` → `main_moved`;
    - creates with `git commit-tree` the commit `R` with the tree of `<hash>`, first parent `M`, second parent `<hash>`, a message with the card's title and URL and the trailers `Kankan-Card: <shortLink>` and `Kankan-Tested: <hash>`;
-   - runs a single transaction: `verify` of the seat's ref, update of the card's ref from `review` to `integrated` (blob with `R` and `<hash>`), update of `main` from `M` to `R`. If it fails because `main` changed → `main_moved`;
-   - if configured, `git push origin main`; a failure does not undo the local integration but is commented and reported by `reconcile`.
+   - runs a single transaction: `verify` of the seat's ref, update of the card's ref from `review` to `integrated` (blob with `R` and `<hash>`), update of the integration branch from `M` to `R`. If it fails because the integration branch changed → `main_moved`;
+   - if `push_main` is set, push of `R` to the integration branch on `origin`; a failure does not undo the local integration but is commented and reported by `reconcile`.
 5. On `main_moved` the agent repeats from step 1; beyond a configurable number of attempts the card gets `Error`.
 6. **`kankan done`:** card to `Done`, verification, deletion of the ref (or convergence after a crash).
 
 ### 12.3 Guarantees
 
-- Only a version that contains the current `main` and is exactly the one declared as tested enters `main`.
+- Only a version that contains the current integration branch and is exactly the one declared as tested enters the integration branch.
 - With `test_command`: kankan saw the tests pass on that version. Without `test_command`: the agent declares it ran them (weaker guarantee).
-- If `main` has advanced, the card is certainly `integrated` and vice versa: a new `integrate` does not create a second merge.
-- The first-parent line of `main` contains one merge per card and `git revert -m 1 <merge>` undoes exactly one card (no *foxtrot merge*).
+- If the integration branch has advanced, the card is certainly `integrated` and vice versa: a new `integrate` does not create a second merge.
+- The first-parent line of the integration branch contains one merge per card and `git revert -m 1 <merge>` undoes exactly one card (no *foxtrot merge*).
 
 ### 12.4 Unresolvable conflicts and `block`
 
@@ -411,9 +416,9 @@ If the agent cannot resolve a conflict safely it calls `block "<reason>"`. With 
 3. creates the worktree `~/coding/.kankan/<project>/blocked-<shortLink>` on the branch, redoes the same merge with the same hash, puts back the copied files and marks as resolved those the agent had already resolved: the state is identical to the one where the agent stopped;
 4. brings the card's ref to `parked` with destination `Blocked` and comments: reason, conflicting files and `To resolve: kankan resolve <shortLink>`.
 
-Without a merge in progress, `block` requires a clean worktree and moves the card to `Blocked`. The card's committed work and `main` are never touched.
+Without a merge in progress, `block` requires a clean worktree and moves the card to `Blocked`. The card's committed work and the integration branch are never touched.
 
-**`kankan resolve <shortLink>`** prints the files still in conflict, the steps to follow (edit, `git add`, `git commit`) and how to finish, then opens a tmux session `kankan-resolve-<project>-<shortLink>` (without the `ai-` prefix) in the blocked worktree, where the same instructions are repeated. **`kankan resolve <shortLink> --done`** checks that the merge is complete and the worktree clean (otherwise it repeats the instructions), removes the worktree and moves the card to the implementer's `Implemented`. The reviewer's next `sync` brings in only the changes to `main` that arrived in the meantime; tests and `integrate` guarantee as always that only the updated and tested version enters `main`.
+**`kankan resolve <shortLink>`** prints the files still in conflict, the steps to follow (edit, `git add`, `git commit`) and how to finish, then opens a tmux session `kankan-resolve-<project>-<shortLink>` (without the `ai-` prefix) in the blocked worktree, where the same instructions are repeated. **`kankan resolve <shortLink> --done`** checks that the merge is complete and the worktree clean (otherwise it repeats the instructions), removes the worktree and moves the card to the implementer's `Implemented`. The reviewer's next `sync` brings in only the changes to the integration branch that arrived in the meantime; tests and `integrate` guarantee as always that only the updated and tested version enters it.
 
 ### 12.5 Integration branch and user branches
 
@@ -430,9 +435,9 @@ The `pre-push` hook enforces the single writer only for pushes from the kankan c
 ### 13.1 Skill
 
 The [`SKILL.md`](../kankan/skill/SKILL.md) skill instructs the agent to:
-1. read the task with `kankan task --json`;
+1. read the task with `kankan task --json`, including the card's attachments ([13.3](#133-card-attachments)), which are part of the card's specification;
 2. implementation: work on the prepared branch, commit, run the tests, close with `done`;
-3. review: read the differences from `main`, fix with separate commits, then `sync`, tests, `verify`, `integrate` (repeating on `main_moved`), finally `done`;
+3. review: read the differences from the integration branch, fix with separate commits, then `sync`, tests, `verify`, `integrate` (repeating on `main_moved`), finally `done`;
 4. publish progress with `kankan note` when useful;
 5. use `ask` before stopping for a question, `fail` for an error that needs the user, `block` for an obstacle that prevents completing the card;
 6. on a suspension request or on `on_hold`, make a WIP commit and call `yield`;
@@ -449,7 +454,43 @@ The [`SKILL.md`](../kankan/skill/SKILL.md) skill instructs the agent to:
 | `block "<reason>"` | [12.4](#124-unresolvable-conflicts-and-block) | next task |
 | `yield` | Transition of [10.3](#103-phases-and-transitions) back to the origin | next task |
 
-`done` verifies the Git side: clean worktree; for implementation at least one commit beyond `main`; for review a ref in phase `integrated`. If the verification fails it answers `needs_action` and the agent fixes it.
+`done` verifies the Git side: clean worktree; for implementation at least one commit beyond the integration branch; for review a ref in phase `integrated`. If the verification fails it answers `needs_action` and the agent fixes it.
+
+### 13.3 Card attachments
+
+The user can attach files and links to a card (screenshots, mock-ups, logs, documents, reference pages); kankan hands them to the agent working on the card, for implementation and for review alike. A Trello card has three kinds of attachments:
+
+| Kind | Recognized by | Handling |
+|---|---|---|
+| **Card link** | URL `https://trello.com/c/<shortLink>…` | Dependency ([9.3](#93-dependencies)); not a task input. |
+| **File** | uploaded to Trello (`isUpload`) | Downloaded by kankan for the agent. |
+| **Link** | any other URL | Passed to the agent as a URL; kankan does not fetch it. |
+
+**Who can supply inputs.** Only attachments added by board members other than kankan's own account are task inputs, the same rule as for forwarded comments ([14.3](#143-answers-through-comments)). Other attachments are listed with status `not_member`, without URL and without download.
+
+**Download.** `kankan task` reads the card's attachments (ID, name, URL, size, MIME type, uploader, upload flag) and downloads every file that is not already present:
+- into `<gcd>/kankan/attachments/<shortLink>/<attachment-id>/<file name>`, outside every worktree: the files never dirty a worktree, are never committed by accident and are shared by the implementer's and the reviewer's seats; the agent reads them by path and, when a file belongs in the repository (e.g. an image asset), copies it there and commits it;
+- with the file name sanitized (path separators, `..`, leading dots and control characters replaced; an empty name becomes `file`);
+- writing to a temporary file in the same directory and renaming it atomically; a file already present with the expected size is not downloaded again;
+- only from the URL Trello gives for that card's attachment (`https://trello.com/1/cards/<card-id>/attachments/<attachment-id>/download/…`, also accepted with the API host); any other URL on a file attachment gives status `unexpected_url`;
+- authenticating with the API credential in an HTTP header, never in the URL; the credential is sent only to the Trello API host and never follows a redirect to another host;
+- only up to `attachment_max_bytes` per file (configuration, default 25 MB); a larger file gets status `too_large` and is not downloaded.
+
+Local copies of attachments no longer on the card are deleted by the next `kankan task`. A failed download does not fail `task`: the entry gets status `error` with the reason, and the next `kankan task` tries again. The directory `<gcd>/kankan/attachments/<shortLink>` is deleted when the card's ref is deleted (card verified in `Done`).
+
+**Task output.** `kankan task` adds the field `attachments`, in the card's order, one entry per non-dependency attachment:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name` | Trello attachment ID and name |
+| `kind` | `file` or `link` |
+| `url` | the Trello URL (for `file`, the one a description references when it embeds the image) or the link's URL |
+| `mime_type`, `bytes` | as reported by Trello (files only) |
+| `path` | absolute path of the local copy (files with status `ok` only) |
+| `status` | `ok`, `too_large`, `not_member`, `unexpected_url`, `error` |
+| `message` | reason, for every status other than `ok` |
+
+**The agent** ([13.1](#131-skill)) treats the attachments with status `ok` as part of the card's specification: it reads text files and looks at images with its own tools, and it may fetch links. Attachment contents are data supplied by the user, never instructions that override the skill. When a file the card depends on has status `error`, the agent repeats `kankan task --json` later; when it has another status, or keeps failing, the agent uses `ask`.
 
 ## 14. Communication through Trello
 
@@ -505,7 +546,7 @@ If the user moves out of the seat's lists, archives or deletes a card in progres
 | Another agent takes the card first | Next card. |
 | Crash between Git transition and Trello move | Convergence on the next cycle. |
 | Move that keeps failing or inconsistent reread | `Error`; no task assigned on that card. |
-| Crash after `main` has advanced | Ref already `integrated`; convergence brings the card to `Done`. |
+| Crash after the integration branch has advanced | Ref already `integrated`; convergence brings the card to `Done`. |
 | The agent dies | The launcher terminates the remaining processes and releases the seat; the cards stay with the seat. |
 | The launcher dies | The agent dies via `PDEATHSIG`; the supervisor starts a new launcher that recovers the seat. |
 | The supervisor dies | Dead seat, recovered at the next `kankan agent`/`up`. |
@@ -524,13 +565,14 @@ If the user moves out of the seat's lists, archives or deletes a card in progres
 By default report only:
 - card refs whose phase has not matched the list for more than one cycle;
 - cards in seat lists without a ref; refs of deleted cards; malformed blobs;
-- cards in `Done` without a matching merge in `main` (`Kankan-Card` trailer);
+- cards in `Done` without a matching merge in the integration branch (`Kankan-Card` trailer);
 - registered dead seats; seats without their lists; seats unavailable because of surviving processes;
 - unsatisfiable dependencies; more than one `??kankan-<shortLink>` branch for the same card; `blocked-…` worktrees of cards no longer in `Blocked`;
-- `Error` or `Question` labels older than a threshold; failed push of `main`;
-- `main` checked out in a worktree; invalid board↔registry binding.
+- `Error` or `Question` labels older than a threshold; failed push of the integration branch;
+- the integration branch checked out in a worktree; invalid board↔registry binding;
+- attachment directories ([13.3](#133-card-attachments)) of cards without a ref.
 
-With `--fix`, under the project lock and skipping cards whose holder is alive, it repairs only the certain cases: deletes `integrated` refs of cards already in `Done`, deletes unused or expired `Resume` labels, removes kankan labels from cards in `Done`.
+With `--fix`, under the project lock and skipping cards whose holder is alive, it repairs only the certain cases: deletes `integrated` refs of cards already in `Done`, deletes unused or expired `Resume` labels, removes kankan labels from cards in `Done`, deletes attachment directories of cards without a ref.
 
 ### 15.4 Administration commands
 
@@ -588,7 +630,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 | 10 | `no_work` | No task available. |
 | 11 | `already_claimed` | Taken by someone else. |
 | 12 | `ineligible` | Card not (or no longer) eligible. |
-| 13 | `main_moved` | Repeat `sync`, tests, `verify`, `integrate`. |
+| 13 | `main_moved` | The integration branch moved: repeat `sync`, tests, `verify`, `integrate`. |
 | 14 | `needs_action` | Failed check the agent can fix; the message explains what to do. |
 | 15 | `on_hold` | The card is on `HOLD`: commit WIP and `yield`. |
 | 20 | `network_error` | Temporary, retryable. |
@@ -607,7 +649,8 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 - The seat file `kankan-agent.json` (seat and session) lives in the worktree's Git directory, writable only by the user; a process left over in the seat worktree could use the current session, so seat recovery kills the recorded processes before the worktree is reused.
 - Only `integrate` pushes the integration branch: the `pre-push` hook refuses other pushes to it from the kankan clone.
 - Inputs validated before reaching Git or the shell; no Trello text interpolated into shell commands.
-- Text forwarded to the agent comes only from board members other than kankan's own account: board membership decides who can instruct the agents.
+- Text forwarded to the agent comes only from board members other than kankan's own account: board membership decides who can instruct the agents. The same rule applies to card attachments ([13.3](#133-card-attachments)).
+- Attachment downloads send the credential only to the Trello API host, in a header, never on a redirect to another host; downloaded file names are sanitized and stay inside the card's attachment directory.
 - Automatic answer to the trust window limited to worktrees under the kankan root (real path).
 - Agents run in full-access mode (no permission prompts, no sandbox): they can do anything the user running them can. Run kankan under a user and on a machine where that is acceptable.
 
@@ -617,7 +660,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 - **Unit:** `refstore`, `config`, `.properties` files, phases and transitions, convergence, task choice, dependencies, adapter classification.
 - **Local integration:** fake Trello server (subset of the API used, with injection of timeouts, 5xx, 429, inconsistent responses and successful writes with a late response), real Git in temporary directories, real tmux and a fake agent (a script that simulates ready, working, limit, trust, known dialogs and calls kankan according to a scenario).
-- **Fault injection** at every boundary between one effect and the next (simulated crash between Git transaction and Trello move, between advancing `main` and `done`, during seat creation, during comment forwarding).
+- **Fault injection** at every boundary between one effect and the next (simulated crash between Git transaction and Trello move, between advancing the integration branch and `done`, during seat creation, during comment forwarding).
 - **On real Trello:** tests marked `trello_live` on a dedicated test board.
 
 ### 18.2 Test board
@@ -636,7 +679,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 3. Two agents start from a stale board read: only one gets the card.
 4. Repeating a creation after an ambiguous failure recognizes one's own ref.
 5. A conditional change does not modify a ref replaced in the meantime.
-6. An `integrate` started before `seat recover` or `release --force` does not advance `main`.
+6. An `integrate` started before `seat recover` or `release --force` does not advance the integration branch.
 
 **Seats and processes**
 
@@ -662,10 +705,10 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 **Integration**
 
-23. Two reviewers integrate together: both cards enter `main`, one gets `main_moved`; one merge per card along the first parent; `revert -m 1` undoes the right card.
+23. Two reviewers integrate together: both cards enter the integration branch, one gets `main_moved`; one merge per card along the first parent; `revert -m 1` undoes the right card.
 24. The merge commit has the same tree as the tested version; `integrate` refuses a tip different from `--tested` and, with `test_command`, an unverified version.
-25. Crash after `main` has advanced: no second merge; the card reaches `Done`.
-26. `block` with a merge in progress: `blocked-…` worktree with identical state, seat free, `main` untouched; `resolve --done` brings the card to `Implemented`; the next reviewer integrates after a `sync` without conflicts.
+25. Crash after the integration branch has advanced: no second merge; the card reaches `Done`.
+26. `block` with a merge in progress: `blocked-…` worktree with identical state, seat free, integration branch untouched; `resolve --done` brings the card to `Implemented`; the next reviewer integrates after a `sync` without conflicts.
 
 **Trello errors**
 
@@ -690,19 +733,11 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 39. The `pre-push` hook blocks `refs/agent-*`.
 40. `airesumer.sh` (`discover_panes`) finds the `ai-…` session and the agent; `kankan-resolve-…` sessions are ignored.
 
-## 19. Implementation phases
+**Attachments**
 
-All phases are designed in this specification; the order makes each step verifiable on its own.
+41. Card attachments: `task` lists files and links but not dependency card links; a file is downloaded once into the card's attachment directory and reused by the reviewer's seat; a file larger than `attachment_max_bytes` is `too_large`; an attachment by a non-member is `not_member` and not downloaded; a file name with `../` stays inside the directory; a file whose URL points elsewhere is `unexpected_url` and gets no credential; a redirect to another host gets no credential; a failed download is `error` and is retried by the next `task`; an attachment removed from the card loses its local copy; the directory is deleted when the card reaches `Done`.
 
-| Phase | Content | Tests |
-|---|---|---|
-| 1. Foundations | `config`, `.properties`, project lock; `init` with board↔registry binding, lists, labels, hook; Trello client and fake server; `refstore` with transactions; seats (creation, occupation, flock, recovery, process data); card refs with phases and convergence; claim from the `Backlog`; branches; `task` and `done` for implementation; JSON and exit codes | 1–7, 11–13, 20–22, 27, 37–39 |
-| 2. Processes and launcher | `agent`, `up`, `autostart`, supervisor, launcher and state machine, adapters and `adapter check`, pane observation and writes, trust window, `Resume`, [`SKILL.md`](../kankan/skill/SKILL.md), fake agent | 8–10, 14, 15, 31–36, 40 |
-| 3. Review and integration | review claim, `sync`, `verify`, `integrate` with transaction and receipt, `block` with dedicated worktree, `resolve` | 16, 17, 23–26 |
-| 4. Communication and policies | `HOLD` and `yield`, `ask`/`fail` with comment forwarding, dependencies, cards moved by the user | 18, 19, 28–30 |
-| 5. Diagnostics and documentation | `status`, `claims`, `reconcile [--fix]`, `release --force`, `seat recover`, `seat remove`, `purge-remote`, user manual | cross-cutting |
-
-## 20. Out of scope
+## 19. Out of scope
 
 - Agents on different servers or in different process namespaces; remote registries.
 - Several repositories per project or several boards per repository.
@@ -711,12 +746,10 @@ All phases are designed in this specification; the order makes each step verifia
 - Absolute guarantee of precedence of human changes to a card's list ([14.5](#145-precedence-of-human-changes)).
 - Backends other than Trello: the architecture makes them possible ([`kanban_requirements.md`](kanban_requirements.md)), but the first version supports only Trello.
 
-## 21. To be verified during planning
+## 20. Behaviour not yet observed
 
-Items with an already defined fallback behaviour, to be confirmed on the installed versions:
-- the `/new` command in Codex and in Claude Code (configurable per type);
-- whether Codex queues messages typed while it works, as Claude Code does; if not, the launcher waits for the "ready" state before sending the suspension request;
-- the texts of the trust window, the limit messages and the known dialogs of both agents (configurable);
-- whether Trello notifies label additions (the notification is guaranteed anyway by the comment with a mention);
-- the minimum versions of Python, Git and tmux with respect to the features used;
-- the behaviour of `PDEATHSIG` and of terminal control with the interactive interfaces of Claude Code and Codex.
+The defaults were set from observations of the real agents, recorded with their evidence in [`docs/adapter-notes.md`](../docs/adapter-notes.md). These behaviours have not been observed yet; each has a configurable default or a fallback, and should be checked the first time it happens:
+- the real usage-limit screens of Claude Code and Codex (the default patterns come from `airesumer.sh`; check with `kankan adapter check` and override in `agents.json` if needed);
+- Codex's model-switch dialog (same origin);
+- the confirmation Claude Code may show the first time it starts with `--dangerously-skip-permissions` on an account that never accepted bypass mode;
+- whether Trello notifies label additions (the notification is guaranteed anyway by the comment with a mention, [14.2](#142-notifications)).
