@@ -10,6 +10,8 @@ BRANCH_CONFLICT = "kankan: more than one branch exists for this card ({branches}
 HOLD_AFTER_CLAIM = "kankan: HOLD found right after the claim; the card goes back to the Backlog."
 IMPLEMENTED = "kankan: {seat} finished the implementation on `{branch}`; it waits for a review."
 YIELDED = "kankan: {seat} stopped working on this card (yield); the work is on `{branch}`."
+NOT_HELD = "the card of the current task is no longer held by this seat"
+
 REVIEW_YIELDED = "kankan: {seat} stopped reviewing this card (yield); it goes back to the implementer's list."
 
 INSTRUCTIONS = {

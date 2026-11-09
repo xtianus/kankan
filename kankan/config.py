@@ -142,7 +142,11 @@ class Config:
         data["seats"] = {name: SeatConfig(**seat) for name, seat in (data.get("seats") or {}).items()}
         if "credentials_keys" in data:
             data["credentials_keys"] = tuple(data["credentials_keys"])
-        return cls(**data)
+        cfg = cls(**data)
+        limit = cfg.attachment_max_bytes
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError(f"attachment_max_bytes must be a positive integer, not {limit!r}")
+        return cfg
 
     def seat_lists(self) -> Dict[str, str]:
         """Map every seat list id to the seat name."""
@@ -167,7 +171,7 @@ def load_config(paths: Paths) -> Config:
         raise KankanError(Status.CONFIG_ERROR, "kankan is not initialized in this repository: run `kankan init <board-url>`")
     try:
         return Config.from_dict(raw)
-    except (TypeError, KeyError) as err:
+    except (TypeError, KeyError, ValueError) as err:
         raise KankanError(Status.CONFIG_ERROR, f"invalid {paths.kankan_dir / 'config.json'}: {err}")
 
 

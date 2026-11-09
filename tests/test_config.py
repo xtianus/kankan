@@ -43,6 +43,21 @@ def test_config_roundtrip(git_repo):
     assert load_config(paths) == cfg
 
 
+@pytest.mark.parametrize("value", [0, -1, "1000", 1.5, True, None])
+def test_invalid_attachment_max_bytes_config_error(git_repo, value):
+    paths = Paths.discover(git_repo)
+    data = make_cfg().to_dict()
+    data["attachment_max_bytes"] = value
+    atomic_write_json(paths.kankan_dir / "config.json", data)
+    with pytest.raises(KankanError) as exc:
+        load_config(paths)
+    assert exc.value.status == Status.CONFIG_ERROR
+    assert "attachment_max_bytes must be a positive integer" in exc.value.message
+    data["attachment_max_bytes"] = 1000
+    atomic_write_json(paths.kankan_dir / "config.json", data)
+    assert load_config(paths).attachment_max_bytes == 1000
+
+
 def test_credentials_lookup_order(git_repo, tmp_path, monkeypatch, isolated_home):
     paths = Paths.discover(git_repo)
     user = isolated_home / ".config" / "kankan" / "credentials"

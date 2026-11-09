@@ -11,17 +11,19 @@ deletion unlinks a symlink instead of descending into it.
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import time
 import urllib.parse
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
-from kankan import auditlog, clock, config, deps, notify
+from kankan import auditlog, clock, config, deps, messages, notify
 from kankan.config import Paths
 from kankan.errors import KankanError, Status
 from kankan.trello import Attachment, Card, DownloadTooLarge, _origin
@@ -31,7 +33,9 @@ LOCK_MARGIN_SECONDS = 30  # a waiting call gives up on the card attachment lock 
 
 _SHORT = re.compile(r"[A-Za-z0-9]{8}")
 _ATT_ID = re.compile(r"[0-9a-f]{24}")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\ud800-\udfff]")  # surrogates cannot be encoded
+MAX_NAME_BYTES = 255  # the usual file system limit of one name, in UTF-8 bytes
+_MAX_EXT_BYTES = 32  # a longer extension is truncated with the rest of the name
 _TRELLO_ORIGIN = ("https", "trello.com", 443)
 _KEYS = ("id", "name", "kind", "url", "mime_type", "bytes", "path", "status", "message")
 
@@ -40,7 +44,15 @@ UNEXPECTED_URL = "the URL is not Trello's download URL for this card's attachmen
 NOT_YET = "not downloaded yet: run `kankan task` again"
 UNSAFE = "unsafe attachment path"
 INVALID_ID = "invalid attachment id"
-NOT_HELD = "the card of the current task is no longer held by this seat"
+NOT_HELD = messages.NOT_HELD
+
+
+class Hold(enum.Enum):
+    """What a ``for_task`` ownership check found: the seat holds the card, its ref is gone, or anything else
+    (another owner or phase, or the ref could not be read)."""
+    HELD = "held"
+    GONE = "gone"
+    OTHER = "other"
 
 
 def root(paths: Paths) -> Path:
@@ -64,13 +76,37 @@ def card_lock(paths: Paths, short: str, timeout: float):
 
 
 def sanitize(name: str) -> str:
-    """A local file name from Trello's: control characters, path separators, ``..`` and leading dots replaced."""
+    """A local file name from Trello's: control characters, surrogates, characters the file system encoding
+    cannot represent, path separators, ``..`` and leading dots replaced by ``_``; at most ``MAX_NAME_BYTES``
+    bytes in UTF-8 (see ``_truncate``)."""
     name = _CONTROL.sub("_", name)
+    name = "".join(char if _encodable(char) else "_" for char in name)
     name = name.replace("/", "_").replace("\\", "_")
     name = name.replace("..", "_")
     stripped = name.lstrip(".")
     name = "_" * (len(name) - len(stripped)) + stripped
-    return name or "file"
+    return _truncate(name or "file")
+
+
+def _encodable(char: str) -> bool:
+    try:
+        char.encode(sys.getfilesystemencoding())
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _truncate(name: str) -> str:
+    """``name`` cut to ``MAX_NAME_BYTES`` UTF-8 bytes on a character boundary, keeping an extension of at most
+    ``_MAX_EXT_BYTES`` bytes."""
+    if len(name.encode("utf-8")) <= MAX_NAME_BYTES:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    suffix = dot + ext
+    if not stem or len(suffix.encode("utf-8")) > _MAX_EXT_BYTES:
+        stem, suffix = name, ""
+    budget = MAX_NAME_BYTES - len(suffix.encode("utf-8"))
+    return stem.encode("utf-8")[:budget].decode("utf-8", "ignore") + suffix
 
 
 def download_path(base_url: str, url: str, card_id: str, att_id: str) -> Optional[str]:
@@ -115,7 +151,8 @@ def directories(paths: Paths) -> List[str]:
 def discard(paths: Paths, short: str) -> bool:
     """Delete a card's attachment directory without waiting: False (and a log entry) when the card attachment
     lock is busy, ``short`` is invalid, or the deletion fails. A busy lock means a ``task`` is downloading; it
-    deletes the directory itself when it finds the card ref gone."""
+    deletes the directory itself when its final check finds the card ref gone. A ref deleted after that check
+    but before the ``task`` releases the lock leaves the directory behind: ``reconcile --fix`` removes it."""
     if not _valid_short(short):
         auditlog.append(paths, "attachments_discard_invalid", short=str(short))
         return False
@@ -129,13 +166,14 @@ def discard(paths: Paths, short: str) -> bool:
     return False
 
 
-def for_task(project, card: Card, still_held: Callable[[], bool]) -> List[dict]:
+def for_task(project, card: Card, still_held: Callable[[], Hold]) -> List[dict]:
     """The ``attachments`` field of ``kankan task``: one entry per non-dependency attachment, in the card's order.
 
     Reads the attachments and the board members without a lock (their failures raise), then, under the card
     attachment lock and between two ``still_held()`` checks, serves cached copies, downloads the missing files
-    and prunes every copy that is not a file with status ``ok``. When ``still_held()`` is False the card's
-    directory is deleted and ``KankanError(INELIGIBLE)`` raised.
+    and prunes every copy that is not a file with status ``ok``. When ``still_held()`` is not ``Hold.HELD``
+    it raises ``KankanError(INELIGIBLE)``, deleting the card's directory first only for ``Hold.GONE``: with
+    ``Hold.OTHER`` the card may belong to another seat whose ``task`` returned paths into that directory.
     """
     budget = DOWNLOAD_BUDGET_SECONDS
     deadline = clock.monotonic() + budget
@@ -235,13 +273,15 @@ def _remove_card_dir(paths: Paths, short: str) -> bool:
     return True
 
 
-def _require_held(project, short: str, still_held: Callable[[], bool]) -> None:
-    if still_held():
+def _require_held(project, short: str, still_held: Callable[[], Hold]) -> None:
+    hold = still_held()
+    if hold is Hold.HELD:
         return
-    try:
-        _remove_card_dir(project.paths, short)
-    except OSError as err:
-        project.log("attachments_discard_failed", short=short, error=_os_message(err))
+    if hold is Hold.GONE:
+        try:
+            _remove_card_dir(project.paths, short)
+        except OSError as err:
+            project.log("attachments_discard_failed", short=short, error=_os_message(err))
     raise KankanError(Status.INELIGIBLE, NOT_HELD)
 
 
@@ -260,6 +300,8 @@ def _serve(project, short: str, entry: dict, att: Attachment, api_path: str, max
         _set(entry, "error", err.message)
     except OSError as err:
         _set(entry, "error", _os_message(err))
+    except ValueError:  # a name the file system cannot encode (``sanitize`` should have prevented it)
+        _set(entry, "error", UNSAFE)
     if entry["status"] != "ok":
         project.log("attachment_not_served", card=short, attachment=att.id, status=entry["status"],
                     error=entry["message"])
@@ -287,7 +329,9 @@ def _cached_or_downloaded(project, short: str, att: Attachment, api_path: str, m
             return final
     if clock.monotonic() >= deadline:
         raise _NotServed(NOT_YET)
-    os.makedirs(att_path, mode=0o700, exist_ok=True)
+    for path in (root(project.paths), card_path, att_path):
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(path, 0o700)
     _download(project, api_path, att, att_path, final, max_bytes, deadline)
     return final
 

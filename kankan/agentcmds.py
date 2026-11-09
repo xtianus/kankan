@@ -63,21 +63,27 @@ def _card_ref(ctx: AgentContext) -> Optional[RefValue]:
     return ctx.project.refs.read(card_ref(ctx.task["card"]))
 
 
+def _owns(ctx: AgentContext, value: Optional[RefValue], phases) -> bool:
+    """The ownership rule of the agent commands: the card ref exists, names this seat and is in ``phases``."""
+    return value is not None and value.meta.get("owner") == ctx.seat and value.meta.get("phase") in phases
+
+
 def _own_ref(ctx: AgentContext, phases) -> RefValue:
     value = _card_ref(ctx)
-    if value is None or value.meta.get("owner") != ctx.seat or value.meta.get("phase") not in phases:
-        raise KankanError(Status.INELIGIBLE, "the card of the current task is no longer held by this seat",
-                          {"phase": value.meta.get("phase") if value else None})
+    if not _owns(ctx, value, phases):
+        raise KankanError(Status.INELIGIBLE, messages.NOT_HELD, {"phase": value.meta.get("phase") if value else None})
     return value
 
 
-def _still_own(ctx: AgentContext, phases) -> bool:
-    """The rule of ``_own_ref`` without raising: False also when the ref cannot be read."""
+def _hold(ctx: AgentContext, phases) -> attachments.Hold:
+    """``_owns`` for ``attachments.for_task``, without raising: ``OTHER`` also when the ref cannot be read."""
     try:
         value = _card_ref(ctx)
     except KankanError:
-        return False
-    return value is not None and value.meta.get("owner") == ctx.seat and value.meta.get("phase") in phases
+        return attachments.Hold.OTHER
+    if value is None:
+        return attachments.Hold.GONE
+    return attachments.Hold.HELD if _owns(ctx, value, phases) else attachments.Hold.OTHER
 
 
 def task(ctx: AgentContext) -> dict:
@@ -87,7 +93,7 @@ def task(ctx: AgentContext) -> dict:
     card = ctx.project.trello.card(current["card"])
     if card is None or card.closed:
         raise KankanError(Status.INELIGIBLE, "the card was deleted or archived")
-    inputs = attachments.for_task(ctx.project, card, still_held=lambda: _still_own(ctx, phases))
+    inputs = attachments.for_task(ctx.project, card, still_held=lambda: _hold(ctx, phases))
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
         "title": card.name, "url": card.url, "desc": card.desc, "phase": value.meta.get("phase"),
@@ -213,14 +219,14 @@ def yield_(ctx: AgentContext) -> dict:
     current = ctx.task
     value = _card_ref(ctx)
     meta = value.meta if value else {}
-    if value is None or meta.get("owner") != ctx.seat or meta.get("phase") not in cards.OWNED_PHASES:
+    if not _owns(ctx, value, cards.OWNED_PHASES):
         if value is not None and meta.get("owner") is None and meta.get("phase") in (Phase.PARKED.value,
                                                                                      Phase.IMPLEMENTED.value):
             if worktrees.current_branch(ctx.worktree) is not None and not worktrees.dirty_files(ctx.worktree):
                 worktrees.detach(ctx.worktree)
             signal(ctx, "yield")
             return {"card": current["card"], "phase": meta.get("phase")}
-        raise KankanError(Status.INELIGIBLE, "the card of the current task is no longer held by this seat")
+        raise KankanError(Status.INELIGIBLE, messages.NOT_HELD)
     require_clean(ctx.worktree)
     state = load_state(ctx.project.paths, ctx.seat)
     reason = (state.suspend_requested or {}).get("reason") or (state.task or {}).get("suspend_cause")

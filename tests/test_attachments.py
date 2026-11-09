@@ -1,9 +1,11 @@
 """Card attachments as task inputs (spec §13.3, acceptance test 41)."""
 
+import dataclasses
 import errno
 import fcntl
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -60,6 +62,10 @@ def part_files(root):
     return [name for _, _, names in os.walk(root) for name in names if name.endswith(".part")]
 
 
+def held():
+    return attachments.Hold.HELD
+
+
 def events(project):
     return [record["event"] for record in auditlog.read(project.paths)]
 
@@ -75,9 +81,25 @@ def events(project):
     ("ok name.png", "ok name.png"),
     ("..", "_"),
     ("a\x7fb", "a_b"),
+    ("a\ud800b.txt", "a_b.txt"),
+    ("\udcff", "_"),
 ])
 def test_sanitize(name, expected):
     assert attachments.sanitize(name) == expected
+
+
+def test_sanitize_truncates_long_names():
+    assert attachments.sanitize("a" * 255) == "a" * 255
+    assert attachments.sanitize("a" * 300 + ".png") == "a" * 251 + ".png"
+    # 2-byte characters: never split one, keep the extension
+    name = attachments.sanitize("é" * 200 + ".tar.gz")
+    assert name == "é" * 126 + ".gz" and len(name.encode()) == 255
+    # an extension longer than 32 bytes is cut with the rest
+    assert attachments.sanitize("b" * 10 + "." + "x" * 300) == "b" * 10 + "." + "x" * 244
+    for raw in ("€" * 100, "a" + "€" * 100, "ab" + "€" * 100, "😀" * 100 + ".txt"):
+        cut = attachments.sanitize(raw)
+        assert len(cut.encode("utf-8")) <= attachments.MAX_NAME_BYTES
+        assert raw.startswith(cut.removesuffix(".txt"))
 
 
 CARD_ID = "5f" + "0" * 21 + "1"
@@ -204,6 +226,41 @@ def test_dotdot_name_stays_inside(env, monkeypatch):
     assert Path(entry["path"]).resolve().is_relative_to(card_dir)
 
 
+def test_surrogate_file_name_served(env, monkeypatch):
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "x.txt", CONTENT)
+    real = TrelloClient.attachments
+    # JSON can carry a lone surrogate; the fake's download URL check cannot, so it is added after the listing
+    monkeypatch.setattr(TrelloClient, "attachments", lambda self, card_id: [
+        dataclasses.replace(att, file_name="\ud800.txt") for att in real(self, card_id)])
+    entry = entries(ctx)[0]
+    assert entry["status"] == "ok", entry["message"]
+    assert entry["path"].endswith(f"{upload['id']}/_.txt")
+    assert Path(entry["path"]).read_bytes() == CONTENT
+
+
+def test_long_file_name_served(env, monkeypatch):
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "é" * 200 + ".pdf", CONTENT)
+    entry = entries(ctx)[0]
+    assert entry["status"] == "ok", entry
+    assert Path(entry["path"]).name == "é" * 125 + ".pdf"
+    assert Path(entry["path"]).read_bytes() == CONTENT
+    assert Path(entry["path"]).parent.name == upload["id"]
+
+
+def test_directories_created_private(env, monkeypatch):
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "a.txt", CONTENT)
+    assert entries(ctx)[0]["status"] == "ok"
+    for path in (attachments.root(project.paths), attachments.card_dir(project.paths, card["shortLink"]),
+                 att_dir(project, card, upload)):
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o700, path
+
+
 def test_unexpected_url_gets_no_request(env, monkeypatch, external_host):
     """[41.6]"""
     project, fake = env
@@ -232,6 +289,25 @@ def test_redirect_to_other_host_gets_no_credential(env, monkeypatch, external_ho
     assert Path(entry["path"]).read_bytes() == external_host.content
     assert len(external_host.requests) == 1
     assert not any(name.lower() == "authorization" for name in external_host.requests[0][1])
+
+
+def test_redirect_back_to_api_origin_gets_no_credential(env, monkeypatch, external_host):
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "a.bin", CONTENT)
+    target = fake.upload(card["id"], "target.bin", CONTENT)
+    target_path = f"/1/cards/{card['id']}/attachments/{target['id']}/download/target.bin"
+    fake.redirect_download(upload["id"], external_host.url + "/away")
+    external_host.redirects["/away"] = fake.url + target_path
+    result = {e["id"]: e for e in entries(ctx)}
+    entry = result[upload["id"]]
+    assert (entry["status"], entry["message"]) == ("error", "HTTP 401"), entry
+    assert [path for path, _ in external_host.requests] == ["/away"]
+    assert not any(name.lower() == "authorization" for name in external_host.requests[0][1])
+    # the hop back to the API origin carried no credential (the fake refused it); the direct download did
+    target_auth = [has_auth for _, path, has_auth in fake.auth_log if path == target_path]
+    assert sorted(target_auth) == [False, True], fake.auth_log
+    assert result[target["id"]]["status"] == "ok"
 
 
 def test_redirect_hops(env, monkeypatch):
@@ -454,6 +530,46 @@ def test_ref_deleted_during_download(env, monkeypatch):
     assert not attachments.card_dir(project.paths, card["shortLink"]).exists()
 
 
+def test_ref_taken_by_another_seat_during_download(env, monkeypatch):
+    """The card passes to another seat while this call downloads: INELIGIBLE, and the directory, whose copies
+    the other seat's ``task`` may have returned, survives."""
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "a.txt", CONTENT)
+    real = TrelloClient.download
+
+    def download(self, *args):
+        size = real(self, *args)
+        ref = card_ref(card["id"])
+        value = ctx.project.refs.read(ref)
+        meta = dict(value.meta, owner="codex", phase="review")
+        assert ctx.project.refs.update(ref, ctx.project.refs.write_blob(meta), value.oid)
+        return size
+    monkeypatch.setattr(TrelloClient, "download", download)
+    with pytest.raises(KankanError) as err:
+        agentcmds.task(ctx)
+    assert err.value.status == Status.INELIGIBLE
+    assert err.value.message == "the card of the current task is no longer held by this seat"
+    assert (att_dir(project, card, upload) / "a.txt").read_bytes() == CONTENT
+    assert "attachments_discarded" not in events(project)
+
+
+def test_unreadable_ref_keeps_directory(env, monkeypatch):
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    upload = fake.upload(card["id"], "a.txt", CONTENT)
+    assert entries(ctx)[0]["status"] == "ok"
+
+    def failing(*args, **kwargs):
+        raise KankanError(Status.INTERNAL_ERROR, "git failed")
+    monkeypatch.setattr(agentcmds, "_card_ref", failing)
+    with pytest.raises(KankanError) as err:
+        attachments.for_task(ctx.project, ctx.project.trello.card(card["id"]),
+                             still_held=lambda: agentcmds._hold(ctx, ("impl",)))
+    assert err.value.status == Status.INELIGIBLE
+    assert (att_dir(project, card, upload) / "a.txt").read_bytes() == CONTENT
+
+
 def test_concurrent_tasks_serialized(env, monkeypatch):
     project, fake = env
     card, _, ctx = claim(project, fake, monkeypatch)
@@ -467,7 +583,7 @@ def test_concurrent_tasks_serialized(env, monkeypatch):
         assert waiting.wait(10), "the other call never waited on the lock"
         return size
     monkeypatch.setattr(TrelloClient, "download", download)
-    calls = [run_thread(lambda: attachments.for_task(ctx.project, trello_card, still_held=lambda: True))
+    calls = [run_thread(lambda: attachments.for_task(ctx.project, trello_card, still_held=held))
              for _ in range(2)]
     for thread, _ in calls:
         thread.join(30)
@@ -491,11 +607,11 @@ def test_waiting_call_uses_cache_despite_faults(env, monkeypatch):
     def download(self, *args):
         size = real(self, *args)
         fake.inject("GET", "/download/", "500", times=20)
-        second["call"] = run_thread(lambda: attachments.for_task(ctx.project, trello_card, still_held=lambda: True))
+        second["call"] = run_thread(lambda: attachments.for_task(ctx.project, trello_card, still_held=held))
         assert waiting.wait(10), "the second call never waited on the lock"
         return size
     monkeypatch.setattr(TrelloClient, "download", download)
-    first = attachments.for_task(ctx.project, trello_card, still_held=lambda: True)
+    first = attachments.for_task(ctx.project, trello_card, still_held=held)
     thread, outcome = second["call"]
     thread.join(30)
     assert "error" not in outcome, outcome
@@ -520,10 +636,10 @@ def test_stale_listing_does_not_prune_newer_copy(env, monkeypatch):
         listed = real(self, card_id)  # B's listing: [X]
         monkeypatch.setattr(TrelloClient, "attachments", real)
         newer["upload"] = fake.upload(card["id"], "y.txt", b"newer\n")
-        newer["result"] = attachments.for_task(ctx.project, trello_card, still_held=lambda: True)  # call A
+        newer["result"] = attachments.for_task(ctx.project, trello_card, still_held=held)  # call A
         return listed
     monkeypatch.setattr(TrelloClient, "attachments", stale_listing)
-    stale = attachments.for_task(ctx.project, trello_card, still_held=lambda: True)  # call B
+    stale = attachments.for_task(ctx.project, trello_card, still_held=held)  # call B
     assert [e["id"] for e in stale] == [first["id"]]
     y_entry = next(e for e in newer["result"] if e["id"] == newer["upload"]["id"])
     assert y_entry["status"] == "ok"
@@ -603,7 +719,7 @@ class _FullFile:
         return getattr(self.out, name)
 
 
-@pytest.mark.parametrize("failing", ["replace", "mkstemp", "makedirs", "write"])
+@pytest.mark.parametrize("failing", ["replace", "mkstemp", "mkdir", "write"])
 def test_write_errors_are_entry_errors(env, monkeypatch, failing):
     project, fake = env
     card, _, ctx = claim(project, fake, monkeypatch)
@@ -620,8 +736,8 @@ def test_write_errors_are_entry_errors(env, monkeypatch, failing):
         monkeypatch.setattr(os, "replace", selective(os.replace, lambda a, k: a[1]))
     elif failing == "mkstemp":
         monkeypatch.setattr(tempfile, "mkstemp", selective(tempfile.mkstemp, lambda a, k: k.get("dir", "")))
-    elif failing == "makedirs":
-        monkeypatch.setattr(os, "makedirs", selective(os.makedirs, lambda a, k: a[0]))
+    elif failing == "mkdir":
+        monkeypatch.setattr(os, "mkdir", selective(os.mkdir, lambda a, k: a[0]))
     else:
         real = TrelloClient.download
         monkeypatch.setattr(TrelloClient, "download", lambda self, path, out, *a: real(self, path, _FullFile(out), *a))

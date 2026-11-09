@@ -390,7 +390,8 @@ class TrelloClient:
         """Stream an attachment's content from ``api_path`` on the API host into ``out``; return its size.
 
         The first request goes to ``base_url + api_path`` with the credential. Redirects are followed
-        by hand (at most 3) under ``_redirect_auth``. Transient failures (5xx, 429, connection errors,
+        by hand (at most 3) under ``_redirect_auth``; after a hop to another origin no request carries the
+        credential, even back on the API origin. Transient failures (5xx, 429, connection errors,
         truncation) are retried, rewriting ``out`` from the start, until ``deadline`` (``clock.monotonic``).
         Raises ``DownloadTooLarge`` past ``max_bytes``, or ``KankanError`` whose message is a fixed reason
         (never a response body or a URL).
@@ -412,12 +413,15 @@ class TrelloClient:
         out.seek(0)
         out.truncate()
         url = self.base_url + api_path
+        left_origin = False  # once a hop leaves the API origin, no later hop carries the credential
         for _hop in range(_MAX_REDIRECTS + 1):
             send_auth = _redirect_auth(self.base_url, url)
             if send_auth is None:
                 scheme = urllib.parse.urlsplit(url).scheme.lower()
                 raise KankanError(Status.TRELLO_ERROR, "redirect to a non-https URL" if scheme == "http"
                                   else "redirect refused")
+            left_origin = left_origin or not send_auth
+            send_auth = send_auth and not left_origin
             remaining = deadline - clock.monotonic()
             if remaining <= 0:
                 raise KankanError(Status.NETWORK_ERROR, "download timed out")

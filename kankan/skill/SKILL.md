@@ -28,7 +28,7 @@ Run `kankan task --json`. `data` contains:
 
 ### Card attachments
 
-Each `attachments` entry has `id`, `name`, `kind` (`file` or `link`), `url`, `status` and, for files, `mime_type`, `bytes` and `path` (the local copy); `message` gives the reason for any status other than `ok`.
+Each `attachments` entry has `id`, `name`, `kind` (`file` or `link`), `url` (absent for status `not_member`), `status` and, for files, `mime_type`, `bytes` and `path` (the local copy); `message` gives the reason for any status other than `ok`.
 
 - Attachments with status `ok` (files and links) are part of the card's specification.
 - Read text files and look at images by `path` with your own tools; you may fetch links.

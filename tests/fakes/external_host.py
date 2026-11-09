@@ -1,7 +1,7 @@
 """A plain HTTP server on ``localhost``: a different origin from the fake Trello server (``127.0.0.1``).
 
-It serves ``content`` on any GET path and records every request, so tests can check
-that a redirected download reaches it without the Trello credential.
+It serves ``content`` on any GET path (a 302 for the paths in ``redirects``) and records every request,
+so tests can check that a redirected download reaches it without the Trello credential.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ class ExternalHost:
     def __init__(self, content: bytes = b"external content\n"):
         self.content = content
         self.requests = []  # (path, headers dict)
+        self.redirects = {}  # path -> Location answered with a 302 instead of the content
         self.server = None
         self.thread = None
 
@@ -26,6 +27,12 @@ class ExternalHost:
 
             def do_GET(self):
                 host.requests.append((self.path, dict(self.headers.items())))
+                if self.path in host.redirects:
+                    self.send_response(302)
+                    self.send_header("Location", host.redirects[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(len(host.content)))
