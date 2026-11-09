@@ -190,7 +190,7 @@ For the old behaviour (agents integrate straight into `main`) answer `main` at `
 You may freely:
 
 - create cards in `Backlog` and reorder them (the top card is taken first);
-- add and remove `HOLD`, add dependency attachments, write comments;
+- add and remove `HOLD`, add attachments (files, links, dependency cards), write comments;
 - unblock a card in `Blocked` with `kankan resolve <shortLink> --done`, or move it to `Backlog` to have it reimplemented.
 
 If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it. This is best effort.
@@ -205,6 +205,8 @@ If you move, archive or delete a card that is in progress anyway, kankan asks th
 With only one agent type running, implemented cards wait in `Implemented`; `kankan status` says why.
 
 **Dependencies:** attach the cards a card depends on (Trello "Attachment → Trello card"). The card waits until every attached card is in `Done`. Missing cards, cards on other boards, archived cards outside `Done` and cycles make it ineligible (shown by `kankan status` and `kankan reconcile`).
+
+**Attachments:** files and links attached to a card by board members reach the agent, for implementation and review alike; card links stay dependencies. Files are downloaded to `<git dir>/kankan/attachments/<card>/` and removed when the card reaches `Done`. A file that cannot be downloaded within about a minute is reported as an error each time, so attach very large files elsewhere and link them. Files larger than `attachment_max_bytes` (default 25 MiB, in `<git dir>/kankan/config.json`) and attachments added by non-members are listed but not downloaded.
 
 ## 7. Talking to the agents
 
@@ -235,8 +237,8 @@ kankan resolve <shortLink> --done   # checks the merge, removes the worktree, se
 kankan status             # seats (alive, free, dead, unavailable), launcher state, current task, waiting cards
 kankan claims             # card refs: phase, holder, age, branch
 kankan doctor             # installation and project checks, fixes and manual steps (§15.5); --no-fix, --offline
-kankan reconcile          # report inconsistencies (§15.3)
-kankan reconcile --fix    # repair only the certain cases
+kankan reconcile          # report inconsistencies, including attachment directories of cards no longer in progress (§15.3)
+kankan reconcile --fix    # repair only the certain cases; also removes those attachment directories
 kankan adapter check claude-1         # how kankan reads that agent's screen
 kankan adapter check saved-screen.txt --type codex
 ```
