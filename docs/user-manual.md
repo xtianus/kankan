@@ -6,21 +6,112 @@ The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); links ma
 
 ## 1. Requirements
 
-- Linux, Python ≥ 3.10, Git ≥ 2.38, tmux ≥ 3.2; Claude Code and/or Codex CLI installed and logged in.
+- Linux, Python ≥ 3.10, Git ≥ 2.38, tmux ≥ 3.2 and pipx; Claude Code and/or Codex CLI installed and logged in. Install both agent CLIs for the workflow where an agent of the other type reviews each implementation.
 - A Trello account, an API key and a token (see [section 3](#3-binding-a-project-to-a-board)).
-- tmux sessions survive SSH disconnection with `KillUserProcesses=no` in logind (the Ubuntu default). For agents started at boot, lingering must be enabled: `loginctl enable-linger`.
+- On systems using systemd, `KillUserProcesses=no` in logind lets tmux sessions survive logout. Enable lingering if agents must start at boot before you log in (see [section 1.3](#13-session-and-boot-configuration)).
+
+### 1.1 Install the required software
+
+On **Ubuntu 24.04 LTS**, install the system packages below. `python3-venv` supports pipx's isolated environments; `curl` and CA certificates are used to download the agent CLIs. Other Linux distributions need equivalent packages meeting the minimum versions above; older Ubuntu releases may ship an older Git.
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv git tmux pipx curl ca-certificates
+pipx ensurepath
+```
+
+Log out and back in so the login environment picks up the PATH change ([pipx installation guide](https://pipx.pypa.io/latest/how-to/install-pipx.html)). Install the agent CLIs as your normal user, using their official installers ([Claude Code setup](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli)):
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```
+
+Open a new terminal, then check the installed system tools:
+
+```bash
+python3 --version
+git --version
+tmux -V
+pipx --version
+```
+
+Compare the output with the minimum versions in section 1. If a tool is too old, upgrade it using your distribution's packages or upgrade the distribution before continuing. Check the agent CLIs and sign in, following their browser prompts:
+
+```bash
+claude --version
+codex --version
+claude auth login
+codex login
+```
+
+To check authentication later, run `claude auth status` and `codex login status`. Run the corresponding login command again to sign in or change accounts.
+
+### 1.2 Check and configure the login PATH
+
+For the default per-user installers, `~/.local/bin` must be on your login PATH. After installing kankan in section 2, check it from a login shell:
+
+```bash
+bash -lc 'command -v kankan; command -v claude; command -v codex'
+```
+
+Each installed command should print a path. If one is missing, run `pipx ensurepath` again. For a Bash login shell, you can also add the following line to `~/.profile` (or `~/.bash_profile` if that is the startup file you use):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Log out and back in, then repeat the check. Restart any running Codex background service after changing the login PATH so it inherits the updated environment. A PATH change only in the current terminal or in `~/.bashrc` may not reach that service.
+
+### 1.3 Session and boot configuration
+
+On systemd systems, check the **running** logind setting and your user's lingering status:
+
+```bash
+busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses
+loginctl show-user "$USER" -p Linger
+```
+
+The first command should print `b false`, meaning `KillUserProcesses=no`. If it prints `b true`, create a logind configuration override:
+
+```bash
+sudo mkdir -p /etc/systemd/logind.conf.d
+printf '[Login]\nKillUserProcesses=no\n' | sudo tee /etc/systemd/logind.conf.d/99-kankan.conf
+```
+
+Reboot at a convenient time to apply the setting, then repeat the `busctl` check. To inspect the main configuration and overrides together, run `systemd-analyze cat-config systemd/logind.conf` ([logind configuration reference](https://www.freedesktop.org/software/systemd/man/latest/logind.conf.html)).
+
+`Linger=yes` is needed only for starting agents at boot before login. Enable it for your user and check the result:
+
+```bash
+sudo loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger
+```
+
+To turn lingering off, run `sudo loginctl disable-linger "$USER"` ([loginctl reference](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)). Lingering keeps the user service manager available; after binding your project, use `kankan autostart enable` to configure the agents to start ([section 4](#4-starting-agents)).
 
 ## 2. Installation
 
+First clone the kankan repository. You can put the clone in any writable folder; no specific location or folder name is required. For example, to use `~/tools/kankan`:
+
 ```bash
-pipx install /path/to/kankan          # puts kankan in ~/.local/bin; then `pipx ensurepath` if needed
+mkdir -p ~/tools
+git clone https://github.com/xtianus/kankan.git ~/tools/kankan
+```
+
+Install from that clone, then install the shared agent skill and check the setup:
+
+```bash
+pipx install ~/tools/kankan            # puts kankan in ~/.local/bin; then `pipx ensurepath` if needed
 kankan skill install                   # links the shared skill into ~/.claude/skills and ~/.codex/skills
 kankan doctor                          # checks git, tmux, the agents and their login, the skill, PATH; fixes what it can
 ```
 
-`pipx install` builds a **copy** of kankan: later changes to `/path/to/kankan` have no effect until you reinstall it (`pipx install --force /path/to/kankan`). Restart the agents after reinstalling: an agent's kankan commands refuse to run when kankan changed since its launcher started. Editable installs (`pip install -e`) are only for developing kankan itself.
+Replace `~/tools/kankan` with your chosen clone path if different. This is the source of the kankan tool, separate from the project repository you want the agents to work on. That project can also live anywhere; run `kankan init` inside its clone (for example `~/coding/myproject`, as in [section 3.2](#32-kankan-init)).
 
-kankan uses only the Python standard library. `kankan` must be on your **login** `PATH` (for example `~/.local/bin`): Codex runs its shell commands through a background service that sees only that `PATH`, not the environment kankan gives the agent. `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning. Agents always run the same kankan as their launcher, through a small wrapper in `<git dir>/kankan/bin`.
+`pipx install` builds a **copy** of kankan: later changes to `~/tools/kankan` have no effect until you reinstall it (`pipx install --force ~/tools/kankan`). Restart the agents after reinstalling: an agent's kankan commands refuse to run when kankan changed since its launcher started.
+
+`kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning.
 
 ## 3. Binding a project to a board
 
@@ -41,11 +132,11 @@ Trello never notifies you about your own actions. If kankan uses **your** token,
    - This token also has the `account` scope (it could change the bot's own profile), which kankan does not need; for a dedicated bot account that is harmless. For the minimal scope, open instead the URL that `kankan init` prints when it asks for the token (`scope=read,write`).
 5. Keep the key and the token at hand: `kankan init` asks for them ([section 3.2](#32-kankan-init)), or put them in a `.properties` file and pass it with `--credentials`. 
 
-If a clone already uses your own token, switch it to the bot with `kankan init --reauth`. kankan treats every comment of its token's owner as its own: with your own token your answers would be ignored, so `kankan init` and `kankan doctor` complain when the token's owner is an admin of the board.
-
 Trello does not let you reset an API key, so keep the key and the token private; the token stays valid until it is revoked from the bot's account settings.
 
-Who gets notified: kankan mentions the person who created the card; for cards kankan created itself, the board's admins. Who can answer: any member of the board except kankan's own account; comments by people outside the board are ignored.
+To change the token use `kankan init --reauth`.
+
+Who gets notified: kankan mentions the person who created the card; for cards kankan created itself, the board's admins. Who can answer: any member of the board except kankan's own account; comments and attachments by people outside the board are ignored.
 
 ### 3.2 `kankan init`
 
@@ -55,7 +146,7 @@ Run once in the project clone (for example `~/coding/myproject`):
 kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.properties>]
 ```
 
-`init` ([spec §6.1](../aispecs/kankan_spec.md#61-kankan-init-board-url)):
+`init`:
 
 - checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
@@ -90,7 +181,7 @@ The agents integrate into `kankan-agents`; only kankan moves it, so never check 
 - **Give the agents your work:** `kankan merge-request my-feature` (default: your `main`) creates a card at the top of `Backlog`, "Merge branch my-feature into kankan-agents", naming the exact commit to merge. An agent merges it and resolves conflicts, an agent of the other type reviews and integrates it. If you work in another clone, push `my-feature` first and use `--remote`. `--bottom` queues it after the other cards.
 - **See how far apart they are:** `kankan status` prints `kankan-agents is N commits ahead / M behind main`; `kankan doctor` warns when an integration has waited more than 7 days for you to merge it.
 
-For the old behaviour (agents integrate straight into `main`) answer `main` at `kankan init`; then keep `main` **not** checked out while they work, because kankan advances it directly ([spec §12.5](../aispecs/kankan_spec.md#125-integration-branch-and-user-branches)).
+For the old behaviour (agents integrate straight into `main`) answer `main` at `kankan init`; then keep `main` **not** checked out while they work, because kankan advances it directly.
 
 ## 5. The golden rule
 
@@ -102,7 +193,7 @@ You may freely:
 - add and remove `HOLD`, add dependency attachments, write comments;
 - unblock a card in `Blocked` with `kankan resolve <shortLink> --done`, or move it to `Backlog` to have it reimplemented.
 
-If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it ([spec §14.6](../aispecs/kankan_spec.md#146-cards-moved-by-the-user-safety-net)). This is best effort ([spec §14.5](../aispecs/kankan_spec.md#145-precedence-of-human-changes)).
+If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it. This is best effort.
 
 ## 6. The workflow
 
@@ -181,7 +272,7 @@ See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the ins
 
 - The agents run in full-access mode: no permission prompts and no sandbox, with all the rights of the user running kankan. Use a dedicated user or machine (a VM or a container) if that is too much for your environment.
 
-- Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`) ([spec §7.5](../aispecs/kankan_spec.md#75-liveness-and-automatic-recovery)).
-- Human changes to a card's list are honoured on a best-effort basis ([spec §14.5](../aispecs/kankan_spec.md#145-precedence-of-human-changes)); `reconcile` reports leftovers.
-- If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances ([spec §12.5](../aispecs/kankan_spec.md#125-integration-branch-and-user-branches)).
-- Exclusion between two clones bound to the same board relies on the registry check; it is not absolute ([spec §6.3](../aispecs/kankan_spec.md#63-boardregistry-binding)).
+- Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`).
+- Human changes to a card's list are honoured on a best-effort basis; `reconcile` reports leftovers.
+- If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances.
+- Exclusion between two clones bound to the same board relies on the registry check; it is not absolute.
