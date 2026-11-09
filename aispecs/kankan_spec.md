@@ -2,7 +2,7 @@
 
 **Status:** specification v1.2
 **Date:** 2026-11-09
-**Related documents:** `kanban_requirements.md` (requirements for backends other than Trello)
+**Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (requirements for backends other than Trello)
 **Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual.
 
 ## 1. Purpose
@@ -17,7 +17,7 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 
 - All agents run **on the same Linux server**, in the same process namespace.
 - A **project** is a Git clone in `~/coding/<project>` bound to **one** Trello board. All agents of a project work on worktrees of the same clone and therefore share the same Git ref store. Several projects can coexist on the same server, each with its own state.
-- The agents integrate into a dedicated **integration branch**, `kankan-agents` by default (`integration_branch` in the configuration); only kankan moves it and nobody checks it out. Every other branch belongs to the user, except the card branches `??kankan-<shortLink>` (12.5). **In this specification `main` denotes the integration branch**; the user's own main branch is called the *user branch* (`user_branch`, default `main`). Configurations written before v1.2 with `main_branch` keep integrating into that branch.
+- The agents integrate into a dedicated **integration branch**, `kankan-agents` by default (`integration_branch` in the configuration); only kankan moves it and nobody checks it out. Every other branch belongs to the user, except the card branches `??kankan-<shortLink>` ([12.5](#125-integration-branch-and-user-branches)). **In this specification `main` denotes the integration branch**; the user's own main branch is called the *user branch* (`user_branch`, default `main`). Configurations written before v1.2 with `main_branch` keep integrating into that branch.
 - Agents run in **interactive** mode inside **tmux** sessions, so the user can attach and watch them, and the external tool `airesumer.sh` can resume them after a usage limit.
 - tmux sessions survive SSH disconnection. Requirements: `KillUserProcesses=no` in logind (Ubuntu default) and, for automatic start, lingering enabled (`loginctl enable-linger`).
 - Trello is reachable via REST with a user API key and token. Trello does **not** offer conditional updates.
@@ -27,8 +27,8 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 ## 3. Principles
 
 1. **Git decides ownership.** A card belongs to whoever its ref names; every change of ownership is a conditional ref operation.
-2. **Trello expresses human intent.** The user communicates through labels and comments. Their changes to the list of an in-progress card are honoured on a *best effort* basis (14.5).
-3. **Git first, then Trello.** Every transition first records the new phase in the card's ref, then moves the card. An intermediate state is never eligible for other agents and is completed by convergence (10.4).
+2. **Trello expresses human intent.** The user communicates through labels and comments. Their changes to the list of an in-progress card are honoured on a *best effort* basis ([14.5](#145-precedence-of-human-changes)).
+3. **Git first, then Trello.** Every transition first records the new phase in the card's ref, then moves the card. An intermediate state is never eligible for other agents and is completed by convergence ([10.4](#104-convergence)).
 4. **Conditional atomic operations.** Creations, releases, phase changes and advancing `main` use compare-and-swap; when several refs are involved, a single Git transaction.
 5. **Short, serialized critical sections.** Changes to a project's workflow happen under a project lock held for a few seconds.
 6. **Stable identifiers.** Cards, lists and labels are recognized by ID, never by name or position.
@@ -41,7 +41,7 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 
 | Term | Meaning |
 |---|---|
-| **Type** | Agent type: `claude` or `codex`. Determines the adapter (8.7) and the cross-review rule. |
+| **Type** | Agent type: `claude` or `codex`. Determines the adapter ([8.7](#87-adapters)) and the cross-review rule. |
 | **Seat** | Stable identity `<type>-<n>` (e.g. `claude-1`) with three Trello lists and a worktree. |
 | **Session** | One run of a launcher on a seat, identified by a random token. |
 | **Card ref** | `refs/agent-cards/<card-id>`: records a card's phase and holder from the first claim until `Done`. |
@@ -60,7 +60,7 @@ kankan is meant to become an open source project: it contains no hard-wired refe
 - **Lists of each seat:** `<seat> · In Progress`, `<seat> · Implemented`, `<seat> · Review`.
 - **Fixed labels:** `HOLD` (set by the user), `Question`, `Error` (set by kankan).
 - **Dynamic labels:** `Resume YYYY-MM-DD hh:mm`, created and deleted by kankan.
-- **Board description:** contains a delimited block `--- kankan-registry ---` with `registry-id`, hostname and clone path (6.3). The rest of the description is free.
+- **Board description:** contains a delimited block `--- kankan-registry ---` with `registry-id`, hostname and clone path ([6.3](#63-boardregistry-binding)). The rest of the description is free.
 
 kankan recognizes lists and labels **only by ID**. The user may create other lists and labels and rename or reorder the workflow ones; kankan ignores what it does not know. An archived or deleted workflow list produces `config_error`.
 
@@ -80,7 +80,7 @@ kankan recognizes lists and labels **only by ID**. The user may create other lis
 | Seat worktrees | `~/coding/.kankan/<project>/<seat>` (configurable root) |
 | Worktrees of blocked cards | `~/coding/.kankan/<project>/blocked-<shortLink>` |
 | Adapters (user override) | `~/.config/kankan/agents.json` |
-| Credentials | 6.2 |
+| Credentials | [6.2](#62-credentials) |
 
 `<gcd>` is `git rev-parse --git-common-dir`: shared by all worktrees, never committed. The `refs/agent-*` refs are not under `refs/heads` or `refs/tags`, so ordinary push and fetch do not transfer them. Lock files are never deleted or replaced. JSON state files are written to a temporary file and renamed atomically.
 
@@ -93,7 +93,7 @@ kankan is a Python 3 package that uses **only the standard library** (pytest for
 | Module | Responsibility |
 |---|---|
 | `config` | Project configuration, credentials, `.properties` files, project lock. |
-| `trello` | REST client: retries, read-after-write, error classification, rate limits. Isolates Trello from the rest (see `kanban_requirements.md`). |
+| `trello` | REST client: retries, read-after-write, error classification, rate limits. Isolates Trello from the rest (see [`kanban_requirements.md`](kanban_requirements.md)). |
 | `refstore` | The only module that reads and writes kankan refs: conditional operations and multi-ref transactions. |
 | `seats` | Seats: creation, occupation, flock, liveness, recovery, removal, process data. |
 | `cards` | Card ref phases and transitions, convergence. |
@@ -103,24 +103,24 @@ kankan is a Python 3 package that uses **only the standard library** (pytest for
 | `launcher` | Supervisor, launcher and its state machine, tmux, pane writes, comment forwarding. |
 | `cli` | Commands, text and JSON output, exit codes. |
 
-The **shared skill** (`SKILL.md`, for Claude Code and Codex) explains to the agent how to carry out an assigned task. The work cycle belongs to the launcher.
+The **shared skill** ([`SKILL.md`](../kankan/skill/SKILL.md), for Claude Code and Codex) explains to the agent how to carry out an assigned task. The work cycle belongs to the launcher.
 
 ## 6. Setup
 
 ### 6.1 `kankan init <board-url>`
 
 Run once in the project clone (e.g. URL `https://trello.com/b/s5C4vWbG/test1`; kankan extracts the shortLink and derives the board ID). Under the project lock:
-1. checks or acquires the credentials (6.2);
-2. writes the `kankan-registry` block into the board description, waits a few seconds and reads it back (6.3);
+1. checks or acquires the credentials ([6.2](#62-credentials));
+2. writes the `kankan-registry` block into the board description, waits a few seconds and reads it back ([6.3](#63-boardregistry-binding));
 3. finds or creates the lists `Backlog`, `Done`, `Blocked`; if lists with those names exist, asks whether to adopt them;
 4. creates the labels `HOLD`, `Question`, `Error`;
 5. determines the Trello user to notify (`GET /1/members/me`), overridable with `--notify <user>`; warns when it is the token's owner, who receives no notification for kankan's comments (a separate Trello account for kankan is recommended);
-6. asks for the project's `test_command` (may be left empty; see 12.2);
+6. asks for the project's `test_command` (may be left empty; see [12.2](#122-steps));
 7. asks for the integration branch (default `kankan-agents`) and records the user branch (`main` if it exists, otherwise the checked-out branch); if the integration branch does not exist locally it adopts `origin/<name>` when present, otherwise creates it from the user branch, never resetting or force-pushing; changing the integration branch of a configured clone is refused while a seat is alive or a card ref exists;
 8. writes `config.json` and `git config kankan.integrationBranch`;
 9. installs a `pre-push` hook that refuses pushing `refs/agent-*` and pushing to the integration branch except from `integrate` (`KANKAN_PUSH=1`); if a foreign hook already exists, reports it without overwriting it;
 10. adds the necessary exclusions to `<gcd>/info/exclude`;
-11. warns if the integration branch is checked out in any worktree (12.5).
+11. warns if the integration branch is checked out in any worktree ([12.5](#125-integration-branch-and-user-branches)).
 
 `init` is idempotent. `init --reauth` repeats only the credential acquisition.
 
@@ -151,7 +151,7 @@ Exclusion is not absolute without an external authority; these checks cover the 
 ### 7.1 Creation and removal
 
 Seats are created only by `kankan agent` / `kankan up`, under the project lock:
-- without `--seat`: a free seat of the type is used (7.2); if none is free, the next `<type>-<n+1>` is created;
+- without `--seat`: a free seat of the type is used ([7.2](#72-seat-choice)); if none is free, the next `<type>-<n+1>` is created;
 - with `--seat <type>-<n>`: that seat is used, created if it does not exist.
 
 Creating a seat means: finding or creating by name its three lists, registering them in `config.json`, creating the worktree. The operations are repeatable, so an interrupted creation completes on the next attempt. A configurable **per-type cap** (default 4) prevents creation beyond the limit with a clear error. Because dead seats are reused, the number of seats equals the maximum number of agents of that type run at the same time.
@@ -169,7 +169,7 @@ Among the free seats of the type, kankan prefers those holding cards (ref in pha
 The launcher, under the project lock:
 1. tries the seat's exclusive **non-blocking** `flock`; if it fails, the seat is alive and it moves on to the next one;
 2. if the seat's ref does not exist, creates it;
-3. if it exists (flock free: holder dead or dying), applies recovery (7.5).
+3. if it exists (flock free: holder dead or dying), applies recovery ([7.5](#75-liveness-and-automatic-recovery)).
 
 Release: conditional deletion of the ref, then release of the flock. The flock descriptor is opened as non-inheritable, so no child process keeps it.
 
@@ -189,7 +189,7 @@ A seat with a free flock is recovered as follows:
 
 The remaining processes are orphans of a dead agent and could still write to the worktree: terminating them is necessary before reusing it. Documented limit: daemons that deliberately detach from the session (e.g. the Gradle daemon) escape this control; they normally do not write to the sources.
 
-Cards belong to the seat, so the new session inherits the work. A seat that is alive but stuck is never recovered automatically: it requires `kankan seat recover <seat> [--kill]` (15.4). An agent stopped by a usage limit is alive.
+Cards belong to the seat, so the new session inherits the work. A seat that is alive but stuck is never recovered automatically: it requires `kankan seat recover <seat> [--kill]` ([15.4](#154-administration-commands)). An agent stopped by a usage limit is alive.
 
 ## 8. Processes and launcher
 
@@ -215,11 +215,11 @@ Starts the launcher as a child. If the launcher terminates abnormally, it writes
 ### 8.3 Launcher startup
 
 1. Checks configuration and the board↔registry binding; warns if `main` is checked out in any worktree.
-2. Occupies the seat (7.3) and creates the worktree if missing.
+2. Occupies the seat ([7.3](#73-occupation)) and creates the worktree if missing.
 3. Renames the tmux session to `ai-<project>-<seat>`: the `ai-` prefix and the agent among the pane's descendants make the session visible to `airesumer.sh`.
 4. Starts the agent (the adapter's command) as a child, in the worktree, with `KANKAN_SEAT`, `KANKAN_SESSION`, `KANKAN_PROJECT` in the environment. In the child, before starting the agent: sets `PDEATHSIG` and checks that the parent is still the launcher, otherwise exits immediately.
 5. The agent stays in the launcher's session and process group and keeps control of the pane's terminal. The launcher ignores `Ctrl-C` and `Ctrl-Z` and never reads the keyboard.
-6. Handles the trust window (8.6) and waits for the agent to be ready.
+6. Handles the trust window ([8.6](#86-pane-observation-and-writes)) and waits for the agent to be ready.
 
 When the agent exits, the launcher terminates the remaining processes in the pane session, releases the seat and exits normally. The cards stay with the seat.
 
@@ -240,10 +240,10 @@ In `idle`, with no work, the launcher does not involve the agent and spends no t
 
 ### 8.5 Cycle and signals
 
-1. **Convergence** (10.4) and check of the board↔registry binding.
-2. **Task choice** (chapter 9) and preparation before involving the agent: ref transition, verified move, branch and worktree (chapter 11).
+1. **Convergence** ([10.4](#104-convergence)) and check of the board↔registry binding.
+2. **Task choice** ([chapter 9](#9-task-choice)) and preparation before involving the agent: ref transition, verified move, branch and worktree ([chapter 11](#11-branches-and-worktrees)).
 3. **Assignment:** the launcher generates a task ID, saves it in the seat state, sends the adapter's new-conversation command (default `/new` for both types) and a one-line prompt, for example `Run the current kankan task (kankan skill).` The agent reads the details with `kankan task --json`.
-4. **Execution:** the agent closes the task with a signal (13.2). Agent commands act only on the current task, and the signal written into the seat state carries the task ID; a signal with a different ID is ignored.
+4. **Execution:** the agent closes the task with a signal ([13.2](#132-signals)). Agent commands act only on the current task, and the signal written into the seat state carries the task ID; a signal with a different ID is ignored.
 5. **Closing:** convergence, waiting for the pane to be idle, back to step 1.
 
 `kankan stop <seat>` records a stop request: the launcher exits after the current task (even if the request arrives in `limited`).
@@ -349,7 +349,7 @@ Phase-specific fields: in `integrated` the merge hash and the tested hash; in `p
 | `yield` during implementation | `impl` → `parked` | none | `Backlog` (at the top) |
 | `yield` during review | `review` → `implemented` | none | implementer's `Implemented` |
 | `block` | `impl`/`review` → `parked` | none | `Blocked` |
-| User move (14.6) | `impl`/`review` → `parked` | none | list where the user put the card |
+| User move ([14.6](#146-cards-moved-by-the-user-safety-net)) | `impl`/`review` → `parked` | none | list where the user put the card |
 | `resolve --done` | `parked` → `implemented` | none | implementer's `Implemented` |
 
 Every transition happens under the project lock: reread of the card, Git transaction (first), Trello move and verification reread (after), comment with an anti-duplicate marker. If the move fails or the reread is ambiguous, the ref stays in the new phase and convergence will complete the move; if the anomaly persists the card gets `Error`.
@@ -386,7 +386,7 @@ The reviewing agent integrates, before `Done`, without human approval. The revie
 2. **Tests** on the tip of the branch, whose hash the agent notes.
 3. **`kankan verify --tested <hash>`** (required if `test_command` is configured): runs `test_command` in the worktree at that hash, with a configurable timeout, and records the outcome in the seat state. It is separate from `integrate` because it may last longer than the agents' shell command timeout; the agent runs it like any long test command.
 4. **`kankan integrate --tested <hash>`**, under the project lock:
-   - rechecks `HOLD` (9.4) → `on_hold`;
+   - rechecks `HOLD` ([9.4](#94-hold)) → `on_hold`;
    - if the card's ref is already `integrated`, returns the recorded merge and exits (idempotency);
    - checks that the branch tip is exactly `<hash>`, that the worktree is clean and, if `test_command` is configured, that a successful verification exists for `<hash>` → otherwise `needs_action`;
    - reads `M` = `main`; if `M` is not an ancestor of `<hash>` → `main_moved`;
@@ -429,7 +429,7 @@ The `pre-push` hook enforces the single writer only for pushes from the kankan c
 
 ### 13.1 Skill
 
-The `SKILL.md` skill instructs the agent to:
+The [`SKILL.md`](../kankan/skill/SKILL.md) skill instructs the agent to:
 1. read the task with `kankan task --json`;
 2. implementation: work on the prepared branch, commit, run the tests, close with `done`;
 3. review: read the differences from `main`, fix with separate commits, then `sync`, tests, `verify`, `integrate` (repeating on `main_moved`), finally `done`;
@@ -443,11 +443,11 @@ The `SKILL.md` skill instructs the agent to:
 
 | Command | Effect | Launcher |
 |---|---|---|
-| `done` | Transition of 10.3 (implementation → `implemented`; review → closing) | next task |
+| `done` | Transition of [10.3](#103-phases-and-transitions) (implementation → `implemented`; review → closing) | next task |
 | `ask "<question>"` | `Question` + comment with question and mention | `waiting_human` |
 | `fail "<reason>"` | `Error` + comment with reason and mention | `waiting_human` |
-| `block "<reason>"` | 12.4 | next task |
-| `yield` | Transition of 10.3 back to the origin | next task |
+| `block "<reason>"` | [12.4](#124-unresolvable-conflicts-and-block) | next task |
+| `yield` | Transition of [10.3](#103-phases-and-transitions) back to the origin | next task |
 
 `done` verifies the Git side: clean worktree; for implementation at least one commit beyond `main`; for review a ref in phase `integrated`. If the verification fails it answers `needs_action` and the agent fixes it.
 
@@ -457,7 +457,7 @@ The `SKILL.md` skill instructs the agent to:
 
 | Label | Set by | Meaning |
 |---|---|---|
-| `HOLD` | user | Do not assign; if in progress, suspend (9.4). |
+| `HOLD` | user | Do not assign; if in progress, suspend ([9.4](#94-hold)). |
 | `Question` | kankan (`ask`) | The agent is waiting for an answer. |
 | `Error` | kankan (`fail`, protocol, inactivity, unknown screen) | Intervention needed. |
 | `Resume YYYY-MM-DD hh:mm` | launcher | Agent stopped by a usage limit until that date and time. |
@@ -472,7 +472,7 @@ Every `Question`, `Error` and `Blocked` comes with a comment mentioning the conf
 
 ### 14.3 Answers through comments
 
-In `waiting_human`, the launcher reads the new comments of the configured members posted after the question and forwards them to the agent in the pane (8.6). The cursor of the last forwarded comment is saved **before** forwarding: a comment is never forwarded twice, but a crash can lose one. After forwarding the launcher removes the label and replies "forwarded to the agent"; if this confirmation is missing, the user repeats the comment. Alternatively the user answers by attaching to the tmux session.
+In `waiting_human`, the launcher reads the new comments of the configured members posted after the question and forwards them to the agent in the pane ([8.6](#86-pane-observation-and-writes)). The cursor of the last forwarded comment is saved **before** forwarding: a comment is never forwarded twice, but a crash can lose one. After forwarding the launcher removes the label and replies "forwarded to the agent"; if this confirmation is missing, the user repeats the comment. Alternatively the user answers by attaching to the tmux session.
 
 ### 14.4 What the user does
 
@@ -495,7 +495,7 @@ If the user moves out of the seat's lists, archives or deletes a card in progres
 
 - **Trello reads:** retry with increasing delay on network errors, 5xx and 429; short network timeouts, because calls happen under the project lock.
 - **Trello writes:** after a timeout, read back before retrying; comments contain a marker with the operation ID.
-- **Intermediate Git/Trello state:** resolved by convergence (10.4).
+- **Intermediate Git/Trello state:** resolved by convergence ([10.4](#104-convergence)).
 - **Unexpected Git errors:** fail closed, `Error`, comment.
 
 ### 15.2 Situations and behaviour
@@ -514,7 +514,7 @@ If the user moves out of the seat's lists, archives or deletes a card in progres
 | Agent alive but stuck | No automatic recovery; `Error` for inactivity; manual recovery. |
 | Usage limit | `limited`, `Resume`; resumed by `airesumer.sh`. |
 | `main_moved` beyond the limit | `Error`. |
-| Unresolvable conflict | `block` (12.4). |
+| Unresolvable conflict | `block` ([12.4](#124-unresolvable-conflicts-and-block)). |
 | Different `registry-id` | Commands `config_error`; the launcher stops. |
 | Workflow list archived or deleted | `config_error`, startup refused. |
 | Ref pointing to an unexpected object or malformed blob | `needs_reconciliation`, no automatic action. |
@@ -555,20 +555,20 @@ Checks the machine and, inside a clone, the project; fixes what is safe and prin
 
 | Command | Description |
 |---|---|
-| `kankan init <url> [--credentials <file>] [--notify <user>] [--takeover] [--reauth]` | Project setup (6.1). |
+| `kankan init <url> [--credentials <file>] [--notify <user>] [--takeover] [--reauth]` | Project setup ([6.1](#61-kankan-init-board-url)). |
 | `kankan agent <type> [--seat <s>] [--attach]` | Starts an agent in tmux. |
 | `kankan up <type>=<n> …` | Ensures the requested number of agents, starting the missing ones. |
 | `kankan autostart enable <type>=<n> …` / `autostart disable` | Automatic start at boot via systemd user service. |
 | `kankan stop <seat>` | Exits after the current task. |
 | `kankan status` | Seats (alive, dead, free, unavailable), launcher state, current task, waiting cards and reason. |
 | `kankan claims` | Card refs with phase, holder, age and branch. |
-| `kankan resolve <shortLink> [--done]` | Manual resolution of a blocked card (12.4). |
-| `kankan reconcile [--fix]` | 15.3. |
-| `kankan doctor [--no-fix] [--offline]` | Checks the installation and the project, fixes what is safe, lists manual steps (15.5). |
-| `kankan merge-request [<branch>] [--remote] [--bottom]` | Asks the agents to merge a snapshot of a user branch into the integration branch (12.5). |
-| `kankan adapter check <seat>\|<file>` | Screen classification (8.7). |
-| `kankan seat remove <seat>` | 7.1. |
-| `kankan release <card> --force`, `kankan seat recover <s> [--kill]`, `kankan purge-remote` | 15.4. |
+| `kankan resolve <shortLink> [--done]` | Manual resolution of a blocked card ([12.4](#124-unresolvable-conflicts-and-block)). |
+| `kankan reconcile [--fix]` | [15.3](#153-kankan-reconcile---fix). |
+| `kankan doctor [--no-fix] [--offline]` | Checks the installation and the project, fixes what is safe, lists manual steps ([15.5](#155-kankan-doctor---no-fix---offline)). |
+| `kankan merge-request [<branch>] [--remote] [--bottom]` | Asks the agents to merge a snapshot of a user branch into the integration branch ([12.5](#125-integration-branch-and-user-branches)). |
+| `kankan adapter check <seat>\|<file>` | Screen classification ([8.7](#87-adapters)). |
+| `kankan seat remove <seat>` | [7.1](#71-creation-and-removal). |
+| `kankan release <card> --force`, `kankan seat recover <s> [--kill]`, `kankan purge-remote` | [15.4](#154-administration-commands). |
 
 ### 16.2 Agent commands
 
@@ -601,7 +601,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 ## 17. Security
 
-- Credentials only in the sources of 6.2, never in configuration, logs, comments, blobs or output.
+- Credentials only in the sources of [6.2](#62-credentials), never in configuration, logs, comments, blobs or output.
 - Write access to the clone limited to the user running the agents; whoever can write the refs can bypass the protocol.
 - Blobs contain hostname, user and paths: the refs must not be published (`pre-push` hook, `purge-remote`).
 - The seat file `kankan-agent.json` (seat and session) lives in the worktree's Git directory, writable only by the user; a process left over in the seat worktree could use the current session, so seat recovery kills the recorded processes before the worktree is reused.
@@ -653,7 +653,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 16. Order: own work, then review, then `Backlog` by position.
 17. Review only by a type different from the implementer recorded in the ref, even if the card is moved by hand into another `Implemented`.
-18. `HOLD` matrix of 9.4, including `on_hold` from `integrate` and `HOLD` after integration.
+18. `HOLD` matrix of [9.4](#94-hold), including `on_hold` from `integrate` and `HOLD` after integration.
 19. Dependencies through attachments: waiting until `Done`; missing attachment, attachment from another board or cycle reported.
 20. Foreign lists ignored; renamed workflow lists working; archived workflow list → `config_error`.
 21. Branch `YYkankan-<shortLink>`: reuse after `HOLD` and after a change of year; two branches for the same card → `Error`.
@@ -696,7 +696,7 @@ All phases are designed in this specification; the order makes each step verifia
 | Phase | Content | Tests |
 |---|---|---|
 | 1. Foundations | `config`, `.properties`, project lock; `init` with board↔registry binding, lists, labels, hook; Trello client and fake server; `refstore` with transactions; seats (creation, occupation, flock, recovery, process data); card refs with phases and convergence; claim from the `Backlog`; branches; `task` and `done` for implementation; JSON and exit codes | 1–7, 11–13, 20–22, 27, 37–39 |
-| 2. Processes and launcher | `agent`, `up`, `autostart`, supervisor, launcher and state machine, adapters and `adapter check`, pane observation and writes, trust window, `Resume`, `SKILL.md`, fake agent | 8–10, 14, 15, 31–36, 40 |
+| 2. Processes and launcher | `agent`, `up`, `autostart`, supervisor, launcher and state machine, adapters and `adapter check`, pane observation and writes, trust window, `Resume`, [`SKILL.md`](../kankan/skill/SKILL.md), fake agent | 8–10, 14, 15, 31–36, 40 |
 | 3. Review and integration | review claim, `sync`, `verify`, `integrate` with transaction and receipt, `block` with dedicated worktree, `resolve` | 16, 17, 23–26 |
 | 4. Communication and policies | `HOLD` and `yield`, `ask`/`fail` with comment forwarding, dependencies, cards moved by the user | 18, 19, 28–30 |
 | 5. Diagnostics and documentation | `status`, `claims`, `reconcile [--fix]`, `release --force`, `seat recover`, `seat remove`, `purge-remote`, user manual | cross-cutting |
@@ -707,8 +707,8 @@ All phases are designed in this specification; the order makes each step verifia
 - Several repositories per project or several boards per repository.
 - Human approval before integration.
 - A web interface of its own: the UI is Trello.
-- Absolute guarantee of precedence of human changes to a card's list (14.5).
-- Backends other than Trello: the architecture makes them possible (`kanban_requirements.md`), but the first version supports only Trello.
+- Absolute guarantee of precedence of human changes to a card's list ([14.5](#145-precedence-of-human-changes)).
+- Backends other than Trello: the architecture makes them possible ([`kanban_requirements.md`](kanban_requirements.md)), but the first version supports only Trello.
 
 ## 21. To be verified during planning
 

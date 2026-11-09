@@ -1,6 +1,6 @@
 # Adapter notes
 
-An *adapter* tells kankan how to drive one type of coding agent (`claude`, `codex`) running in a tmux pane: the command that starts it, the regex patterns that classify its screen (ready, working, usage limit, trust window, known dialogs), and the keys and commands kankan sends (trust answer, new conversation, submit key, whether input may be queued while the agent works). See `kankan/adapters.py` and [the user manual](user-manual.md), section 11.
+An *adapter* tells kankan how to drive one type of coding agent (`claude`, `codex`) running in a tmux pane: the command that starts it, the regex patterns that classify its screen (ready, working, usage limit, trust window, known dialogs), and the keys and commands kankan sends (trust answer, new conversation, submit key, whether input may be queued while the agent works). See `kankan/adapters.py` and the user manual, [section 11](user-manual.md#11-adapters).
 
 The observations below are the evidence behind the default adapters: the patterns, answers and flags in `kankan/adapters_default.json` were set from them, and the captured screens became the test fixtures that check the screen classification. The *Not verified* section lists what was not observed on a real agent and should be checked when it first happens.
 
@@ -17,7 +17,7 @@ Observations made on 2026-11-08 on the development server with Claude Code 2.1.3
 ## Codex 0.167.0
 
 - **Trust window:** "Folder access … Trust this folder? … › 1. Trust and continue". Digits do not select; the first option is preselected. Answer: `Enter`.
-- **Ready:** `› Ask Codex to do anything` with the footer `? for shortcuts`. The same footer stays visible while Codex works, so *working* must take precedence over *ready* (it does, §8.6).
+- **Ready:** `› Ask Codex to do anything` with the footer `? for shortcuts`. The same footer stays visible while Codex works, so *working* must take precedence over *ready* (it does, [spec §8.6](../aispecs/kankan_spec.md#86-pane-observation-and-writes)).
 - **Working:** `• Working (3s • esc to interrupt)`.
 - **New conversation:** `/new` opens the dialog "Where should the new conversation run? › 1. Use current Git worktree / 2. Create new Git worktree"; it is a known dialog answered with `Enter` (keeps the seat worktree).
 - **Queueing while working:** a message typed and submitted while Codex was working stayed in the composer and was not sent, so `queue_while_working: false`: the launcher waits for *ready* before sending a suspension request.

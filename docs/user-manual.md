@@ -1,13 +1,13 @@
 # kankan user manual
 
-kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours (§4.1). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
+kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours ([section 4.1](#41-working-alongside-the-agents)). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
 
-The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); section numbers below (§) refer to it.
+The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); links marked "spec §" point to its sections, links marked "section" to this manual's.
 
 ## 1. Requirements
 
 - Linux, Python ≥ 3.10, Git ≥ 2.38, tmux ≥ 3.2; Claude Code and/or Codex CLI installed and logged in.
-- A Trello account, an API key and a token (see §3).
+- A Trello account, an API key and a token (see [section 3](#3-binding-a-project-to-a-board)).
 - tmux sessions survive SSH disconnection with `KillUserProcesses=no` in logind (the Ubuntu default). For agents started at boot, lingering must be enabled: `loginctl enable-linger`.
 
 ## 2. Installation
@@ -22,7 +22,7 @@ kankan uses only the Python standard library. `kankan` must be on your **login**
 
 ## 3. Binding a project to a board
 
-kankan works on Trello with its own Trello account (§3.1); then `kankan init` binds the project clone to the board (§3.2).
+kankan works on Trello with its own Trello account ([section 3.1](#31-a-trello-account-for-kankan)); then `kankan init` binds the project clone to the board ([section 3.2](#32-kankan-init)).
 
 ### 3.1 A Trello account for kankan
 
@@ -37,7 +37,7 @@ Trello never notifies you about your own actions. If kankan uses **your** token,
    3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. Copy the **API key** (kankan does not need the *Secret*).
 4. Still logged in as the bot, get the token: on the same **Trello Auth** tab click the **Token** link next to the API key, check that the page names your app, press **Allow** and copy the token. Key, app and token all belong to the bot; your own account only owns the boards.
    - This token also has the `account` scope (it could change the bot's own profile), which kankan does not need; for a dedicated bot account that is harmless. For the minimal scope, open instead the URL that `kankan init` prints when it asks for the token (`scope=read,write`).
-5. Keep the key and the token at hand: `kankan init` asks for them (§3.2), or put them in a `.properties` file and pass it with `--credentials`. Run `init` with `--notify <your Trello username>`: by default kankan mentions the token's owner, which is the bot.
+5. Keep the key and the token at hand: `kankan init` asks for them ([section 3.2](#32-kankan-init)), or put them in a `.properties` file and pass it with `--credentials`. Run `init` with `--notify <your Trello username>`: by default kankan mentions the token's owner, which is the bot.
 
 If a clone already uses your own token, switch it to the bot with `kankan init --reauth`, then `kankan init --notify <your Trello username>`.
 
@@ -53,9 +53,9 @@ Run once in the project clone (for example `~/coding/myproject`):
 kankan init https://trello.com/b/<shortLink>/<name> --notify <your Trello username> [--credentials <file.properties>]
 ```
 
-`init` (§6.1):
+`init` ([spec §6.1](../aispecs/kankan_spec.md#61-kankan-init-board-url)):
 
-- checks the Trello credentials, and if they are missing asks for the bot's API key and token (§3.1); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
+- checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
@@ -88,7 +88,7 @@ The agents integrate into `kankan-agents`; only kankan moves it, so never check 
 - **Give the agents your work:** `kankan merge-request my-feature` (default: your `main`) creates a card at the top of `Backlog`, "Merge branch my-feature into kankan-agents", naming the exact commit to merge. An agent merges it and resolves conflicts, an agent of the other type reviews and integrates it. If you work in another clone, push `my-feature` first and use `--remote`. `--bottom` queues it after the other cards.
 - **See how far apart they are:** `kankan status` prints `kankan-agents is N commits ahead / M behind main`; `kankan doctor` warns when an integration has waited more than 7 days for you to merge it.
 
-For the old behaviour (agents integrate straight into `main`) answer `main` at `kankan init`; then keep `main` **not** checked out while they work, because kankan advances it directly (§12.5).
+For the old behaviour (agents integrate straight into `main`) answer `main` at `kankan init`; then keep `main` **not** checked out while they work, because kankan advances it directly ([spec §12.5](../aispecs/kankan_spec.md#125-integration-branch-and-user-branches)).
 
 ## 5. The golden rule
 
@@ -100,7 +100,7 @@ You may freely:
 - add and remove `HOLD`, add dependency attachments, write comments;
 - unblock a card in `Blocked` with `kankan resolve <shortLink> --done`, or move it to `Backlog` to have it reimplemented.
 
-If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it (§14.6). This is best effort (§14.5).
+If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it ([spec §14.6](../aispecs/kankan_spec.md#146-cards-moved-by-the-user-safety-net)). This is best effort ([spec §14.5](../aispecs/kankan_spec.md#145-precedence-of-human-changes)).
 
 ## 6. The workflow
 
@@ -175,7 +175,7 @@ See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the ins
 
 ## 12. Limits
 
-- Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`) (§7.5).
-- Human changes to a card's list are honoured on a best-effort basis (§14.5); `reconcile` reports leftovers.
-- If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances (§12.5).
-- Exclusion between two clones bound to the same board relies on the registry check; it is not absolute (§6.3).
+- Daemons that detach from the agent's terminal session (for example the Gradle daemon) are not terminated when a dead seat is recovered; processes still running in the seat worktree are reported in the audit log (`seat_escapees`) ([spec §7.5](../aispecs/kankan_spec.md#75-liveness-and-automatic-recovery)).
+- Human changes to a card's list are honoured on a best-effort basis ([spec §14.5](../aispecs/kankan_spec.md#145-precedence-of-human-changes)); `reconcile` reports leftovers.
+- If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances ([spec §12.5](../aispecs/kankan_spec.md#125-integration-branch-and-user-branches)).
+- Exclusion between two clones bound to the same board relies on the registry check; it is not absolute ([spec §6.3](../aispecs/kankan_spec.md#63-boardregistry-binding)).

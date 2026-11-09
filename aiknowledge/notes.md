@@ -2,9 +2,9 @@
 
 ## Specifications
 
-- `aispecs/kankan_spec.md` is the specification of kankan, the CLI that coordinates Claude Code and Codex agents through a Trello board.
-- `aispecs/kanban_requirements.md` lists the Kanban API capabilities kankan needs, mapped to the Trello endpoints it uses. It is the reference for anyone writing an adapter for a Trello alternative.
-- Implementation plans live in `aiplans/`. The user manual is `docs/user-manual.md`, the developer manual (tests, live Trello test board) is `docs/developer-manual.md`; observed agent screens and behaviours are in `docs/adapter-notes.md`.
+- [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md) is the specification of kankan, the CLI that coordinates Claude Code and Codex agents through a Trello board.
+- [`aispecs/kanban_requirements.md`](../aispecs/kanban_requirements.md) lists the Kanban API capabilities kankan needs, mapped to the Trello endpoints it uses. It is the reference for anyone writing an adapter for a Trello alternative.
+- Implementation plans live in `aiplans/`. The user manual is [`docs/user-manual.md`](../docs/user-manual.md), the developer manual (tests, live Trello test board) is [`docs/developer-manual.md`](../docs/developer-manual.md); observed agent screens and behaviours are in [`docs/adapter-notes.md`](../docs/adapter-notes.md).
 
 ## Conventions
 
@@ -14,7 +14,7 @@
 
 ## Rules
 
-- Before every commit that adds a call to a Trello API endpoint, changes how an endpoint is used, or stops using one, revise `aispecs/kanban_requirements.md` so that its capability tables and endpoint mappings match the code. The commit must include that revision.
+- Before every commit that adds a call to a Trello API endpoint, changes how an endpoint is used, or stops using one, revise [`aispecs/kanban_requirements.md`](../aispecs/kanban_requirements.md) so that its capability tables and endpoint mappings match the code. The commit must include that revision.
 
 ## Architecture
 
@@ -37,6 +37,6 @@
 - Tests use a fake Trello server (`tests/fakes/fake_trello.py`, with fault injection), a scripted fake agent (`tests/fakes/fake_agent.py`, installed as `claude`/`codex` on a temporary PATH) and private tmux servers (`KANKAN_TMUX_SOCKET`).
 - Run the suite in its own session (`setsid -w .venv/bin/python -m pytest -q`): recovery tests kill process sessions. `-m "not slow"` skips the tmux process-chain tests.
 - Tests set `KANKAN_SKIP_PREFLIGHT=1` (autouse); `tests/test_doctor.py` unsets it where it matters. `tests/helpers.bind_project` binds with `integration_branch="main"`; new tests pass `integration_branch="kankan-agents"`.
-- `python -m tests.live.agents_e2e` is a manual live run with real Claude Code and Codex agents on the test board (developer manual §3.5); it is never collected by pytest. Its helpers (`tests/live/e2e_support.py`) are tested in `tests/test_e2e_support.py`.
+- `python -m tests.live.agents_e2e` is a manual live run with real Claude Code and Codex agents on the test board ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)); it is never collected by pytest. Its helpers (`tests/live/e2e_support.py`) are tested in `tests/test_e2e_support.py`.
 - Never call `monkeypatch.undo()` in a test: it also undoes the autouse isolated HOME.
 - Live Trello tests (`-m trello_live`) need `~/.config/kankan/test.properties` or `KANKAN_TEST_BOARD_URL` + `KANKAN_TEST_CREDENTIALS`, and a board whose description contains `kankan-test-board`.

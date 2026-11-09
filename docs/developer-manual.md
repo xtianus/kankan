@@ -1,6 +1,6 @@
 # kankan developer manual
 
-For using kankan see the [user manual](user-manual.md). The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); section numbers below (§) refer to it.
+For using kankan see the [user manual](user-manual.md). The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); links marked "spec §" point to its sections, links marked "section" to this manual's.
 
 ## 1. Setup and tests
 
@@ -17,7 +17,7 @@ Runtime code uses the Python standard library only (Python ≥ 3.10); pytest is 
 - `slow`: slow tests;
 - `trello_live`: runs against a real Trello test board; excluded by default (`addopts = "-m 'not trello_live'"`).
 
-The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent (§18.1).
+The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent ([spec §18.1](../aispecs/kankan_spec.md#181-strategy)).
 
 ## 2. Agent adapters
 
@@ -25,18 +25,20 @@ The default adapters are in `kankan/adapters_default.json`; the screens they wer
 
 ## 3. Live Trello test board
 
-The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and labels on a real board (§18.2). Use a **dedicated** board: never point them at a board with real work.
+The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and labels on a real board ([spec §18.2](../aispecs/kankan_spec.md#182-test-board)). Use a **dedicated** board: never point them at a board with real work.
+
+Two Trello accounts take part, as in real use: **yours**, which owns the test board, and **the kankan bot account**, a separate Trello account that kankan acts as. Create the bot account as described in [user manual §3.1](user-manual.md#31-a-trello-account-for-kankan) (with an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake); the sections below say which account does what.
 
 ### 3.1 Create the board
 
-1. Logged in as **yourself** (the human user, not the kankan bot account of user manual §3.1), create a new empty board (for example "kankan test"). The board must belong to your account and workspace, as a real project board would: the tests then reproduce the real scenario, where the bot is a guest on the user's board.
+1. Logged in as **yourself** (not as the kankan bot), create a new empty board (for example "kankan test"). The board must belong to your account and workspace, as a real project board would: the tests then reproduce the real scenario, where the bot is a guest on the user's board.
 2. Invite the kankan bot account to the board as a normal member. Do not create the board from the bot account: that would hide problems a real user meets, such as the bot's membership and permissions on someone else's board.
 3. Put the marker `kankan-test-board` anywhere in the board description. Before any write the tests check for it and stop (exit code 3) if it is missing: this protects real boards from a wrong URL.
 4. Copy the board URL, `https://trello.com/b/<shortLink>/<name>`.
 
 ### 3.2 API key and token
 
-The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests. Do every step of this section **logged in as the kankan bot account** (user manual §3.1; give it an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake), in a private browser window: the app, its key and the token all belong to the bot. Your own account owns only the boards.
+The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests. Do every step of this section **logged in as the kankan bot account**, in a private browser window: the app, its key and the token all belong to the bot. Your own account owns only the boards.
 
 1. Open `https://trello.com/apps/admin` (the old `https://trello.com/power-ups/admin` still works) and press **New** under *Your Apps*.
 2. Fill the form:
@@ -46,7 +48,7 @@ The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for k
 3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. The tab then shows the **API key** (and a *Secret*, which kankan does not need).
 4. Get a token: on the same **Trello Auth** tab click the **Token** link next to the API key; the page names your app and lists the access it gets (it never expires). Press **Allow** and copy the token. This token also has the `account` scope, which kankan does not need and which is harmless for the dedicated bot account; for the minimal scope open instead `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<key>` (the URL `kankan init` prints).
 
-Because the bot, a member of your test board (§3.1), owns the token, kankan's questions and mentions reach you as notifications, and in the live run of §3.5 you answer questions as a real user would. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
+Because the bot, a member of your test board ([section 3.1](#31-create-the-board)), owns the token, kankan's questions and mentions reach you as notifications, and in the live run of [section 3.5](#35-live-run-with-real-agents) you answer questions as a real user would. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
 
 ### 3.3 Configure the tests
 
@@ -73,13 +75,13 @@ Without a complete configuration the live tests are skipped with "no test board 
 .venv/bin/python -m pytest -q -m trello_live
 ```
 
-Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item (and the `ke-` cards and registry block of an interrupted §3.5 run) from the test board with:
+Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item (and the `ke-` cards and registry block of an interrupted [section 3.5](#35-live-run-with-real-agents) run) from the test board with:
 
 ```bash
 .venv/bin/python -m tests.live.cleanup
 ```
 
-It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any kankan registry block, and refuses to touch a board without the marker. The runner of §3.5 instead removes only its own cards and its own registry block, and refuses to start while `Backlog`, `Done`, `Blocked` or seat lists hold other cards.
+It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any kankan registry block, and refuses to touch a board without the marker. The runner of [section 3.5](#35-live-run-with-real-agents) instead removes only its own cards and its own registry block, and refuses to start while `Backlog`, `Done`, `Blocked` or seat lists hold other cards.
 
 ### 3.5 Live run with real agents
 
@@ -93,7 +95,7 @@ ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # once: kankan on t
 
 What it does:
 
-1. Checks the machine with `kankan doctor` (git, tmux, both agents and their login, skill links, `kankan` reachable), the test board configuration (§3.3) and its marker, and that `Backlog`, `Done`, `Blocked` and the seat lists hold no cards.
+1. Checks the machine with `kankan doctor` (git, tmux, both agents and their login, skill links, `kankan` reachable), the test board configuration ([section 3.3](#33-configure-the-tests)) and its marker, and that `Backlog`, `Done`, `Blocked` and the seat lists hold no cards.
 2. Creates a throw-away clone on `main` with a local bare `origin` in `<temp>/kankan-e2e-<run-id>/`, binds it to the test board with `kankan init` (taking over the registry block, after printing who held it), with the real list and label names (`Backlog`, `Done`, `Blocked`, `claude-1 · …`, `codex-1 · …`, `HOLD`, `Question`, `Error`): they are adopted by name and **stay on the board** between runs. The agents integrate into `kankan-agents`, which is pushed to the bare origin.
 3. Creates the cards, named `ke-<timestamp>-<random> <title>`: *Say hello*, *Type one random word*, *What's your name* (each appends to a file), *Ask for a colour* (the agent asks you), *Count slowly* (counts to 5 with pauses, for HOLD), and a merge request of a branch `user-work` holding a `user.txt` commit.
 4. Starts `kankan up claude=1 codex=1` on your default tmux server and prints the board URL and `tmux attach -t ai-kankan-e2e-claude-1` / `ai-kankan-e2e-codex-1` (detach with `Ctrl-b d`).

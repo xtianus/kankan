@@ -2,7 +2,7 @@
 
 **Status:** v1.0
 **Date:** 2026-11-08
-**Related:** `kankan_spec.md`
+**Related:** [`kankan_spec.md`](kankan_spec.md)
 
 ## 1. Purpose
 
@@ -24,7 +24,7 @@ Requirement levels:
 | G5 | MUST | Distinguishable error classes: authentication, not found, validation, rate limiting (with a retry hint such as HTTP 429 and `Retry-After`) and server errors. |
 | G6 | MUST | A documented rate limit high enough for ~10 agents polling every 2 minutes plus bursts of a few dozen requests (Trello: about 100 requests per 10 seconds per token). |
 | G7 | SHOULD | Writes are idempotent or can carry a client-supplied idempotency key, so a retry after a timeout cannot duplicate a comment or a label. kankan's workaround: read back before retrying and embed an operation marker in comment text. |
-| G8 | MAY | Conditional updates (ETag/`If-Match`, a version number or "move only if still in list X"). Trello lacks them; with them, kankan could guarantee that a human's concurrent move is never overwritten (see `kankan_spec.md`, section 14.5). |
+| G8 | MAY | Conditional updates (ETag/`If-Match`, a version number or "move only if still in list X"). Trello lacks them; with them, kankan could guarantee that a human's concurrent move is never overwritten (see [spec §14.5](kankan_spec.md#145-precedence-of-human-changes)). |
 | G9 | MAY | Webhooks or an event stream for card moves, label changes and new comments, to replace polling. |
 
 ## 3. Boards
@@ -104,4 +104,4 @@ Requirement levels:
 
 ## 11. Adapter checklist
 
-An adapter for a new backend is complete when it implements every MUST above behind the interface of kankan's `trello` module, and the `trello_live` acceptance tests (`kankan_spec.md`, section 18) pass against a dedicated test board of that product.
+An adapter for a new backend is complete when it implements every MUST above behind the interface of kankan's `trello` module, and the `trello_live` acceptance tests ([spec §18](kankan_spec.md#18-tests)) pass against a dedicated test board of that product.
