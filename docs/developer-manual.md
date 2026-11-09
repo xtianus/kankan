@@ -109,4 +109,4 @@ It spends real tokens and takes about 15–30 minutes. The agents load your glob
 
 - Every commit that adds, changes or removes a Trello endpoint call revises [`aispecs/kanban_requirements.md`](../aispecs/kanban_requirements.md) in the same commit.
 - An adapter for another Kanban backend is complete when it implements every MUST in that document and the `trello_live` acceptance tests pass against a dedicated test board of that product.
-- Before publishing the repository, check that no fixture contains real board URLs or tokens (user manual §13).
+- Before publishing the repository, check that no test fixture contains real board URLs or tokens: `git grep -nE 'trello.com/b/|[0-9a-f]{64}'`.

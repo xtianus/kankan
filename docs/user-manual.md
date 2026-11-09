@@ -45,7 +45,7 @@ Trello never notifies you about your own actions. If kankan uses **your** token,
 
 1. Create a second Trello account for kankan. It needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers. Trello gives it a workspace of its own.
    - Give it an **uncommon username**, for example `kankan-<your username>-<a few random letters>` (`kankan-xtian-q7wz`), not a generic `kankanbot`. Board invitations go by username or email: a distinctive name keeps other people from inviting your bot to their boards by mistake, and keeps you from inviting someone else's bot to yours.
-2. From your account, invite the bot to the project's board (and to the test board, if you use one) as a normal member, checking the username before you confirm. The boards stay yours.
+2. From your account, invite the bot to the project's board as a normal member, checking the username before you confirm. The boards stay yours.
 3. Log in **as the bot** (a private browser window is simplest) and create the Trello app that gives kankan its API key:
    1. Open `https://trello.com/apps/admin` and press **New** under *Your Apps*.
    2. Fill the form: *App specifications*: **My app doesn't use Power-up capabilities** (kankan adds nothing to the Trello UI; this cannot be changed later); *App name* (for example "kankan"); *Workspace*: the bot's own workspace; *Email*, *Support contact*, *Author*. Press **Create**. The page opens on the *OAuth 2.0* tab, which kankan does not use.
@@ -172,7 +172,3 @@ See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the ins
 - Human changes to a card's list are honoured on a best-effort basis (§14.5); `reconcile` reports leftovers.
 - If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances (§12.5).
 - Exclusion between two clones bound to the same board relies on the registry check; it is not absolute (§6.3).
-
-## 13. Publishing kankan's repository
-
-Before making the repository public, check that no test fixture contains real board URLs or tokens: `git grep -nE 'trello.com/b/|[0-9a-f]{64}'`.
