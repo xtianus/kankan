@@ -156,3 +156,12 @@ def test_main_checked_out_warning(git_repo, env):
     assert not any("checked out" in w for w in warnings)  # main is the user's branch now
     _, warnings = run_init(git_repo, board, prompt=answers("", "main"))
     assert any("main is checked out" in w for w in warnings)
+
+
+def test_init_warns_when_notifying_the_token_owner(git_repo, env):
+    fake, board = env
+    _, warnings = run_init(git_repo, board)
+    assert any("notifications" in w for w in warnings)
+    human = fake.add_member("human")
+    _, warnings = run_init(git_repo, board, notify="human")
+    assert not any("notifications" in w for w in warnings)

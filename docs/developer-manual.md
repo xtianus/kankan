@@ -45,7 +45,7 @@ The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for k
 3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. The tab then shows the **API key** (and a *Secret*, which kankan does not need).
 4. Get a token: open this URL with your key; the page names your app and lists the access it gets. Press **Allow** and the next page shows the token: `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<key>` (this is the URL `kankan init` prints). The **Token** link on the *Trello Auth* tab works too, but asks for the wider scope `read,write,account`.
 
-The same key and token used by `kankan init` work here. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
+Use the token of a separate Trello account (user manual §3.1), not your own: kankan's questions and mentions then reach you as notifications, and the live run of §3.5 answers questions as a real user would. The same key works for both accounts. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
 
 ### 3.3 Configure the tests
 
@@ -85,7 +85,8 @@ It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any
 `tests/live/agents_e2e.py` drives one real Claude Code agent and one real Codex agent through the whole workflow on the test board, while you watch and take part. It is never run by `pytest`; start it by hand:
 
 ```bash
-.venv/bin/pip install -e '.[dev]'            # .venv/bin/kankan must exist: the agents call it
+.venv/bin/pip install -e '.[dev]'
+ln -s ~/coding/kankan/.venv/bin/kankan ~/.local/bin/kankan   # once: kankan on the login PATH (Codex needs it)
 .venv/bin/python -m tests.live.agents_e2e    # options: --no-ask --no-hold --timeout 60 --keep --notify USER --base DIR
 ```
 

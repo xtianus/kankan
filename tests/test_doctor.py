@@ -358,3 +358,19 @@ def test_label_fix_keeps_concurrent_seat(bound, fake_trello, fakebin, monkeypatc
     monkeypatch.setattr(TrelloClient, "snapshot", snapshot_and_add_seat)
     doctor.run(bound.paths.repo, fix=True, online=True)
     assert "claude-1" in load_config(bound.paths).seats
+
+
+def test_kankan_not_on_path_is_manual(fakebin):
+    """Codex's command daemon sees only the login PATH: kankan must be on it."""
+    check = doctor.check_kankan_path()
+    assert check.status == doctor.MANUAL and "PATH" in check.action
+
+
+def test_notify_user_is_token_owner_warns(bound, fakebin, fake_trello):
+    check = by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"]
+    assert check.status == doctor.WARN and "separate Trello account" in check.action
+    other = fake_trello.add_member("me-the-human")
+    cfg = load_config(bound.paths)
+    cfg.notify_id, cfg.notify_username = other["id"], other["username"]
+    save_config(bound.paths, cfg)
+    assert by_name(doctor.run(bound.paths.repo, fix=False, online=True))["notifications"].status == doctor.OK

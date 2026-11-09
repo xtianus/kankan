@@ -37,7 +37,7 @@ class AgentContext:
 
 
 def context(cwd=None) -> AgentContext:
-    seat, session, _ = AgentEnv.from_environ()
+    seat, session, _ = AgentEnv.from_environ(cwd)
     project = Project.open(cwd or os.getcwd())
     seat_value = verify_owner(project, seat, session)
     lease = Lease(seat=seat, type=seat_type(seat), session=session, seat_oid=seat_value.oid, fd=-1)

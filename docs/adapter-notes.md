@@ -42,3 +42,7 @@ Checked on 2026-11-08 with `kankan up` against a fake Trello board, a scratch re
 - Claude Code 2.1.319: `claude auth status` prints a JSON object with `"loggedIn": true` and exits 0 when logged in, without starting a session.
 - Codex CLI 0.167.0: `codex login status` prints `Logged in using ChatGPT` and exits 0 when logged in.
 - The logged-out exit codes were not observed; doctor treats any non-zero exit as a warning, never as a blocking error.
+
+## Codex runs commands outside the agent's environment
+
+Observed on 2026-11-09 with codex-cli 0.167.0, in the first live run: `codex` hands shell commands to a shared, long-lived `codex app-server --listen unix:// --managed-daemon` (parent pid 1, started outside kankan). The commands get the daemon's environment: its own `PATH` (`…/codex-path:~/.local/bin:…`) and none of `KANKAN_SEAT`, `KANKAN_SESSION`, `KANKAN_PROJECT`. The agent reported `kankan: command not found` and stopped. kankan now requires `kankan` on the login `PATH` and the agent commands read seat and session from `<worktree git dir>/kankan-agent.json` when the variables are missing. Claude Code runs commands as its own children and inherits the environment.

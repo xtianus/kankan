@@ -339,11 +339,35 @@ def verify_owner(project, seat: str, session: str) -> RefValue:
     return value
 
 
+AGENT_FILE = "kankan-agent.json"
+
+
+def _worktree_gitdir(worktree) -> Optional[Path]:
+    proc = gitutil.run(worktree, ["rev-parse", "--absolute-git-dir"], check=False)
+    return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def write_agent_file(project, seat: str, session: str, worktree) -> None:
+    """Seat and session for agents whose commands do not inherit the agent's environment (Codex runs them in a
+    shared daemon): kept in the seat worktree's private git directory, never in the working tree."""
+    gitdir = _worktree_gitdir(worktree)
+    if gitdir is not None:
+        atomic_write_json(gitdir / AGENT_FILE, {"seat": seat, "session": session, "project": project.paths.project})
+
+
+def read_agent_file(cwd) -> Optional[dict]:
+    gitdir = _worktree_gitdir(cwd)
+    return read_json(gitdir / AGENT_FILE, None) if gitdir is not None else None
+
+
 class AgentEnv:
     @staticmethod
-    def from_environ() -> Tuple[str, str, str]:
+    def from_environ(cwd=None) -> Tuple[str, str, str]:
         seat, session = os.environ.get("KANKAN_SEAT"), os.environ.get("KANKAN_SESSION")
         project = os.environ.get("KANKAN_PROJECT", "")
+        if not seat or not session:
+            data = read_agent_file(cwd or os.getcwd()) or {}
+            seat, session, project = data.get("seat"), data.get("session"), data.get("project", "")
         if not seat or not session:
             raise KankanError(Status.USAGE_ERROR,
                               "agent commands need KANKAN_SEAT and KANKAN_SESSION (run them inside a kankan agent)")

@@ -77,12 +77,9 @@ def check_kankan_path() -> Check:
     found = shutil.which("kankan")
     here = Path(sys.executable).parent
     if found is None:
-        proc = _run([sys.executable, "-c", "import kankan"])
-        if proc is not None and proc.returncode == 0:
-            return Check("kankan-path", WARN, "kankan is not on your PATH (agents get their own wrapper)",
-                         "add the directory of the kankan command to PATH (with pipx: `pipx ensurepath`)")
-        return Check("kankan-path", MANUAL, f"{sys.executable} cannot import kankan",
-                     "install kankan (pipx install /path/to/kankan)")
+        return Check("kankan-path", MANUAL, "kankan is not on your login PATH (Codex runs commands with that PATH)",
+                     "install kankan so that it is on your login PATH: pipx install /path/to/kankan (then "
+                     "`pipx ensurepath`), or link an existing kankan command into ~/.local/bin")
     interpreter = _shebang(found)
     if interpreter and os.path.realpath(interpreter) != os.path.realpath(sys.executable):
         return Check("kankan-path", WARN, f"{found} belongs to another installation ({interpreter})",
@@ -334,6 +331,13 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
         return [Check("credentials", MANUAL, err.message, "kankan init --reauth")] + \
             [Check(n, SKIPPED, "needs credentials") for n in rest]
     checks = [Check("credentials", OK, "valid")]
+    if project.trello.me().get("id") == cfg.notify_id:
+        checks.append(Check("notifications", WARN, f"kankan mentions @{cfg.notify_username}, who also owns the token: "
+                            "Trello never notifies you about your own comments",
+                            "use a separate Trello account for kankan's token (user manual §3.1), then "
+                            "kankan init --reauth and kankan init --notify <your username>"))
+    else:
+        checks.append(Check("notifications", OK, f"kankan mentions @{cfg.notify_username}"))
     snap = project.trello.snapshot(cfg.board_id)
     block = registry_block(snap.desc) or {}
     if block.get("registry-id") != cfg.registry_id:

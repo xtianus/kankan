@@ -167,6 +167,11 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, notify: Op
             cfg.notify_id, cfg.notify_username = member["id"], member["username"]
         elif not cfg.notify_id:
             cfg.notify_id, cfg.notify_username = me["id"], me["username"]
+        if cfg.notify_id == me["id"]:
+            warnings.append(f"kankan will mention @{cfg.notify_username}, the owner of its Trello token: Trello does "
+                            "not send you notifications about your own comments. Use a separate Trello account for "
+                            "kankan's token, then `kankan init --reauth` and `kankan init --notify <your username>` "
+                            "(user manual §3.1)")
         current = cfg.test_command
         hint = f" [{current}]" if current else " (empty for none)"
         answer = prompt(f"Test command run by `kankan verify`{hint}: ").strip()

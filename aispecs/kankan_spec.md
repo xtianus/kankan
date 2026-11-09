@@ -114,7 +114,7 @@ Run once in the project clone (e.g. URL `https://trello.com/b/s5C4vWbG/test1`; k
 2. writes the `kankan-registry` block into the board description, waits a few seconds and reads it back (6.3);
 3. finds or creates the lists `Backlog`, `Done`, `Blocked`; if lists with those names exist, asks whether to adopt them;
 4. creates the labels `HOLD`, `Question`, `Error`;
-5. determines the Trello user to notify (`GET /1/members/me`), overridable with `--notify <user>`;
+5. determines the Trello user to notify (`GET /1/members/me`), overridable with `--notify <user>`; warns when it is the token's owner, who receives no notification for kankan's comments (a separate Trello account for kankan is recommended);
 6. asks for the project's `test_command` (may be left empty; see 12.2);
 7. asks for the integration branch (default `kankan-agents`) and records the user branch (`main` if it exists, otherwise the checked-out branch); if the integration branch does not exist locally it adopts `origin/<name>` when present, otherwise creates it from the user branch, never resetting or force-pushing; changing the integration branch of a configured clone is refused while a seat is alive or a card ref exists;
 8. writes `config.json` and `git config kankan.integrationBranch`;
@@ -543,9 +543,9 @@ Under the project lock, conditional on the value read, recorded in the log:
 
 Checks the machine and, inside a clone, the project; fixes what is safe and prints the manual steps for the rest. Exit 0 when no manual step remains, 14 (`needs_action`) otherwise; warnings do not fail.
 
-- **Machine:** Git ≥ 2.38, tmux ≥ 3.2, `kankan` importable by the running interpreter (agents always get a private `<gcd>/kankan/bin` first on their `PATH`, holding only a `kankan` wrapper for this installation, so the interpreter's `python`/`pip` never shadow the project's; `kankan` missing from the user's own `PATH` is only a warning), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
+- **Machine:** Git ≥ 2.38, tmux ≥ 3.2, `kankan` on the login `PATH` (Codex runs commands with it; agents that inherit their environment also get a private `<gcd>/kankan/bin` first on their `PATH`, holding only a `kankan` wrapper for this installation, so the interpreter's `python`/`pip` never shadow the project's), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
 - **Project:** binding (`kankan init` if missing), adapters, `pre-push` hook (installed or made executable), `info/exclude`, integration branch (exists, not checked out), divergence from the user branch, autostart unit (a generated unit whose `PATH` lacks `kankan` or an agent is rewritten keeping its enabled state; an edited unit is reported).
-- **Online:** credentials (`kankan init --reauth`), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
+- **Online:** credentials (`kankan init --reauth`), notifications (warning when the notify user owns the token: Trello does not notify anyone about their own comments; use a separate Trello account for kankan), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
 
 `--no-fix` changes nothing. **Preflight:** `kankan up` (once, before starting anything, for the types that need a new agent) and `kankan agent` run the offline checks for the requested types and refuse with the manual steps if an agent CLI is missing or kankan cannot be imported; they create a missing skill link for the requested types but never re-point an existing one; the login check never blocks. When the integration branch is also the user branch (pre-1.2 setup) `kankan.integrationBranch` is not set, so the hook never blocks the user's own pushes.
 
@@ -572,7 +572,7 @@ Checks the machine and, inside a clone, the project; fixes what is safe and prin
 
 ### 16.2 Agent commands
 
-They require `KANKAN_SEAT` and `KANKAN_SESSION`, verify ownership and act on the current task: `task`, `note`, `sync`, `verify --tested <hash>`, `integrate --tested <hash>`, `done`, `ask`, `fail`, `block`, `yield`.
+They identify the seat with `KANKAN_SEAT` and `KANKAN_SESSION`; when the agent runs commands without its environment (Codex hands them to a shared background service), they fall back to `kankan-agent.json`, written by the launcher in the seat worktree's private Git directory with the seat and current session. They verify ownership and act on the current task: `task`, `note`, `sync`, `verify --tested <hash>`, `integrate --tested <hash>`, `done`, `ask`, `fail`, `block`, `yield`.
 
 ### 16.3 Internal commands
 
@@ -604,6 +604,7 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 - Credentials only in the sources of 6.2, never in configuration, logs, comments, blobs or output.
 - Write access to the clone limited to the user running the agents; whoever can write the refs can bypass the protocol.
 - Blobs contain hostname, user and paths: the refs must not be published (`pre-push` hook, `purge-remote`).
+- The seat file `kankan-agent.json` (seat and session) lives in the worktree's Git directory, writable only by the user; a process left over in the seat worktree could use the current session, so seat recovery kills the recorded processes before the worktree is reused.
 - Only `integrate` pushes the integration branch: the `pre-push` hook refuses other pushes to it from the kankan clone.
 - Inputs validated before reaching Git or the shell; no Trello text interpolated into shell commands.
 - Text forwarded to the agent comes only from the configured members.

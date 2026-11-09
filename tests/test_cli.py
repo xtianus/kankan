@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -108,3 +109,27 @@ def test_json_envelope_shape(agent, capsys):
 
 def test_unknown_command_usage_error(capsys):
     assert cli.main(["nonsense", "--json"]) == 41
+
+
+def test_agent_commands_without_environment(agent, capsys, monkeypatch):
+    """Codex runs commands through a shared daemon that does not inherit the agent's environment (adapter notes):
+    agent commands fall back to the seat file the launcher writes in the worktree's git directory."""
+    project, fake, lease, task, wt, card = agent
+    monkeypatch.delenv("KANKAN_SEAT")
+    monkeypatch.delenv("KANKAN_SESSION")
+    code, out = run(capsys, "task")
+    assert code == 41 and "KANKAN_SEAT" in out["message"]
+    seats.write_agent_file(project, lease.seat, lease.session, wt)
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    assert (gitdir / "kankan-agent.json").exists() and not (wt / "kankan-agent.json").exists()
+    code, out = run(capsys, "task")
+    assert code == 0 and out["data"]["task_id"] == task["id"]
+
+
+def test_agent_file_with_old_session_is_not_owner(agent, capsys, monkeypatch):
+    project, fake, lease, task, wt, card = agent
+    monkeypatch.delenv("KANKAN_SEAT")
+    monkeypatch.delenv("KANKAN_SESSION")
+    seats.write_agent_file(project, lease.seat, "stale-session", wt)
+    code, out = run(capsys, "task")
+    assert code == 31 and out["status"] == "not_owner"

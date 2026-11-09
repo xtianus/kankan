@@ -13,12 +13,12 @@ The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); section 
 ## 2. Installation
 
 ```bash
-pipx install /path/to/kankan          # or: pip install --user -e /path/to/kankan
+pipx install /path/to/kankan          # puts kankan in ~/.local/bin; then `pipx ensurepath` if needed
 kankan skill install                   # links the shared skill into ~/.claude/skills and ~/.codex/skills
 kankan doctor                          # checks git, tmux, the agents and their login, the skill, PATH; fixes what it can
 ```
 
-kankan uses only the Python standard library. `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning. Agents always run the same kankan as their launcher, through a small wrapper in `<git dir>/kankan/bin`.
+kankan uses only the Python standard library. `kankan` must be on your **login** `PATH` (for example `~/.local/bin`): Codex runs its shell commands through a background service that sees only that `PATH`, not the environment kankan gives the agent. `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning. Agents always run the same kankan as their launcher, through a small wrapper in `<git dir>/kankan/bin`.
 
 ## 3. Binding a project to a board
 
@@ -38,6 +38,17 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 - installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
+
+### 3.1 A Trello account for kankan
+
+Trello never notifies you about your own actions. If kankan uses **your** token, its questions, errors and mentions of you are, for Trello, comments you wrote yourself: you get no notification. Give kankan its own Trello account:
+
+1. Create a second Trello account, for example "kankan bot" (it needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers).
+2. Invite it to the project's board (and to the test board, if you use one) as a normal member.
+3. In a private browser window, log in as the bot and open `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<your API key>`. The key is your app's; the token belongs to whoever presses **Allow**, here the bot.
+4. Store the bot's token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which would now be the bot.
+
+Your answers keep working: kankan forwards to the agent only comments written by the notify user (you) without kankan's marker, and ignores the bot's own comments. `kankan init` and `kankan doctor` warn while the notify user is the token owner.
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`.
 

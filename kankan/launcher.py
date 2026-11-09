@@ -151,6 +151,7 @@ class Launcher:
 
     def spawn_agent(self) -> None:
         worktree = self.project.paths.seat_worktree(self.lease.seat)
+        seats.write_agent_file(self.project, self.lease.seat, self.lease.session, worktree)
         env = dict(os.environ)
         env.update(KANKAN_SEAT=self.lease.seat, KANKAN_SESSION=self.lease.session,
                    KANKAN_PROJECT=self.project.paths.project)
