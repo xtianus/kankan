@@ -131,7 +131,7 @@ Lookup order:
 2. the `.properties` file given with `init --credentials <path>` (e.g. the project secrets file in `/srv/<acroenv>/bin/`), keys `kankan.trello.key` and `kankan.trello.token` (configurable names). The path is saved in the configuration; kankan must not know about the acroenv;
 3. `~/.config/kankan/credentials` (permissions 600).
 
-If they are missing or invalid, `init` guides the user: asks for the API key (from `trello.com/apps/admin`), prints the authorization URL (scope `read,write`, expiration `never`), asks for the token, verifies it with `GET /1/members/me` and saves it.
+If they are missing or invalid, `init` guides the user: asks for the API key (from `trello.com/apps/admin`, logged in as kankan's own Trello account: app, key and token belong to a dedicated bot account invited to the user's boards, so that kankan's mentions notify the user), prints the authorization URL (scope `read,write`, expiration `never`), asks for the token, verifies it with `GET /1/members/me` and saves it.
 
 **Writing the credentials file:** kankan never rewrites the file from scratch. It keeps comments, order and foreign keys, updates its own keys in place and appends missing ones at the end, writes to a temporary file with the same permissions and owner and renames it atomically. It warns if the file is readable by other users. Credentials never appear in logs, comments or output.
 

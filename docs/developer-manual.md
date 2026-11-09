@@ -36,17 +36,17 @@ The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and
 
 ### 3.2 API key and token
 
-The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests.
+The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests. Do every step of this section **logged in as the kankan bot account** (user manual §3.1), in a private browser window: the app, its key and the token all belong to the bot. Your own account owns only the boards.
 
 1. Open `https://trello.com/apps/admin` (the old `https://trello.com/power-ups/admin` still works) and press **New** under *Your Apps*.
 2. Fill the form:
    - *App specifications*: **My app doesn't use Power-up capabilities** (kankan adds nothing to the Trello UI; this cannot be changed later, and it removes the *Iframe connector URL* field);
-   - *App name* (for example "Kankan app for tests"), *Workspace* (the app belongs to it), *Email*, *Support contact*, *Author*;
+   - *App name* (for example "Kankan app for tests"), *Workspace* (the bot's own workspace; the app belongs to it), *Email*, *Support contact*, *Author*;
    - press **Create**. The app page opens on its *OAuth 2.0* tab; kankan does not use OAuth 2.0.
 3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. The tab then shows the **API key** (and a *Secret*, which kankan does not need).
 4. Get a token: open this URL with your key; the page names your app and lists the access it gets. Press **Allow** and the next page shows the token: `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<key>` (this is the URL `kankan init` prints). The **Token** link on the *Trello Auth* tab works too, but asks for the wider scope `read,write,account`.
 
-Use the token of the kankan bot account (user manual §3.1), a member of your test board (§3.1), not your own token: kankan's questions and mentions then reach you as notifications, and the live run of §3.5 answers questions as a real user would. The same key works for both accounts. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
+Because the bot, a member of your test board (§3.1), owns the token, kankan's questions and mentions reach you as notifications, and in the live run of §3.5 you answer questions as a real user would. Trello does not let you reset an API key, so keep the token private; it stays valid until you revoke it from your Trello account settings.
 
 ### 3.3 Configure the tests
 

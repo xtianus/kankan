@@ -59,7 +59,7 @@ def acquire_credentials(paths: Paths, cfg: Config, base_url: str, prompt: Callab
             if err.status != Status.CONFIG_ERROR:
                 raise
             say(f"Trello credentials missing or invalid: {err.message}")
-    key = prompt("Trello API key (from https://trello.com/apps/admin): ").strip()
+    key = prompt("Trello API key (from https://trello.com/apps/admin, logged in as kankan's own Trello account): ").strip()
     say("Open this URL, allow access and copy the token:\n  " + AUTH_URL.format(key=key))
     token = prompt("Trello token: ").strip()
     client = TrelloClient(key, token, base_url=base_url, timeout=cfg.trello_timeout)

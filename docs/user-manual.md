@@ -30,7 +30,7 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 
 `init` (§6.1):
 
-- checks the Trello credentials, and if they are missing asks for the API key (from `https://trello.com/apps/admin`), prints the authorization URL and asks for the token. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
+- checks the Trello credentials, and if they are missing asks for the API key (from `https://trello.com/apps/admin`, logged in as kankan's own Trello account, §3.1), prints the authorization URL and asks for the token. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
@@ -43,10 +43,10 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 
 Trello never notifies you about your own actions. If kankan uses **your** token, its questions, errors and mentions of you are, for Trello, comments you wrote yourself: you get no notification. Give kankan its own Trello account:
 
-1. Create a second Trello account, for example "kankan bot" (it needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers).
-2. Invite it to the project's board (and to the test board, if you use one) as a normal member.
-3. In a private browser window, log in as the bot and open `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<your API key>`. The key is your app's; the token belongs to whoever presses **Allow**, here the bot.
-4. Store the bot's token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which would now be the bot.
+1. Create a second Trello account, for example "kankan bot" (it needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers). Trello gives it a workspace of its own.
+2. From your account, invite the bot to the project's board (and to the test board, if you use one) as a normal member. The boards stay yours.
+3. Everything else happens **logged in as the bot** (a private browser window is simplest): create the Trello app in the bot's workspace and get its API key, then the token, as described in the developer manual §3.2. Key, app and token all belong to the bot; your own account only owns the boards.
+4. Store the bot's key and token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which is now the bot.
 
 Your answers keep working: kankan forwards to the agent only comments written by the notify user (you) without kankan's marker, and ignores the bot's own comments. `kankan init` and `kankan doctor` warn while the notify user is the token owner.
 
