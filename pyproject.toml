@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest", "setuptools", "wheel"]
+dev = ["pytest", "pytest-xdist", "setuptools", "wheel"]
 
 [project.scripts]
 kankan = "kankan.cli:main"

@@ -26,6 +26,11 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("KANKAN_SKIP_PREFLIGHT", "1")  # tests/test_doctor.py unsets it where it matters
     from kankan import trello
     monkeypatch.setattr(trello._BUCKET, "limit", 10 ** 9)
+    # `kankan init` waits settle_seconds (3 s) before reading the registry back from the real Trello; the fake
+    # server is consistent at once, so tests skip that wait (it is the only clock call in kankan.init)
+    import types
+    from kankan import init as init_mod
+    monkeypatch.setattr(init_mod, "clock", types.SimpleNamespace(sleep=lambda seconds: None))
     return home
 
 

@@ -6,7 +6,7 @@ For using kankan see the [user manual](user-manual.md). The design is in [`aispe
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q                 # everything except the live Trello tests
+.venv/bin/python -m pytest -q -n auto         # everything except the live Trello tests, in parallel (about 1.5 min on 8 cores; about 8 min serially)
 .venv/bin/python -m pytest -q -m trello_live  # live Trello tests only (§3)
 .venv/bin/python -m tests.live.agents_e2e     # live run with real agents, manual (§3.5)
 ```

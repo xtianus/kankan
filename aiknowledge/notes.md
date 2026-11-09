@@ -36,6 +36,7 @@
 ## Testing
 
 - Tests use a fake Trello server (`tests/fakes/fake_trello.py`, with fault injection), a scripted fake agent (`tests/fakes/fake_agent.py`, installed as `claude`/`codex` on a temporary PATH) and private tmux servers (`KANKAN_TMUX_SOCKET`).
+- Run the suite in parallel and in its own session: `setsid -w .venv/bin/python -m pytest -q -n auto` (pytest-xdist; each test has its own temp dir, HOME and tmux socket). Tests skip `kankan init`'s settle wait (conftest).
 - Run the suite in its own session (`setsid -w .venv/bin/python -m pytest -q`): recovery tests kill process sessions. `-m "not slow"` skips the tmux process-chain tests.
 - Tests set `KANKAN_SKIP_PREFLIGHT=1` (autouse); `tests/test_doctor.py` unsets it where it matters. `tests/helpers.bind_project` binds with `integration_branch="main"`; new tests pass `integration_branch="kankan-agents"`.
 - `python -m tests.live.agents_e2e` is a manual live run with real Claude Code and Codex agents on the test board ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)); it is never collected by pytest. Its helpers (`tests/live/e2e_support.py`) are tested in `tests/test_e2e_support.py`.
