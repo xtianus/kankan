@@ -51,3 +51,11 @@ def test_options_and_activity(tmux_server, tmp_path):
     tmux_server.set_option("opt", "@kankan_repo", "/x/y")
     assert tmux_server.get_option("opt", "@kankan_repo") == "/x/y"
     assert tmux_server.client_activity("opt") is None
+
+
+def test_sessions_with_option_in_one_call(tmux_server, tmp_path):
+    """Names and a user option are read atomically, so a rename between two calls cannot hide a session."""
+    tmux_server.new_session("one", str(tmp_path), ["sleep", "60"])
+    tmux_server.new_session("two", str(tmp_path), ["sleep", "60"])
+    tmux_server.set_option("one", "@kankan_repo", "/x/y")
+    assert tmux_server.sessions_with_option("@kankan_repo") == {"one": "/x/y", "two": ""}

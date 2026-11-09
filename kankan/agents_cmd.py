@@ -35,9 +35,8 @@ def _check_collision(project, tmux: Tmux) -> None:
     """Another repository whose sanitized project name is the same would share session names."""
     prefix = f"ai-{sanitize(project.paths.project)}-"
     mine = str(project.paths.repo)
-    for name in tmux.sessions():
+    for name, owner in tmux.sessions_with_option("@kankan_repo").items():
         if name.startswith(prefix):
-            owner = tmux.get_option(name, "@kankan_repo")
             if owner and owner != mine:
                 raise KankanError(Status.CONFIG_ERROR,
                                   f"tmux session {name} belongs to {owner}, whose project name collides with this one; "

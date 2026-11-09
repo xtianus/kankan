@@ -62,6 +62,13 @@ class Tmux:
         proc = self.run(["list-sessions", "-F", "#{session_name}"], check=False)
         return proc.stdout.split() if proc.returncode == 0 else []
 
+    def sessions_with_option(self, option: str) -> Dict[str, str]:
+        """Session names with a user option's value ("" if unset), read in one call (atomic w.r.t. renames)."""
+        proc = self.run(["list-sessions", "-F", "#{session_name}\t#{" + option + "}"], check=False)
+        if proc.returncode != 0:
+            return {}
+        return dict((line.split("\t", 1) + [""])[:2] for line in proc.stdout.splitlines() if line)
+
     def pane_of_session(self, name: str) -> str:
         proc = self.run(["list-panes", "-t", f"={name}", "-F", "#{pane_id}"], check=False)
         if proc.returncode != 0 or not proc.stdout.strip():

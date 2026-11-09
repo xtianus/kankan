@@ -42,7 +42,9 @@ def test_up_starts_only_missing(project, env):
     assert agents_cmd.up(project, {"claude": 1, "codex": 1}) == []
     assert len(agents_cmd.up(project, {"claude": 2})) == 1
     assert alive(project, "claude") == 2 and alive(project, "codex") == 1
-    assert {"ai-proj-claude-1", "ai-proj-claude-2", "ai-proj-codex-1"} <= set(env.sessions())
+    # up() returns once the seats are taken; each launcher renames its session right after
+    assert wait_for(lambda: {"ai-proj-claude-1", "ai-proj-claude-2", "ai-proj-codex-1"} <= set(env.sessions()),
+                    timeout=15)
 
 
 def test_kill9_supervisor_and_launcher_up_recovers(project, fake_trello, env):
@@ -93,7 +95,7 @@ def test_two_projects_isolated(tmp_path, fake_trello, monkeypatch, env):
         repos.append(bind_project(repo, fake_trello, monkeypatch, **FAST))
     for project in repos:
         agents_cmd.up(project, {"claude": 1})
-    assert {"ai-proj1-claude-1", "ai-proj2-claude-1"} <= set(env.sessions())
+    assert wait_for(lambda: {"ai-proj1-claude-1", "ai-proj2-claude-1"} <= set(env.sessions()), timeout=15)
     lists = [p.reload_config().seats["claude-1"].in_progress for p in repos]
     assert lists[0] != lists[1]
     assert all(alive(p, "claude") == 1 for p in repos)
@@ -108,7 +110,7 @@ def test_concurrent_up_no_overstart(project, env):
         out, err = proc.communicate(timeout=180)
         assert proc.returncode == 0, err
     assert alive(project, "claude") == 2
-    assert len([s for s in env.sessions() if s.startswith("ai-proj-claude")]) == 2
+    assert wait_for(lambda: len([s for s in env.sessions() if s.startswith("ai-proj-claude")]) == 2, timeout=15)
 
 
 def test_sanitized_name_collision_refused(tmp_path, fake_trello, monkeypatch, env):
