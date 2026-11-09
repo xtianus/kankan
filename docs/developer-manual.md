@@ -36,7 +36,7 @@ The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and
 
 ### 3.2 API key and token
 
-The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests. Do every step of this section **logged in as the kankan bot account** (user manual §3.1), in a private browser window: the app, its key and the token all belong to the bot. Your own account owns only the boards.
+The key comes from a Trello *app* (formerly "Power-Up"); one app is enough for kankan and its tests. Do every step of this section **logged in as the kankan bot account** (user manual §3.1; give it an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake), in a private browser window: the app, its key and the token all belong to the bot. Your own account owns only the boards.
 
 1. Open `https://trello.com/apps/admin` (the old `https://trello.com/power-ups/admin` still works) and press **New** under *Your Apps*.
 2. Fill the form:

@@ -43,10 +43,17 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 
 Trello never notifies you about your own actions. If kankan uses **your** token, its questions, errors and mentions of you are, for Trello, comments you wrote yourself: you get no notification. Give kankan its own Trello account:
 
-1. Create a second Trello account, for example "kankan bot" (it needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers). Trello gives it a workspace of its own.
-2. From your account, invite the bot to the project's board (and to the test board, if you use one) as a normal member. The boards stay yours.
-3. Everything else happens **logged in as the bot** (a private browser window is simplest): create the Trello app in the bot's workspace and get its API key, then the token, as described in the developer manual §3.2. Key, app and token all belong to the bot; your own account only owns the boards.
-4. Store the bot's key and token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which is now the bot.
+1. Create a second Trello account for kankan. It needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers. Trello gives it a workspace of its own.
+   - Give it an **uncommon username**, for example `kankan-<your username>-<a few random letters>` (`kankan-xtian-q7wz`), not a generic `kankanbot`. Board invitations go by username or email: a distinctive name keeps other people from inviting your bot to their boards by mistake, and keeps you from inviting someone else's bot to yours.
+2. From your account, invite the bot to the project's board (and to the test board, if you use one) as a normal member, checking the username before you confirm. The boards stay yours.
+3. Log in **as the bot** (a private browser window is simplest) and create the Trello app that gives kankan its API key:
+   1. Open `https://trello.com/apps/admin` and press **New** under *Your Apps*.
+   2. Fill the form: *App specifications*: **My app doesn't use Power-up capabilities** (kankan adds nothing to the Trello UI; this cannot be changed later); *App name* (for example "kankan"); *Workspace*: the bot's own workspace; *Email*, *Support contact*, *Author*. Press **Create**. The page opens on the *OAuth 2.0* tab, which kankan does not use.
+   3. Open the **Trello Auth** tab, press **Generate a new Trello Auth API key for this app** and confirm with **Generate API key**. Copy the **API key** (kankan does not need the *Secret*).
+4. Still logged in as the bot, get the token: open `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=kankan&key=<API key>` (the URL `kankan init` prints), check that the page names your app, press **Allow** and copy the token. Key, app and token all belong to the bot; your own account only owns the boards.
+5. Store the bot's key and token where kankan reads its credentials (§3), then in the project clone run `kankan init --reauth` and `kankan init --notify <your Trello username>`: by default kankan mentions the token's owner, which is now the bot.
+
+Trello does not let you reset an API key, so keep the key and the token private; the token stays valid until it is revoked from the bot's account settings.
 
 Your answers keep working: kankan forwards to the agent only comments written by the notify user (you) without kankan's marker, and ignores the bot's own comments. `kankan init` and `kankan doctor` warn while the notify user is the token owner.
 
