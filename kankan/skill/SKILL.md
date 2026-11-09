@@ -5,9 +5,7 @@ description: Carry out the current kankan task (implement or review a Trello car
 
 # kankan task
 
-You run inside a kankan seat: a launcher assigned you one task on a Trello card. kankan decides **what** to do;
-you decide **how**. Always talk to kankan through its CLI with `--json` and read the JSON envelope
-`{"ok", "status", "message", "data"}`.
+You run inside a kankan seat: a launcher assigned you one task on a Trello card. kankan decides **what** to do; you decide **how**. Always talk to kankan through its CLI with `--json` and read the JSON envelope `{"ok", "status", "message", "data"}`.
 
 ## 1. Read the task
 
@@ -29,8 +27,7 @@ Run `kankan task --json`. `data` contains:
 
 ## 2. Implementation (`kind: impl`)
 
-Work on the prepared branch in your worktree, commit, run the project's tests, then `kankan done --json`.
-`done` needs a clean worktree and at least one commit beyond `main`.
+Work on the prepared branch in your worktree, commit, run the project's tests, then `kankan done --json`. `done` needs a clean worktree and at least one commit beyond `main`.
 
 ## 3. Review (`kind: review`)
 
@@ -38,8 +35,7 @@ Work on the prepared branch in your worktree, commit, run the project's tests, t
 2. Fix the problems you find with **separate commits** and summarize them with `kankan note "<summary>"`.
 3. `kankan sync --json` merges the current main into the branch; resolve conflicts on the branch and commit.
 4. Run the tests on the branch tip and note its hash (`git rev-parse HEAD`).
-5. `kankan verify --tested <hash> --json` runs the project's test command (it may take long; run it like any
-   long test command).
+5. `kankan verify --tested <hash> --json` runs the project's test command (it may take long; run it like any long test command).
 6. `kankan integrate --tested <hash> --json` merges into main. On `main_moved` repeat from step 3.
 7. `kankan done --json`.
 
@@ -49,16 +45,13 @@ Publish useful progress with `kankan note "<text>"` (it becomes a card comment).
 
 ## 5. When you cannot go on
 
-- `kankan ask "<question>"` before stopping for a question to the user; then wait: the answer arrives in this
-  terminal.
+- `kankan ask "<question>"` before stopping for a question to the user; then wait: the answer arrives in this terminal.
 - `kankan fail "<reason>"` for an error that needs the user.
-- `kankan block "<reason>"` for an obstacle that prevents completing the card (for example a merge conflict you
-  cannot resolve safely: leave the merge in progress, kankan moves it to a dedicated worktree).
+- `kankan block "<reason>"` for an obstacle that prevents completing the card (for example a merge conflict you cannot resolve safely: leave the merge in progress, kankan moves it to a dedicated worktree).
 
 ## 6. Suspension
 
-On a kankan suspension request, on `hold: true` or on status `on_hold`: make a WIP commit of your work and run
-`kankan yield --json`.
+On a kankan suspension request, on `hold: true` or on status `on_hold`: make a WIP commit of your work and run `kankan yield --json`.
 
 ## 7. Never
 

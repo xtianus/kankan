@@ -92,7 +92,7 @@ Requirement levels:
 
 | ID | Level | Capability | Trello |
 |---|---|---|---|
-| A1 | MUST | A documented manual procedure through which a user obtains a non-expiring (or long-lived, renewable) token, which kankan stores in a properties file. | API key from `trello.com/power-ups/admin`; token from `trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=...` |
+| A1 | MUST | A documented manual procedure through which a user obtains a non-expiring (or long-lived, renewable) token, which kankan stores in a properties file. | API key from `trello.com/apps/admin`; token from `trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=...` |
 | A2 | MUST | A cheap endpoint that validates the credential. | `GET /1/members/me` |
 
 ## 10. Requirements outside the API

@@ -4,7 +4,7 @@
 
 - `aispecs/kankan_spec.md` is the specification of kankan, the CLI that coordinates Claude Code and Codex agents through a Trello board.
 - `aispecs/kanban_requirements.md` lists the Kanban API capabilities kankan needs, mapped to the Trello endpoints it uses. It is the reference for anyone writing an adapter for a Trello alternative.
-- Implementation plans live in `aiplans/`. The user manual is `docs/manual.md`; observed agent screens and behaviours are in `docs/adapter-notes.md`.
+- Implementation plans live in `aiplans/`. The user manual is `docs/user-manual.md`, the developer manual (tests, live Trello test board) is `docs/developer-manual.md`; observed agent screens and behaviours are in `docs/adapter-notes.md`.
 
 ## Conventions
 
