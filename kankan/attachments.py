@@ -16,9 +16,10 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 
 from kankan import auditlog, clock, config, deps, notify
 from kankan.config import Paths
@@ -136,6 +137,7 @@ def for_task(project, card: Card, still_held: Callable[[], bool]) -> List[dict]:
     members = None
     result: List[dict] = []
     files = []  # (entry, attachment, api path) still to serve from the cache or download
+    listed_at = time.time()  # wall clock, comparable with st_mtime: copies published later are not pruned
     for att in project.trello.attachments(card.id):
         if deps.attachment_short(att.url):
             continue
@@ -163,7 +165,8 @@ def for_task(project, card: Card, still_held: Callable[[], bool]) -> List[dict]:
             _require_held(project, card.short, still_held)
             for entry, att, api_path in files:
                 _serve(project, card.short, entry, att, api_path, max_bytes, deadline)
-            _prune(project, card.short, {e["id"]: Path(e["path"]).name for e in result if "path" in e})
+            _prune(project, card.short, {e["id"]: Path(e["path"]).name for e in result if "path" in e},
+                   {att.id for _, att, _ in files}, listed_at)
             _require_held(project, card.short, still_held)
     return [{key: entry[key] for key in _KEYS if key in entry} for entry in result]
 
@@ -300,9 +303,14 @@ def _download(project, api_path: str, att: Attachment, att_path: Path, final: Pa
                 os.unlink(tmp)
 
 
-def _prune(project, short: str, keep: Dict[str, str]) -> None:
+def _prune(project, short: str, keep: Dict[str, str], served: Set[str], listed_at: float) -> None:
     """Remove from the card's directory every ``<att-id>`` directory not in ``keep`` (attachment id → file name)
-    and, inside the kept ones, every entry but the file. Failures are logged, never raised."""
+    and, inside the kept ones, every entry but the file. Failures are logged, never raised.
+
+    A directory neither in ``keep`` nor ``served`` (handled by this call under the lock) but changed after
+    ``listed_at`` (the wall-clock time before this call listed the attachments and members) is left alone: a
+    call with a newer listing published that copy and may have returned its path; the next call prunes it if
+    it is still stale."""
     card_path = card_dir(project.paths, short)
     try:
         if not _real_dirs(root(project.paths), card_path) or _lstat(card_path) is None:
@@ -315,6 +323,9 @@ def _prune(project, short: str, keep: Dict[str, str]) -> None:
         path = card_path / name
         try:
             if name not in keep:
+                info = _lstat(path)
+                if name not in served and info is not None and info.st_mtime > listed_at:
+                    continue
                 _remove(path)
                 continue
             for child in os.listdir(path):

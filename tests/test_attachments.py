@@ -506,6 +506,36 @@ def test_waiting_call_uses_cache_despite_faults(env, monkeypatch):
     assert Path(first[0]["path"]).read_bytes() == CONTENT
 
 
+def test_stale_listing_does_not_prune_newer_copy(env, monkeypatch):
+    """Call B lists [X]; the user adds Y; call A lists [X, Y], publishes Y and returns its path before B takes
+    the card lock. B's pruning must leave Y's copy alone; a later call with Y removed prunes it."""
+    project, fake = env
+    card, _, ctx = claim(project, fake, monkeypatch)
+    first = fake.upload(card["id"], "x.txt", CONTENT)
+    trello_card = ctx.project.trello.card(card["id"])
+    real = TrelloClient.attachments
+    newer = {}
+
+    def stale_listing(self, card_id):
+        listed = real(self, card_id)  # B's listing: [X]
+        monkeypatch.setattr(TrelloClient, "attachments", real)
+        newer["upload"] = fake.upload(card["id"], "y.txt", b"newer\n")
+        newer["result"] = attachments.for_task(ctx.project, trello_card, still_held=lambda: True)  # call A
+        return listed
+    monkeypatch.setattr(TrelloClient, "attachments", stale_listing)
+    stale = attachments.for_task(ctx.project, trello_card, still_held=lambda: True)  # call B
+    assert [e["id"] for e in stale] == [first["id"]]
+    y_entry = next(e for e in newer["result"] if e["id"] == newer["upload"]["id"])
+    assert y_entry["status"] == "ok"
+    assert Path(y_entry["path"]).read_bytes() == b"newer\n"  # B did not prune A's copy
+    fake.remove_attachment(card["id"], newer["upload"]["id"])
+    y_dir = att_dir(project, card, newer["upload"])
+    old = y_dir.stat().st_mtime - 10
+    os.utime(y_dir, (old, old))
+    assert [e["id"] for e in entries(ctx)] == [first["id"]]
+    assert not y_dir.exists()
+
+
 # ---------------------------------------------------------------- errors, limits, cache
 
 def test_error_message_has_no_body(env, monkeypatch):
