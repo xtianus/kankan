@@ -151,7 +151,8 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 - finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
-- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out.
+- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out;
+- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `implementation` and `review`, and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
 
@@ -189,6 +190,7 @@ You may freely:
 
 - create cards in `Backlog` and reorder them (the top card is taken first);
 - add and remove `HOLD`, add attachments (files, links, dependency cards), write comments;
+- change the model and effort by ticking items on the setting cards of the `kankan` list ([section 6.1](#61-model-and-effort));
 - unblock a card in `Blocked` with `kankan resolve <shortLink> --done`, or move it to `Backlog` to have it reimplemented.
 
 If you move, archive or delete a card that is in progress anyway, kankan asks the agent to commit its work in progress and give the card back, and leaves the card where you put it. This is best effort.
@@ -205,6 +207,45 @@ With only one agent type running, implemented cards wait in `Implemented`; `kank
 **Dependencies:** attach the cards a card depends on (Trello "Attachment → Trello card"). The card waits until every attached card is in `Done`. Missing cards, cards on other boards, archived cards outside `Done` and cycles make it ineligible (shown by `kankan status` and `kankan reconcile`).
 
 **Attachments:** files and links attached to a card by board members reach the agent, for implementation and review alike; card links stay dependencies. Files are downloaded to `<git dir>/kankan/attachments/<card>/` and removed when the card reaches `Done`. A file that cannot be downloaded within about a minute is reported as an error each time, so attach very large files elsewhere and link them. Files larger than `attachment_max_bytes` (default 25 MiB, in `<git dir>/kankan/config.json`) are listed but not downloaded; attachments added by people outside the board or by kankan's own account are listed but neither downloaded nor passed on as links. `kankan reconcile --fix` removes attachment directories left behind, for example for cards that left their seat without reaching `Done`.
+
+### 6.1 Model and effort
+
+*Planned: this section describes the next version of kankan.*
+
+The model and the reasoning effort the agents use decide how fast and how expensive each task is. You choose them on the board, in the `kankan` list, which holds two cards:
+
+- **`implementation`**: the model and effort for implementing a card (merge requests included);
+- **`review`**: the model and effort for reviewing and integrating a card.
+
+Each card has one checklist per agent type (`claude`, `codex`) listing every **combination** of model and effort that agent accepts, for example `sonnet · high` or `opus · max` (not every model accepts every effort, so only valid pairs are listed). **Tick exactly one item in each checklist.** There is no default: no tick, two ticks or an unknown item is an error. Trello does not untick the old item for you, so switch by ticking the new item and unticking the old one.
+
+kankan waits until a card has not been touched for 10 seconds and checks it within about half a minute while agents run (otherwise at the next `kankan up` or `kankan doctor`):
+
+- **valid:** it comments "applied: …" and the new values are used from the **next task**; a task already running keeps its values. When a task needs other values than the agent was started with, kankan restarts the agent with them before giving it the task; nothing of the task is lost.
+- **invalid:** the card gets `Error` and a comment saying what is wrong; the **previous values stay in use** until you fix the card, then kankan removes the `Error`.
+
+**Checking a combination.** The agents are updated independently of kankan, so a combination can stop working. Before a combination is first used, and after each update of an agent, kankan checks it with a tiny request to that agent (a few thousand tokens), run without your `CLAUDE.md`/`AGENTS.md` files, memory, tools or plugins. If the agent rejects it, the setting card gets `Error` with the agent's message, and that agent type takes no task of that role until you tick another combination; `kankan status` says which cards wait and why.
+
+kankan keeps only its latest 10 comments on each setting card; yours stay. Do not move the setting cards out of the `kankan` list: a card moved to `Backlog` becomes a task. If you delete a setting card, the last values stay in use and `kankan doctor` recreates it.
+
+**Seeds.** When kankan creates the cards it ticks the **seed** values, one per agent type and role. The first time, `kankan init` (or `kankan doctor`) asks you for each of them, listing the combinations with the most powerful first:
+
+```
+Default model and effort for claude, implementation (affects speed and cost):
+  1 fable · max     2 fable · xhigh   3 fable · high   …
+  9 opus · max      a opus · xhigh    b opus · high    …
+Press a key:
+```
+
+Press the key of your choice. kankan saves it in `~/.config/kankan/agents.json` ([section 11](#11-adapters)), where you can change it later:
+
+```json
+{"claude": {"seed": {"implementation": {"model": "sonnet", "effort": "high"}, "review": {"model": "opus", "effort": "high"}}}}
+```
+
+Run `init` and `doctor` in a terminal the first time: from a script they cannot ask, and they stop telling you to set the seeds.
+
+`kankan init` and `kankan doctor` print the values they tick and where they come from, and `doctor` always prints the model and effort in use per role and agent type. `kankan status` shows the model and effort each running agent was started with, and the comment kankan writes when it takes a card names them.
 
 ## 7. Talking to the agents
 
@@ -263,6 +304,8 @@ How kankan reads each agent's screen (ready, working, usage limit, trust window,
 ```
 
 `full_access` lists the arguments the agent's `command` must contain: kankan runs every agent in **full-access mode** (Claude Code with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox`), because a permission prompt or a sandbox stops the agent in the middle of a task (Codex's sandbox, for example, blocks the network kankan needs to reach Trello). If you override `command`, keep those arguments: otherwise `kankan up` refuses to start the agent and `kankan doctor` reports it.
+
+`models` lists each model with the efforts it accepts, the most powerful first (this order is used wherever kankan lists the combinations), which make the items of the setting cards' checklists ([section 6.1](#61-model-and-effort)); `seed` is the combination ticked when the cards are created, and `exit_command` the command kankan types to end the agent before restarting it with another model or effort. When a new model comes out, add it with its efforts to `models` in your `agents.json`; `kankan doctor` then adds it, unticked, to the checklists.
 
 `login_check` is the command `kankan doctor` runs to see whether an agent is logged in (exit 0 = logged in): `claude auth status` and `codex login status` by default; set it to `[]` to skip the check.
 

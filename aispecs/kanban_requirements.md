@@ -33,7 +33,7 @@ Requirement levels:
 |---|---|---|---|
 | B1 | MUST | Resolve a board from the URL the user pastes (short code or slug) to its stable ID. | `GET /1/boards/{shortLink}` |
 | B2 | MUST | Read and update a free-text board description, preserving the content outside kankan's delimited block. Used for the board↔registry binding. | read through the nested board read of B3; `PUT /1/boards/{id}` (`desc`) |
-| B3 | MUST | Read in **one request** the board description, all lists, all open cards (list ID, position, labels, attachments, title, description, URL, archived state) and all labels. kankan performs this read on every launcher cycle and before every state-changing command. | `GET /1/boards/{id}?fields=name,desc&lists=all&cards=open&card_attachments=true&card_attachment_fields=url&labels=all&labels_limit=1000&...` (nested resources) |
+| B3 | MUST | Read in **one request** the board description, all lists, all open cards (list ID, position, labels, attachments, title, description, URL, archived state) and all labels. kankan performs this read on every launcher cycle and before every state-changing command. | `GET /1/boards/{id}?fields=name,desc&lists=all&cards=open&card_attachments=true&card_attachment_fields=url&labels=all&labels_limit=1000&...` (nested resources); planned: `checklists=all` for the setting cards ([spec §14.8](kankan_spec_functional.md#148-model-and-effort)) |
 | B4 | MUST | Read all lists of a board with ID, name, position and archived state. | part of the B3 read (`lists=all&list_fields=name,closed,pos`); `GET /1/boards/{id}?lists=open` to find a list by name after a create that timed out |
 | B5 | MUST | Read all labels defined on a board, more than 50 included. | part of the B3 read (`labels_limit=1000`); `GET /1/boards/{id}/labels?limit=1000[&before=...]` when 1000 labels come back, and to find a label by name after a create that timed out |
 | B6 | MUST | Read a board's members with their role (admin, normal, observer). Only comments by board members other than kankan's own account are forwarded to an agent; the board's admins are mentioned for cards kankan created. | `GET /1/boards/{id}/memberships?member=true&member_fields=username` |
@@ -49,6 +49,7 @@ Requirement levels:
 | L3 | MUST | Detect that a configured list was archived or deleted. | `GET /1/lists/{id}` (`closed`, or 404) |
 | L4 | MUST | Unlimited, or at least several dozen, lists per board, and lists created by humans that kankan ignores. | — |
 | L5 | MUST | Ordered cards within a list, readable as a position value. kankan treats the top card of Backlog as highest priority. | card `pos` field |
+| L6 | SHOULD | Read the open cards of one list with name, description, labels, last activity and checklists (items, their state and position), and the server's time of the response. Planned: the settings list is read every 30 seconds ([spec §14.7](kankan_spec_functional.md#147-board-settings)). Required, with C7 and C8, for the model and effort settings; without them the agents run with the seeds and `doctor` reports it. | planned: `GET /1/lists/{id}/cards?fields=name,desc,idLabels,dateLastActivity&checklists=all`, `Date` response header |
 
 ## 5. Cards
 
@@ -60,6 +61,8 @@ Requirement levels:
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
 | C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; planned: `init` and `doctor` create the setting cards of the `kankan` list ([spec §14.7](kankan_spec_functional.md#147-board-settings)). Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
+| C7 | SHOULD | Create a named checklist on a card. Planned: the model and effort setting cards have one checklist per agent type ([spec §14.8](kankan_spec_functional.md#148-model-and-effort)). Without checklists, those settings cannot be held on the board. | planned: `POST /1/cards/{id}/checklists` (`name`) |
+| C8 | SHOULD | Add a checklist item, ticked or not, move it and delete it; ticking from the UI updates the card's last activity. Planned: creating the setting cards and keeping their items in sync with the adapters, in the adapters' order. | planned: `POST /1/checklists/{id}/checkItems` (`name`, `checked`), `PUT /1/cards/{id}/checkItem/{idCheckItem}` (`pos`), `DELETE /1/checklists/{id}/checkItems/{idCheckItem}` |
 
 ## 6. Labels
 

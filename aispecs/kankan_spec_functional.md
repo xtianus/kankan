@@ -1,6 +1,6 @@
 # kankan — functional specification
 
-**Status:** specification v1.4 draft (v1.3: card attachments as task inputs, [13.3](#133-card-attachments); v1.4 draft: board settings, [14.7](#147-board-settings))
+**Status:** specification v1.4 draft (v1.3: card attachments as task inputs, [13.3](#133-card-attachments); v1.4 draft: board settings, [14.7](#147-board-settings), model and effort, [14.8](#148-model-and-effort))
 **Date:** 2026-11-10
 **Companion:** [`kankan_spec_technical.md`](kankan_spec_technical.md) — how kankan implements this behaviour.
 **Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (requirements for backends other than Trello)
@@ -71,7 +71,7 @@ Run once in the project clone (e.g. URL `https://trello.com/b/s5C4vWbG/test1`; k
 9. installs a `pre-push` hook that refuses pushing `refs/agent-*` and pushing to the integration branch except from `integrate` (`KANKAN_PUSH=1`); if a foreign hook already exists, reports it without overwriting it;
 10. adds the necessary exclusions to `<gcd>/info/exclude`;
 11. warns if the integration branch is checked out in any worktree ([12.5](#125-integration-branch-and-user-branches));
-12. creates a card for every known setting that has none in the `kankan` list ([14.7](#147-board-settings)).
+12. asks for the missing model and effort seeds, then creates a card for every known setting that has none in the `kankan` list ([14.7](#147-board-settings)) and prints the model and effort it ticked and where they come from ([14.8](#148-model-and-effort)).
 
 `init` is idempotent. `init --reauth` repeats only the credential acquisition.
 
@@ -329,25 +329,49 @@ If the user moves out of the seat's lists, archives or deletes a card in progres
 
 Some settings are changed from the board instead of the clone's configuration: they are meant for policy choices the user makes while agents run (e.g. which agent, model and effort handle a class of cards). Settings that are structural (list and label IDs, `registry-id`), local to the clone (paths, credentials) or that could run commands (`test_command`) never move to the board: anyone who can edit the board can change a board setting.
 
-**The `kankan` list.** It holds **one card per setting**: the card's **name** is the setting's key and its **description** is the value. To change a setting the user edits that card's description; a typo can only affect that one setting. kankan creates the list and the cards ([6.1](#61-kankan-init-board-url), [15.5](#155-kankan-doctor---no-fix---offline)): each new card has the setting's current value as its description and, as its first comment, a help text with the allowed values and the default. The list is recognized by ID: the user may rename or move it.
+**The `kankan` list.** It holds **one card per setting**; the card's **name** is the setting's key. A setting's value is held in one of two ways, fixed by the setting:
+- **description value:** the card's description is the value; a typo can only affect that one setting;
+- **checklist value:** the card's checklists, whose items list every allowed choice; the ticked items are the value ([14.8](#148-model-and-effort)). The description holds kankan's help text.
 
-**Values.** The value is the whole description with surrounding whitespace removed. Each setting has a fixed set of allowed values or a bounded number; matching ignores case. An empty description means the default.
+kankan creates the list and the cards ([6.1](#61-kankan-init-board-url), [15.5](#155-kankan-doctor---no-fix---offline)). A new description-value card has the setting's current value as its description and, as its first comment, a help text with the allowed values and the default; a new checklist-value card has its current value ticked. The list is recognized by ID: the user may rename or move it.
 
-**When a change applies.** kankan reads the setting cards with every board read and handles a changed description in the next launcher cycle (or `kankan doctor`); while no launcher runs, an edit waits. A new value applies from the next task start; a task already running keeps the value it started with.
+**Description values.** The value is the whole description with surrounding whitespace removed. Each such setting has a fixed set of allowed values or a bounded number; matching ignores case. An empty description means the default.
+
+**When a change applies.** kankan reads the setting cards every 30 seconds while at least one launcher runs, besides every board read of a launcher and `kankan doctor`; while no launcher runs, an edit waits for the next start or `doctor`. A card is judged only when its last activity on Trello is more than **10 seconds** old: until then the user is still editing it, and neither a valid nor an invalid state is acted on. Feedback therefore arrives 10–40 seconds after the last change. A new value applies from the next task start; a task already running keeps the value it started with.
 
 | Case | Behaviour |
 |---|---|
 | Valid new value | Applied; comment "applied: `<old>` → `<new>`, from the next task"; kankan's `Error` removed if present. |
 | Value equal to the current one (e.g. only the case changed) | Nothing. |
-| Invalid value | The **last valid value stays in force**; `Error` and a comment "`<value>` is not valid (allowed: …); still using `<current>`", with a mention ([14.2](#142-notifications)). Reported once per edit, not on every cycle. |
-| Empty description | Reset to the default; comment "applied: reset to default `<default>`". |
-| Card deleted, archived or moved out of the `kankan` list | As an empty description: the setting goes back to its default. A card moved to another list is an ordinary card there (in `Backlog` it becomes a task). `doctor` offers to recreate the setting card. |
+| Invalid card fixed back to the value in force | kankan's `Error` removed; comment "fixed; still using `<current>`". |
+| The allowed values change (kankan upgrade, adapter override) | Every setting card is judged again, edited or not. |
+| Invalid value | The **last valid value stays in force**; `Error` and a comment saying what is wrong and which value is still in use (e.g. "`opsu` is not valid (allowed: …); still using `opus`", "codex: two models ticked"), with a mention ([14.2](#142-notifications)). Reported once per edit, not on every cycle. |
+| Empty description (description value) | Reset to the default; comment "applied: reset to default `<default>`". |
+| Card deleted, archived or moved out of the `kankan` list | Description value: as an empty description, back to the default. Checklist value: the last valid value stays in force. A card moved to another list is an ordinary card there (in `Backlog` it becomes a task). `doctor` recreates the setting card with the value in force. |
 | Card whose name is not a known setting (typo, rename, a card moved in from another list) | `Error` and a comment "unknown setting `<name>`", with a mention. |
 | Two cards with the same key | `Error` on both; the last valid value stays in force until one is removed. |
 
 kankan removes only the `Error` labels it set on setting cards; an `Error` added by the user stays. On each setting card kankan keeps only its **latest 10 comments** besides the help text and deletes its older ones; comments written by people are never deleted.
 
 The settings themselves are defined with the features that use them; `kankan status` shows each setting's effective value and marks those whose card is in error.
+
+### 14.8 Model and effort
+
+The model and the effort of the agents are board settings with checklist values: they affect the speed and the cost of every task.
+
+**Cards.** Two cards, **`implementation`** and **`review`**, give the model and effort for every task of that role (merge-request cards are implementation). They are the defaults that card classes, a future feature, will override. Each card has **one checklist per agent type**, named after the type (`claude`, `codex`, and any type added later). A checklist lists only the **valid combinations** of model and effort for that agent, one item each, named `<model> · <effort>` and grouped by model (e.g. `sonnet · high`, `opus · max`): not every model accepts every effort, so unsupported pairs are never offered. **Order:** wherever kankan lists combinations (checklists, the seed question, comments) the most powerful comes first: models from the most to the least powerful, and within each model its efforts from the highest down (`fable · max`, …, `fable · low`, `opus · max`, …); the order is the adapter's and the user can change it. The combinations come from the agent's adapter ([8.7](kankan_spec_technical.md#87-adapters)); the user adds models released later to the adapter configuration.
+
+**Validity.** A card is valid only when every agent checklist has **exactly one item** ticked and that item is one of the adapter's combinations. There is no default: no tick is an error, as are two ticks, a ticked item that is unknown or renamed, a missing or duplicated checklist, or a checklist for an unknown type. An invalid card follows [14.7](#147-board-settings): the last valid value stays in force, `Error`, and a comment that names the problem.
+
+**Seeds.** The values ticked when kankan creates the cards are the **seeds**, configured per agent type and role in the user-editable adapter configuration (`~/.config/kankan/agents.json`, or the project's). kankan ships no seeds: `init` and `doctor` **ask** for each agent type and role without one, listing the combinations in order with one-character keys (`1`–`9`, then `a`–`z`, then `A`–`Z`); a single keystroke answers, any other key repeats the question. The answer is saved as the seed in `~/.config/kankan/agents.json`, keeping the rest of the file, and printed with the file it went to. Without a terminal, `init` and `doctor` do not guess: they stop with the manual step (run `kankan doctor` in a terminal, or set the seeds in `agents.json`). A seed must be one of that adapter's combinations; otherwise `init`, `doctor`, `agent` and `up` refuse it. Seeds are a starting point, not a fallback: kankan uses them only when no valid value has ever been recorded (the card was invalid from the start), and keeps `Error` on the card meanwhile.
+
+**What the user is told.** Whenever `init` or `doctor` creates or recreates a card, they print the values ticked and where they come from, e.g. "implementation: claude `sonnet`/`high`, codex `<model>`/`high` (seeds from ~/.config/kankan/agents.json; change them there, or tick other items on the card)". `doctor` always prints the effective model and effort per role and agent type.
+
+**Changes to the lists.** When an adapter's lists change (configuration override or kankan upgrade), the cards are judged again at once, and `doctor` adds the new items unticked, removes the items no longer listed and restores the adapter's order. A ticked item that disappears makes the card invalid: `Error`, and the last valid value stays in force until the user ticks another item, provided the agent still accepts it (see below).
+
+**Checking a combination.** The agent CLIs are updated independently of kankan, so any combination can stop working. Before a combination is first used, and again after each new version of an agent CLI, kankan checks it with a tiny one-shot request to that agent (about 2,800 tokens for Claude Code, 2,500 for Codex), run in an empty temporary directory and with every option that keeps instruction files (`CLAUDE.md`, `AGENTS.md`), memory, tools, plugins and settings out of it. The check also runs right after a change is applied, and in `doctor`. If the agent rejects the combination, the setting card gets `Error` with the agent's message, and that agent type takes no task of that role until the user ticks another combination or the CLI changes; its other role and the other agent types continue, and `kankan status` says why cards wait.
+
+**Applying the values.** Before assigning a task, the launcher takes the model and effort of the task's role for its agent type. If the running agent was started with other values, the launcher ends it (the adapter's exit command, e.g. `/exit`; signals only if it does not exit) and starts it again with the new values, keeping the seat and its cards; then it assigns the task. Nothing of the task is lost, because every task starts a new conversation. `kankan status` shows each seat's running model and effort, and the claim comment names them (e.g. "implementing with claude `sonnet`/`high`").
 
 ## 15. Errors and recovery
 
@@ -372,6 +396,8 @@ The settings themselves are defined with the features that use them; `kankan sta
 | Workflow list archived or deleted | `config_error`, startup refused. |
 | `kankan` list archived or deleted | No `config_error`: the last valid settings stay in force, `status` warns, `doctor` restores the list and its cards. |
 | Invalid or unknown setting card | `Error` on that card; the last valid value stays in force ([14.7](#147-board-settings)). |
+| Invalid seed in `agents.json` | `init`, `doctor`, `agent` and `up` refuse it with the allowed models and efforts ([14.8](#148-model-and-effort)). |
+| The agent does not restart with the new model or effort (e.g. the CLI rejects the model) | As an agent dying at startup: the supervisor restarts with backoff; the card being assigned gets `Error` with a comment naming the model and effort. |
 | Ref pointing to an unexpected object or malformed blob | `needs_reconciliation`, no automatic action. |
 
 ### 15.3 `kankan reconcile [--fix]`
@@ -401,9 +427,9 @@ Checks the machine and, inside a clone, the project; fixes what is safe and prin
 
 - **Machine:** Git ≥ 2.38, tmux ≥ 3.2, each agent command in full-access mode (manual step otherwise), `kankan` on the login `PATH` (Codex runs commands with it; agents that inherit their environment also get a private `<gcd>/kankan/bin` first on their `PATH`, holding only a `kankan` wrapper for this installation, so the interpreter's `python`/`pip` never shadow the project's), each agent CLI on `PATH`, its login (the adapter's `login_check`: a failure is only a warning, a timeout is skipped), the skill links (installed or refreshed automatically; a real directory is never touched), `KillUserProcesses` (warning), lingering when an autostart unit exists (manual step only).
 - **Project:** binding (`kankan init` if missing), adapters, `pre-push` hook (installed or made executable), `info/exclude`, integration branch (exists, not checked out), divergence from the user branch, autostart unit (a generated unit whose `PATH` lacks `kankan` or an agent is rewritten keeping its enabled state; an edited unit is reported).
-- **Online:** credentials (`kankan init --reauth`), kankan's account (manual step when the token's owner is an admin of the board: that is a person's token, and that person's answers would be ignored and never notified), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), the `kankan` list (unarchived or recreated) and its setting cards (missing ones created with the current value and help text; changed descriptions applied as in [14.7](#147-board-settings)), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
+- **Online:** credentials (`kankan init --reauth`), kankan's account (manual step when the token's owner is an admin of the board: that is a person's token, and that person's answers would be ignored and never notified), board binding (`--takeover`; no board repair on a board bound to another clone), workflow lists (unarchive), the `kankan` list (unarchived or recreated) and its setting cards (missing ones created with the current value and help text; changed descriptions and checklists applied as in [14.7](#147-board-settings); checklist items synchronized with the adapters' lists, missing seeds asked (in a terminal, without `--no-fix` and `--offline`), seeds validated, ticked combinations checked (not with `--offline`), and the effective model and effort per role and agent type printed, from the last board read (refreshed first when online), [14.8](#148-model-and-effort)), labels (recreated; running launchers must be restarted, and a recreated `HOLD` does not restore which cards were held), `reconcile` issues (warning).
 
-`--no-fix` changes nothing. **Preflight:** `kankan up` (once, before starting anything, for the types that need a new agent) and `kankan agent` run the offline checks for the requested types and refuse with the manual steps if an agent CLI is missing or kankan cannot be imported; they create a missing skill link for the requested types but never re-point an existing one; the login check never blocks. When the integration branch is also the user branch (pre-1.2 setup) `kankan.integrationBranch` is not set, so the hook never blocks the user's own pushes.
+`--no-fix` changes nothing: it asks no question and writes nothing, on the board or locally. **Preflight:** `kankan up` (once, before starting anything, for the types that need a new agent) and `kankan agent` run the offline checks for the requested types and refuse with the manual steps if an agent CLI is missing or kankan cannot be imported; they create a missing skill link for the requested types but never re-point an existing one; the login check never blocks. When the integration branch is also the user branch (pre-1.2 setup) `kankan.integrationBranch` is not set, so the hook never blocks the user's own pushes.
 
 ## 16. CLI
 
@@ -416,7 +442,7 @@ Checks the machine and, inside a clone, the project; fixes what is safe and prin
 | `kankan up <type>=<n> …` | Ensures the requested number of agents, starting the missing ones. |
 | `kankan autostart enable <type>=<n> …` / `autostart disable` | Automatic start at boot via systemd user service. |
 | `kankan stop <seat>` | Exits after the current task. |
-| `kankan status` | Seats (alive, dead, free, unavailable), launcher state, current task, waiting cards and reason, board settings with their effective values and the cards in error ([14.7](#147-board-settings)). |
+| `kankan status` | Seats (alive, dead, free, unavailable), launcher state, current task, waiting cards and reason, board settings with their effective values and the cards in error ([14.7](#147-board-settings)), each seat's running model and effort ([14.8](#148-model-and-effort)). |
 | `kankan claims` | Card refs with phase, holder, age and branch. |
 | `kankan resolve <shortLink> [--done]` | Manual resolution of a blocked card ([12.4](#124-unresolvable-conflicts-and-block)). |
 | `kankan reconcile [--fix]` | [15.3](#153-kankan-reconcile---fix). |
@@ -521,10 +547,16 @@ Text output by default; with `--json` a fixed envelope with the fields `ok`, `st
 
 **Board settings**
 
-42. `init` creates the `kankan` list and one card per known setting with its value and help comment; `doctor` creates the cards of settings added later and restores a deleted card or list.
+42. `init` creates the `kankan` list and one card per known setting with its value and help text (first comment for description values, description for checklist values); `doctor` creates the cards of settings added later and restores a deleted card or list.
 43. A valid edit applies from the next task start, not to the running task, with one "applied" comment; an invalid edit keeps the last valid value, sets `Error` with one comment and a mention, and fixing the card removes the `Error`; an `Error` set by the user stays.
-44. Empty description, deleted card and card moved out of the list reset the setting to its default; an unknown name and duplicate keys get `Error`; an archived `kankan` list does not stop the agents.
+44. For a description value, empty description, deleted card and card moved out of the list reset the setting to its default (for a checklist value they keep the last valid value); an unknown name and duplicate keys get `Error`; an archived `kankan` list does not stop the agents.
 45. After more than 10 kankan comments on a setting card, the older ones are deleted; the help comment and comments by people stay. Several launchers on the same edit produce one comment.
+46. A card edited less than 10 seconds before the read is not judged; the settings are read every 30 seconds while a launcher runs, once per project however many launchers run.
+47. Model and effort checklists: they offer only the adapter's combinations; exactly one ticked combination per agent is valid; none, two, an unknown item, a missing or duplicated checklist are invalid with a comment naming the problem; `doctor` adds new adapter items unticked, and a removed ticked item makes the card invalid.
+48. Seeds: `init`/`doctor` ask for each missing seed with one keystroke, listing the combinations most powerful first, save it in `~/.config/kankan/agents.json` keeping the file's other content, and stop without a terminal; the cards are created with the seeds and `init`/`doctor` print them; an invalid seed is refused; a card invalid from the start runs with the seeds and keeps `Error`.
+49. A task whose role needs other values than the running agent's: the agent exits with the adapter's exit command (or signals if it ignores it), restarts with the new flags, keeps the seat and its cards, then gets the task; equal values cause no restart; the claim comment and `status` show the model and effort.
+50. Model check: a new combination, or a new CLI version, is checked once from an empty temporary directory without instruction files; a rejected combination sets `Error` on the setting card with the agent's message and that type takes no task of that role until another combination is ticked; a combination the adapter dropped keeps working while the check passes.
+51. Robustness: an invalid card fixed back to the value in force loses its `Error`; an adapter change re-judges unchanged cards; a slow read older than the last applied one is ignored; two `doctor` runs never build the same card twice and an interrupted build is completed by name; `doctor --no-fix` asks nothing and writes nothing; a restart re-checks `HOLD`, user moves and stop requests before the task is given.
 
 ## 19. Out of scope
 
