@@ -177,7 +177,33 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
                             f"worktree to one of your branches (its files fall behind when {cfg.integration_branch} "
                             "advances)")
         auditlog.append(paths, "init", board=cfg.board_id, registry=cfg.registry_id)
-    return cfg, warnings
+    from kankan import boardsettings, model_catalog, seeds, settings_setup
+    from kankan.adapters import adapter_types
+    from kankan.project import Project
+    types = adapter_types(paths)
+    for agent_type in types:
+        model_catalog.refresh(paths, agent_type)
+    adapters = seeds.ensure(paths, types, interactive=True, say=say)
+    project = Project.open(paths.repo)
+    if not project.cfg.settings_list:
+        snapshot = client.snapshot(cfg.board_id)
+        matches = [lst for lst in snapshot.lists.values() if lst.name == "kankan" and not lst.closed]
+        if matches and _yes(prompt("A list named 'kankan' exists on the board: adopt it? [Y/n] ")):
+            with project_lock(paths):
+                fresh = load_config(paths)
+                fresh.settings_list = matches[0].id
+                save_config(paths, fresh)
+            project.reload_config()
+        elif matches:
+            # Declining adoption creates a distinct list, whose ID is authoritative.
+            ident = client.create_list(cfg.board_id, 'kankan', exclude={lst.id for lst in snapshot.lists.values()}).id
+            with project_lock(paths):
+                fresh = load_config(paths)
+                fresh.settings_list = ident
+                save_config(paths, fresh)
+            project.reload_config()
+    settings_setup.ensure(project, adapters, say=say)
+    return project.reload_config(), warnings
 
 
 def account_warnings(client: TrelloClient, cfg: Config) -> List[str]:

@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List
 
-from kankan import clock, seats, workflow
+from kankan import boardconfig, boardsettings, clock, messages, modelcheck, seats, workflow
+from kankan.adapters import ModelEffort
 from kankan.seatstate import load_state
 
 
@@ -24,14 +25,42 @@ def status(project) -> dict:
         state = load_state(project.paths, name)
         seat_rows.append({"seat": name, "type": cfg.seats[name].type, "liveness": seats.liveness(project, name),
                           "launcher_state": state.launcher_state, "task": state.task,
-                          "stop_requested": state.stop_requested})
+                          "stop_requested": state.stop_requested, "running_selection": None})
+        # A launcher killed without its shutdown leaves the field behind: only a live seat runs an agent.
+        if seat_rows[-1]["liveness"] == "alive":
+            seat_rows[-1]["running_selection"] = state.running_selection
     types = {row["type"] for row in seat_rows if row["liveness"] == "alive"}
     snap = project.trello.snapshot(cfg.board_id)
     refs = workflow.card_refs(project)
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
     waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
                 "reason": reason} for card_id, reason in sorted(reasons.items(), key=lambda i: snap.cards[i[0]].pos)]
-    return {"seats": seat_rows, "waiting": waiting, "branches": branch_divergence(project)}
+    adapters = boardsettings.adapters_for(project.paths)
+    state = boardconfig.load(project.paths)
+    values = boardconfig._values(state, boardconfig.schema(adapters))
+    settings = {}
+    for role, value in values.items():
+        record = state.settings.get(role, {})
+        card_record = state.cards.get(record.get('card_id'), {})
+        checks = {}
+        for name, pair in value.items():
+            if name in adapters:
+                result = modelcheck.cached(adapters[name], pair)
+                checks[name] = {'status': result.status if result else 'unchecked',
+                                'message': result.message if result else '', 'retry_at': result.retry_at if result else None}
+        settings[role] = {'value': boardconfig.encode(value), 'card_id': record.get('card_id'),
+                          'structural_error': card_record.get('structural') or bool(record.get('invalid')),
+                          'probe_failures': card_record.get('probes', {}), 'checks': checks}
+    for row in waiting:
+        if row['reason'].startswith('model_check_'):
+            role = 'implementation' if snap.cards[row['card']].list_id == cfg.backlog else 'review'
+            row['model_checks'] = settings[role]['checks']
+    available = cfg.settings_list in snap.lists and not snap.lists[cfg.settings_list].closed
+    return {"seats": seat_rows, "waiting": waiting, "branches": branch_divergence(project), 'settings': settings,
+            'settings_warning': None if available else messages.SETTINGS_MISSING_LIST,
+            'settings_errors': [{'card_id': ident, 'name': record.get('key'), 'structural': record.get('structural', []),
+                                 'probe_failures': record.get('probes', {})}
+                                for ident, record in state.cards.items() if record.get('invalid')]}
 
 
 def branch_divergence(project) -> dict:
@@ -58,6 +87,9 @@ def status_text(data: dict) -> str:
     for row in data["seats"]:
         task = row["task"]
         task_text = f"{task['kind']} {task['short']}" if task else "-"
+        running = row.get('running_selection')
+        if running:
+            task_text += messages.STATUS_RUNNING.format(**running)
         stop = " (stop requested)" if row["stop_requested"] else ""
         lines.append(f"  {row['seat']:<10} {row['liveness']:<11} {row['launcher_state']:<13} {task_text}{stop}")
     branches = data.get("branches") or {}
@@ -69,6 +101,17 @@ def status_text(data: dict) -> str:
         lines.append("  (none)")
     for row in data["waiting"]:
         lines.append(f"  {row['short']}  {row['reason']:<16} {row['title']}")
+    if data.get('settings'):
+        lines.append(messages.STATUS_SETTINGS)
+        for role, record in data['settings'].items():
+            value = {name: ModelEffort(**pair) for name, pair in record['value'].items()}
+            lines.append(messages.STATUS_SETTING.format(role=role, values=boardconfig.display(value),
+                         error=' (Error)' if record['structural_error'] or record['probe_failures'] else ''))
+            for name, check in record['checks'].items():
+                if check['status'] != 'passed':
+                    lines.append(f"    {name}: {check['status']} {check['message']}" + (f" (retry at {check['retry_at']})" if check['retry_at'] else ''))
+        if data.get('settings_warning'):
+            lines.append('  ' + data['settings_warning'])
     return "\n".join(lines)
 
 
@@ -111,7 +154,7 @@ def _mismatch_memory(project) -> dict:
     return read_json(project.paths.kankan_dir / "reconcile.json", {}) or {}
 
 
-def reconcile(project, fix: bool = False) -> List[Issue]:
+def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]:
     """Report inconsistencies (§15.3); with ``fix`` repair only the certain cases."""
     cfg = project.reload_config()
     issues: List[Issue] = []
@@ -151,7 +194,8 @@ def reconcile(project, fix: bool = False) -> List[Issue]:
             if key in memory:
                 issues.append(Issue("phase_list_mismatch", card_id,
                                     f"phase {meta.get('phase')} expects list {target}, card is in {card.list_id}"))
-    atomic_write_json(project.paths.kankan_dir / "reconcile.json", seen_now)
+    if record:
+        atomic_write_json(project.paths.kankan_dir / "reconcile.json", seen_now)
     seat_lists = cfg.seat_lists()
     for card in snap.cards.values():
         if card.list_id in seat_lists and card.id not in refs:

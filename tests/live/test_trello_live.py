@@ -63,3 +63,27 @@ def test_live_attachments(live_board, run_prefix):
     assert buf.getvalue() == content
     with pytest.raises(DownloadTooLarge):
         client.download(path, io.BytesIO(), 4, clock.monotonic() + 30)
+
+
+def test_live_settings_checklist_and_comment_deletion(live_board, run_prefix):
+    client, board, created = live_board
+    lst = client.create_list(board['id'], f'{run_prefix} settings')
+    created['lists'].append(lst.id)
+    card = client.create_card(lst.id, f'{run_prefix} implementation')
+    created['cards'].append(card.id)
+    checklist = client.create_checklist(card.id, 'codex')
+    item = client.create_check_item(checklist.id, 'model · high', True, 1024)
+    read = client.settings_cards(lst.id)
+    assert read.list_available and read.response_date is not None
+    assert read.cards[0].checklists[0].items[0].state == 'complete'
+    snap = client.snapshot(board['id'])
+    assert any(c.id == checklist.id for c in snap.cards[card.id].checklists)
+    client.move_check_item(card.id, item.id, 512)
+    comment = client.add_comment(card.id, 'settings feedback', f'{run_prefix}-settings')
+    client.delete_comment(card.id, comment.id)
+    assert all(c.id != comment.id for c in client.comments(card.id))
+    client.delete_check_item(checklist.id, item.id)
+    client.archive_list(lst.id)
+    assert not client.settings_cards(lst.id).list_available
+    client.unarchive_list(lst.id)
+    assert client.settings_cards(lst.id).list_available

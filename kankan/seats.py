@@ -188,11 +188,12 @@ def _comment_recovery(project, seat: str, seat_oid: str) -> None:
             project.log("comment_failed", card=value.meta.get("card"), error=err.message)
 
 
-def release(project, lease: Lease) -> None:
+def release(project, lease: Lease, *, retain: bool = False) -> None:
     """Conditionally delete the seat ref, then release the flock."""
     try:
         with project_lock(project.paths):
-            project.refs.delete(seat_ref(lease.seat), lease.seat_oid)
+            if not retain:
+                project.refs.delete(seat_ref(lease.seat), lease.seat_oid)
             project.log("seat_released", seat=lease.seat, session=lease.session)
     finally:
         _release_fd(lease.fd)
@@ -268,6 +269,11 @@ def _recorded_alive(proc: dict) -> List[tuple]:
         entry = proc.get(name)
         if isinstance(entry, dict) and procutil.alive(entry.get("pid"), entry.get("start")):
             result.append((entry["pid"], entry.get("start")))
+    for entry in proc.get("unavailable") or []:
+        # Without a start time the identity cannot be checked: a reused pid must never be signalled.
+        if isinstance(entry, dict) and entry.get("start") is not None and procutil.alive(entry.get("pid"), entry["start"]) \
+                and (entry["pid"], entry["start"]) not in result:
+            result.append((entry["pid"], entry["start"]))
     return result
 
 
@@ -298,9 +304,11 @@ def recover_dead(project, seat: str, kill_alive: bool = False) -> List[int]:
                    if pid not in exclude]
         if escaped:
             project.log("seat_escapees", seat=seat, pids=escaped)
+    entries = [{"pid": p, "start": start} for p in survivors if (start := procutil.start_time(p)) is not None]
+    survivors = [entry["pid"] for entry in entries]  # a survivor without a start time has exited meanwhile
     if survivors:
         data = read_proc(project, seat) or {}
-        data["unavailable"] = [{"pid": p, "start": procutil.start_time(p)} for p in survivors]
+        data["unavailable"] = entries
         atomic_write_json(_proc_path(project, seat), data)
         project.log("seat_unavailable", seat=seat, pids=survivors)
     return survivors
@@ -325,7 +333,7 @@ def _liveness(project, seat: str) -> str:
             return "free"
         proc = read_proc(project, seat) or {}
         for entry in proc.get("unavailable") or []:
-            if procutil.alive(entry.get("pid"), entry.get("start")):
+            if isinstance(entry, dict) and entry.get("start") is not None and procutil.alive(entry.get("pid"), entry["start"]):
                 return "unavailable"
         return "dead"
     finally:

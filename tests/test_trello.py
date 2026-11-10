@@ -346,3 +346,49 @@ def test_download_malformed_redirect_is_error(fake, board, virtual_time, locatio
     with pytest.raises(KankanError) as exc:
         _download(fake, att)
     assert exc.value.status == Status.TRELLO_ERROR
+
+
+def test_settings_transport_round_trip(fake_trello):
+    from kankan.trello import TrelloClient
+    from tests.fakes.fake_trello import KEY, TOKEN
+    fake = fake_trello
+    board = fake.add_board()
+    lst = fake.add_list(board['id'], 'settings')
+    card = fake.add_card(lst['id'], 'implementation')
+    client = TrelloClient(KEY, TOKEN, base_url=fake.url, timeout=.2)
+    fake.inject('POST', r'/1/cards/.*/checklists$', 'late_success')
+    check = client.create_checklist(card['id'], 'claude')
+    fake.inject('POST', r'/1/checklists/.*/checkItems$', 'late_success')
+    item = client.create_check_item(check.id, 'sonnet · high', True, 1024)
+    snap = client.snapshot(board['id'])
+    assert snap.response_date is not None
+    assert snap.cards[card['id']].checklists[0].items[0].state == 'complete'
+    read = client.settings_cards(lst['id'])
+    assert read.list_available and read.response_date is not None
+    assert read.cards[0].checklists[0].items[0].name == 'sonnet · high'
+    assert len(fake.state['checklists']) == 1
+    client.move_check_item(card['id'], item.id, 512)
+    assert client.settings_cards(lst['id']).cards[0].checklists[0].items[0].pos == 512
+    client.delete_check_item(check.id, item.id)
+    client.delete_check_item(check.id, item.id)
+    comment = client.add_comment(card['id'], 'feedback', 'transport-test')
+    client.delete_comment(card['id'], comment.id)
+    client.delete_comment(card['id'], comment.id)
+    assert client.comments(card['id']) == []
+    client.archive_list(lst['id'])
+    assert not client.settings_cards(lst['id']).list_available
+    client.unarchive_list(lst['id'])
+    assert client.settings_cards(lst['id']).list_available
+    assert not client.settings_cards('missing').list_available
+
+
+def test_settings_missing_or_bad_server_date(fake_trello):
+    from kankan.trello import TrelloClient
+    from tests.fakes.fake_trello import KEY, TOKEN
+    board = fake_trello.add_board()
+    lst = fake_trello.add_list(board['id'], 'settings')
+    client = TrelloClient(KEY, TOKEN, base_url=fake_trello.url)
+    fake_trello.response_date = 'bad date'
+    assert client.settings_cards(lst['id']).response_date is None
+    fake_trello.response_date = None
+    assert client.snapshot(board['id']).response_date is None

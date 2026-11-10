@@ -16,7 +16,7 @@ def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    for var in ("KANKAN_FAULT", "KANKAN_TRELLO_KEY", "KANKAN_TRELLO_TOKEN", "KANKAN_SEAT", "KANKAN_SESSION", "KANKAN_PROJECT"):
+    for var in ("KANKAN_FAULT", "KANKAN_TRELLO_KEY", "KANKAN_TRELLO_TOKEN", "KANKAN_SEAT", "KANKAN_SESSION", "KANKAN_PROJECT", "CODEX_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.invalid")
@@ -31,6 +31,18 @@ def isolated_home(tmp_path, monkeypatch):
     import types
     from kankan import init as init_mod
     monkeypatch.setattr(init_mod, "clock", types.SimpleNamespace(sleep=lambda seconds: None))
+    # Explicit offline choices; runtime never supplies implicit seeds.
+    import json
+    import sys
+    overrides = home / ".config/kankan/agents.json"
+    overrides.parent.mkdir(parents=True)
+    overrides.write_text(json.dumps({agent_type: {
+        "version_command": [sys.executable, "-c", "print('fake-v1')"],
+        "model_check": [sys.executable, "-c", "import sys; sys.exit(0)", "{model}", "{effort}"],
+        **({"models_from": {"command": [sys.executable, "-c", "print(chr(123)+chr(125))"], "file": str(home / 'absent-models.json')}} if agent_type == 'codex' else {}),
+        "seed": {
+        role: {"model": model, "effort": "high"} for role in ("implementation", "review")}}
+        for agent_type, model in (("claude", "sonnet"), ("codex", "gpt-6.1-sol"))}))
     return home
 
 

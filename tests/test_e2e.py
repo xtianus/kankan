@@ -1,6 +1,7 @@
 """End-to-end smoke on the fake stack: init, up, implement, review, integrate, Done."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,6 +41,12 @@ def test_card_goes_from_backlog_to_done(git_repo, fake_trello, monkeypatch, agen
     main_before = git(git_repo, "rev-parse", "main")
     project = Project.open(git_repo)
     card = fake.add_card(cfg.backlog, "Add the feature")
+    # Both seats become idle together once their model checks pass: let claude claim first, as scripted.
+    agents_cmd.up(project, {"claude": 1})
+    def claimed_by_claude():
+        meta = (project.refs.read(card_ref(card["id"])) or SimpleNamespace(meta={})).meta
+        return "claude-1" in (meta.get("owner"), meta.get("implementer"))
+    assert wait_for(claimed_by_claude, timeout=60)
     agents_cmd.up(project, {"claude": 1, "codex": 1})
     assert wait_for(lambda: fake.card_list(card["id"]) == cfg.done and project.refs.read(card_ref(card["id"])) is None,
                     timeout=120)

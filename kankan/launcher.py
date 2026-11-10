@@ -14,8 +14,8 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from kankan import cards, clock, labels, messages, procutil, seats, workflow
-from kankan.adapters import Adapter, Classification, classify, load_adapter
+from kankan import boardconfig, boardsettings, cards, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
+from kankan.adapters import Adapter, Classification, ModelEffort, classify, load_adapter, start_command
 from kankan.config import check_lists, check_registry
 from kankan.errors import KankanError, Status
 from kankan.project import Project
@@ -65,6 +65,24 @@ class Launcher:
         self.resume_label: Optional[str] = None
         self.last_screen = ""
         self.next_lease_check = 0.0
+        self.adapters = {}
+        self.versions = {}
+        self.version_due = {}
+        self.version_known = set()
+        self.catalogs = {}
+        self.probes = {}
+        self.restart = None
+        self.running_pair = None
+        self.spawning_pair = None
+        self.start_deadline = None
+        self.unsafe = False
+        self.assignment_version_pair = None
+        self.prepared = None  # claimed task whose activation has not succeeded yet (keeps its pinned pair)
+        self.next_activation = 0.0
+        self.next_flush = 0.0
+        self.exit_now = False
+        self.refresh_error = None
+        self.recorded_checks = {}
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -104,6 +122,7 @@ class Launcher:
     # ------------------------------------------------------------------ startup
     def start(self) -> None:
         """§8.3: checks, seat occupation, session rename, agent start."""
+        procutil.set_child_subreaper()
         snap = self.project.trello.snapshot(self.cfg.board_id)
         check_registry(self.cfg, snap.desc)
         check_lists(self.cfg, snap.lists)
@@ -112,6 +131,7 @@ class Launcher:
         pids = {"launcher": os.getpid(), "supervisor": _supervisor_pid(), "sid": seats.pane_sid()}
         self.lease = seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
         self.project.reload_config()
+        self.set_state('starting')
         if main_wts:
             self.log("main_checked_out", paths=[str(p) for p in main_wts])
         self._resume_block_journal()
@@ -128,7 +148,11 @@ class Launcher:
             self.tmux.set_option(wanted, "@kankan_repo", str(self.project.paths.repo))
         self._drop_interrupted_forward()
         update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
-        self.spawn_agent()
+        update_state(self.project.paths, self.lease.seat, lambda state: (
+            setattr(state, 'planned_restart', None), setattr(state, 'running_selection', None)))
+        self.check_start_deadline = clock.monotonic() + self.adapter.model_check_timeout_seconds
+        boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap), boardsettings.adapters_for(self.project.paths))
+        self.settings_step()
 
     def _resume_block_journal(self) -> None:
         state = load_state(self.project.paths, self.lease.seat)
@@ -149,7 +173,7 @@ class Launcher:
         if update_state(self.project.paths, self.lease.seat, drop):
             self.log("forward_dropped")
 
-    def spawn_agent(self) -> None:
+    def spawn_agent(self, pair: ModelEffort) -> None:
         worktree = self.project.paths.seat_worktree(self.lease.seat)
         seats.write_agent_file(self.project, self.lease.seat, self.lease.session, worktree)
         env = dict(os.environ)
@@ -167,9 +191,220 @@ class Launcher:
             for sig in (signal.SIGINT, signal.SIGTSTP, signal.SIGQUIT):
                 signal.signal(sig, signal.SIG_DFL)
 
-        self.agent = subprocess.Popen(self.adapter.command, cwd=str(worktree), env=env, preexec_fn=child_setup)
+        command = start_command(self.adapter, pair)
+        if self.pane and os.isatty(1):
+            # The old agent has exited; discard its visible ready prompt before watching the replacement.
+            os.write(1, b"\x1b[2J\x1b[H")
+        self.agent = subprocess.Popen(command, cwd=str(worktree), env=env, preexec_fn=child_setup)
+        self.spawning_pair = pair
+        self.start_deadline = clock.monotonic() + self.adapter.start_timeout_seconds
+        self.ready_since = self.unknown_since = None
+        self.known_answered = None
+        self.inactivity_reported = False
         seats.write_proc(self.project, self.lease.seat, agent=self.agent.pid)
-        self.log("agent_started", pid=self.agent.pid, command=self.adapter.command)
+        self.log("agent_started", pid=self.agent.pid, command=command)
+
+    def own_children(self):
+        objects = [self.agent, *(p.process for p in self.versions.values()), *(p.process for p in self.catalogs.values()),
+                   *(p.process for _, p in self.probes.values())]
+        return {p.pid for p in objects if p is not None} | modelcheck.poll_retired()
+
+    def settings_step(self):
+        self.adapters = boardsettings.adapters_for(self.project.paths)
+        self.adapter = self.adapters[self.type]
+        requests = boardsettings.poll(self.project, self.adapters)
+        state = boardconfig.load(self.project.paths)
+        values = boardconfig._values(state, boardconfig.schema(self.adapters))
+        if not requests:
+            requests = [boardconfig.CheckRequest(role, name, pair, state.settings.get(role, {}).get('revision', 0))
+                        for role, value in values.items() for name, pair in value.items()]
+        now = clock.monotonic()
+        for name, pending in list(self.versions.items()):
+            version = pending.poll()
+            if version is not None:
+                self.versions.pop(name)
+                self.version_due[name] = now + self.adapters[name].model_check_retry_seconds
+                if version:
+                    self.version_known.add(name)
+                    catalog = model_catalog.start_refresh(self.project.paths, name, version)
+                    if catalog:
+                        self.catalogs[name] = catalog
+                else:
+                    self.version_known.discard(name)
+        for name, pending in list(self.catalogs.items()):
+            if pending.poll():
+                self.catalogs.pop(name)
+                self.adapters[name] = load_adapter(self.project.paths, name, read_only=True)
+        for name, adapter in self.adapters.items():
+            if name not in self.versions and now >= self.version_due.get(name, 0):
+                self.versions[name] = modelcheck.start_version(adapter)
+        pair = values.get('implementation', {}).get(self.type)
+        # A claim that needs a restart gets a fresh polled CLI version before it is eligible.
+        if self.running_pair and self.state == 'idle':
+            changed = tuple(sorted((r, p.model, p.effort) for r, value in values.items()
+                                   if (p := value.get(self.type)) is not None and p != self.running_pair))
+            if changed and changed != self.assignment_version_pair and self.type not in self.versions:
+                self.assignment_version_pair = changed
+                self.versions[self.type] = modelcheck.start_version(self.adapter)
+        for key, (request, pending) in list(self.probes.items()):
+            result = pending.poll()
+            if result is not None:
+                boardsettings.record_check(self.project, request, result)
+                self.probes.pop(key)
+        for request in requests:
+            name = request.agent_type
+            if name not in self.version_known or name in self.versions or name in self.catalogs:
+                continue
+            adapter = self.adapters[name]
+            result = modelcheck.cached(adapter, request.pair)
+            if result is None:
+                self.record_cached(request, modelcheck.CheckResult('unchecked', modelcheck._version(adapter)), now)
+            if result and result.status in ('passed', 'failed'):
+                self.record_cached(request, result, now)
+                continue
+            key = (name, request.pair.model, request.pair.effort, modelcheck._version(adapter))
+            if key not in self.probes:
+                pending = modelcheck.start(adapter, request.pair)
+                if pending:
+                    self.probes[key] = (request, pending)
+        if state.pending:
+            boardsettings.drain_actions(self.project)
+
+    def record_cached(self, request, result, now):
+        """Record an unchanged cached result at most once per settings poll interval (each record takes the project lock)."""
+        key = (request.role, request.agent_type, request.pair, request.revision)
+        value = (result.status, result.version, result.message)
+        previous = self.recorded_checks.get(key)
+        if previous and previous[0] == value and now - previous[1] < self.cfg.settings_poll_seconds:
+            return
+        boardsettings.record_check(self.project, request, result)
+        self.recorded_checks[key] = (value, now)
+
+    def refresh_settings(self) -> None:
+        """Reload local configuration and poll the board settings; an error never ends a running task."""
+        try:
+            self.project.reload_config()
+            self.settings_step()
+        except KankanError as err:
+            if (err.status, err.message) != self.refresh_error:
+                self.log("settings_refresh_failed", status=err.status.value, error=err.message)
+            self.refresh_error = (err.status, err.message)
+            if err.status == Status.CONFIG_ERROR:
+                self.stop_after_task = True  # as a configuration error in a tick: stop once the seat is idle
+            return
+        self.refresh_error = None
+
+    def startup_step(self, cls):
+        if self.agent is None:
+            roles = ['implementation', 'review']
+            refs = workflow.card_refs(self.project)
+            held = [v.meta.get('phase') for v in refs.values() if v.meta.get('owner') == self.lease.seat and v.meta.get('phase') in ('impl', 'review')]
+            if held:
+                roles = ['review' if 'review' in held else 'implementation']
+            if self.type in self.version_known and self.type not in self.versions and self.type not in self.catalogs:
+                for role in roles:
+                    pair = boardconfig.effective(self.project.paths, role).get(self.type)
+                    if pair and not boardsettings.role_block(self.project, self.type, role, pair):
+                        self.spawn_agent(pair)
+                        return
+            pending = self.type in self.versions or self.type in self.catalogs or any(key[0] == self.type for key in self.probes)
+            if not pending or clock.monotonic() >= self.check_start_deadline:
+                self.failed_start('no verified model/effort combination is available')
+            return
+        if self.agent.poll() is not None:
+            self.failed_start('agent exited before readiness')
+        if self.start_deadline is not None and clock.monotonic() >= self.start_deadline:
+            self.failed_start('agent did not become ready before its startup deadline')
+        if cls.state == 'ready':
+            self.agent_ready()
+
+    def agent_ready(self):
+        self.running_pair = self.spawning_pair
+        update_state(self.project.paths, self.lease.seat, lambda state: (
+            setattr(state, 'running_selection', self.running_pair.to_dict()), setattr(state, 'planned_restart', None)))
+        state = load_state(self.project.paths, self.lease.seat)
+        for card_id, causes in state.label_causes.items():
+            if causes.get(self.cfg.label_error, {}).get('cause') == 'startup':
+                try:
+                    labels.clear_label(self.project, card_id, self.cfg.label_error, 'startup', self.lease.seat)
+                except KankanError as err:
+                    self.log("label_failed", error=err.message)
+        self.set_state('idle')
+        self.next_tick = 0.0
+
+    def failed_start(self, reason, survivors=None):
+        if survivors:
+            self.mark_unavailable(survivors)
+        prepared = self.prepared
+        pair = ModelEffort(prepared['model'], prepared['effort']) if prepared else self.spawning_pair
+        if prepared and pair:
+            try:
+                card = self.project.trello.card(prepared['card'])
+                if card:
+                    text = messages.MODEL_START_FAILED.format(type=self.type, model=pair.model, effort=pair.effort, reason=reason)
+                    if self.cfg.label_error not in card.label_ids:
+                        labels.set_label(self.project, card.id, self.cfg.label_error, 'startup', self.lease.seat,
+                                         comment=text, op_id='startup-' + prepared['ref_oid'])
+                    else:
+                        self.project.trello.comment_once(card.id, text, 'startup-' + prepared['ref_oid'])
+            except KankanError as err:
+                self.log("label_failed", error=err.message)
+        raise KankanError(Status.NEEDS_ACTION, messages.MODEL_START_UNAVAILABLE.format(reason=reason))
+
+    def begin_restart(self, prepared):
+        self.prepared = prepared
+        self.restart = {'phase': 'exit', 'pid': self.agent.pid, 'start': procutil.start_time(self.agent.pid),
+                        'targets': procutil.agent_tree(self.agent.pid, procutil.start_time(self.agent.pid),
+                            keep=self.adapter.restart_keep, own=self.own_children())}
+        update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, 'planned_restart', dict(prepared)))
+        self.set_state('starting')
+
+    def restart_step(self, cls):
+        restart = self.restart
+        now = clock.monotonic()
+        if restart['phase'] == 'ready':
+            if self.agent.poll() is not None:
+                self.failed_start('replacement agent exited before readiness')
+            if now >= self.start_deadline:
+                self.failed_start('replacement agent did not become ready before its startup deadline')
+            if cls.state == 'ready':
+                self.agent_ready()
+                self.restart = None
+                self.activate(cls)  # a transient failure keeps self.prepared; idle() retries it
+                return True
+            return False
+        if self.agent.poll() is None:
+            if restart['phase'] == 'exit':
+                if self.can_write(cls):
+                    self.paste(self.adapter.exit_command)
+                    restart.update(phase='wait_exit', deadline=now+self.adapter.exit_timeout_seconds)
+                return False
+            if now >= restart.get('deadline', now+1):
+                sig = signal.SIGKILL if restart['phase'] == 'term' else signal.SIGTERM
+                if procutil.alive(restart['pid'], restart['start']):
+                    os.kill(restart['pid'], sig)
+                if restart['phase'] == 'kill':
+                    self.failed_start('old agent survived termination', [restart['pid']])
+                restart.update(phase='kill' if sig == signal.SIGKILL else 'term', deadline=now+(2 if sig == signal.SIGKILL else seats.KILL_GRACE))
+            return False
+        targets = dict(restart['targets'])
+        targets.update(procutil.agent_tree(restart['pid'], restart['start'], keep=self.adapter.restart_keep, own=self.own_children()))
+        live = [(pid, start) for pid, start in targets.items() if pid != restart['pid'] and procutil.alive(pid, start)]
+        restart['targets'] = list(targets.items())
+        if live:
+            if restart['phase'] not in ('cleanup_term', 'cleanup_kill'):
+                procutil._signal_all([pid for pid, _ in live], signal.SIGTERM)
+                restart.update(phase='cleanup_term', deadline=now+seats.KILL_GRACE)
+            elif now >= restart['deadline']:
+                if restart['phase'] == 'cleanup_kill':
+                    self.failed_start('agent descendants survived termination', [pid for pid, _ in live])
+                procutil._signal_all([pid for pid, _ in live], signal.SIGKILL)
+                restart.update(phase='cleanup_kill', deadline=now+2)
+            return False
+        pair = ModelEffort(self.prepared['model'], self.prepared['effort'])
+        self.spawn_agent(pair)
+        restart['phase'] = 'ready'
+        return False
 
     def trust_allowed(self) -> bool:
         worktree = os.path.realpath(self.project.paths.seat_worktree(self.lease.seat))
@@ -181,7 +416,7 @@ class Launcher:
         try:
             self.start()
             while True:
-                if self.agent.poll() is not None:
+                if self.agent is not None and self.agent.poll() is not None and self.state != "starting":
                     self.log("agent_exited", code=self.agent.returncode)
                     return 0
                 if self.step():
@@ -190,37 +425,64 @@ class Launcher:
         finally:
             self.shutdown()
 
+    def mark_unavailable(self, survivors):
+        from kankan.config import atomic_write_json
+        data = seats.read_proc(self.project, self.lease.seat) or {}
+        # A survivor without a start time has exited: recording it would let pid reuse pass for it.
+        entries = [{'pid': pid, 'start': start} for pid in set(survivors) if (start := procutil.start_time(pid)) is not None]
+        if not entries:
+            return
+        data['unavailable'] = entries
+        atomic_write_json(self.project.paths.seats_dir / f'{self.lease.seat}.proc.json', data)
+        self.unsafe = True
+
     def shutdown(self) -> None:
-        if self.agent is not None and self.agent.poll() is None:
-            self.agent.terminate()
-            try:
-                self.agent.wait(5)
-            except subprocess.TimeoutExpired:
-                self.agent.kill()
-        sid = os.getsid(0)
+        for pending in [*self.versions.values(), *self.catalogs.values(), *(pending for _, pending in self.probes.values())]:
+            pending.cancel()
         if self.lease is not None:
+            # Stop and failed-start paths obey the same descendant invariant as a completed restart.
+            pid = self.agent.pid if self.agent is not None else 0
+            started = procutil.start_time(pid) if pid else 0
+            survivors = procutil.terminate_agent_tree(pid, started, grace=seats.KILL_GRACE,
+                keep=self.adapter.restart_keep, own=self.own_children())
+            if self.agent is not None:
+                self.agent.poll()  # Popen alone owns this exit status.
+            sid = os.getsid(0)
             if sid == seats.pane_sid():
-                survivors = procutil.terminate_session(sid, {os.getpid(), os.getppid()}, grace=seats.KILL_GRACE)
-                if survivors:
-                    self.log("agent_leftovers", pids=survivors)
+                survivors += procutil.terminate_session(sid, {os.getpid(), os.getppid()} | self.own_children(), grace=seats.KILL_GRACE)
+            if survivors:
+                self.log('agent_leftovers', pids=survivors)
+                self.mark_unavailable(survivors)
             try:
                 self.set_state("stopped")
-            except Exception:  # noqa: BLE001 - shutdown must release the seat
+                update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, 'running_selection', None))
+            except Exception:  # noqa: BLE001 - shutdown must release the seat flock
                 pass
-            seats.release(self.project, self.lease)
+            seats.release(self.project, self.lease, retain=self.unsafe)
             self.lease = None
+
 
     def step(self) -> bool:
         """One pass: returns True when the launcher must exit."""
+        if self.exit_now:
+            return True
+        self.refresh_settings()
         if self.lease_revoked():
             return True
-        cls = self.screen()
-        if self.answer_dialogs(cls):
-            return False
+        procutil.reap_adopted(self.own_children())
+        if self.state == 'starting' and self.stop_requested():
+            self.release_unsent(self.prepared)
+            return True
+        cls = self.screen() if self.agent is not None or self.state != 'starting' else Classification('unknown')
+        dialog = self.answer_dialogs(cls)
         if self.state == "starting":
-            if cls.state == "ready":
-                self.set_state("idle")
-                self.next_tick = 0.0
+            if self.restart:
+                self.restart_step(cls)
+            else:
+                self.startup_step(cls)
+            return self.exit_now
+        if dialog:
+            self.periodic_board_check()
             return False
         self.track_limit(cls)
         if self.state == "limited":
@@ -277,10 +539,16 @@ class Launcher:
     def idle(self, cls: Classification) -> bool:
         if self.pending_writes:
             self.flush_assignment(cls)
-            return False
+            return self.exit_now
         if self.stop_requested():
+            self.release_unsent(self.prepared)
             self.log("stop_honoured")
             return True
+        if self.prepared is not None:
+            # A claimed task never gets a new tick: it would be chosen again as a resume with the current pair.
+            if clock.monotonic() >= self.next_activation:
+                self.activate(cls)
+            return self.exit_now
         now = clock.monotonic()
         if self.cfg.idle_exit_minutes and now - self.idle_since >= self.cfg.idle_exit_minutes * 60:
             self.log("idle_exit")
@@ -289,7 +557,10 @@ class Launcher:
             return False
         self.next_tick = now + self.cfg.poll_seconds
         try:
-            task = workflow.tick(self.project, self.lease)
+            if self.type in self.versions or self.type in self.catalogs:
+                self.next_tick = now  # Check again after the nonblocking preparation completes.
+                return False
+            task = workflow.tick(self.project, self.lease, defer_assignment=True)
         except KankanError as err:
             self.log("tick_failed", status=err.status.value, error=err.message)
             if err.status == Status.CONFIG_ERROR:
@@ -302,18 +573,85 @@ class Launcher:
             self.gc_resume_labels()
         if task is None:
             return False
+        pair = ModelEffort(task['model'], task['effort'])
+        self.prepared = task
+        if pair != self.running_pair:
+            self.begin_restart(task)
+            return False
+        self.activate(cls)
+        return self.exit_now
+
+    def activate(self, cls: Classification) -> None:
+        """Activate ``self.prepared``, with the error handling of a tick (retry, exit on NOT_OWNER/CONFIG_ERROR)."""
+        prepared = self.prepared
+        try:
+            task = workflow.activate_task(self.project, self.lease, prepared)
+        except KankanError as err:
+            self.log("activation_failed", status=err.status.value, error=err.message)
+            if err.status in (Status.CONFIG_ERROR, Status.NOT_OWNER):
+                self.stop_after_task = self.stop_after_task or err.status == Status.CONFIG_ERROR
+                self.prepared = None
+                self.exit_now = True
+            else:
+                self.next_activation = clock.monotonic() + self.cfg.poll_seconds
+            return
+        self.prepared = None
+        if task is not None:
+            self.assign(task, cls)
+        elif self.stop_requested():
+            self.release_unsent(prepared)
+
+    def release_unsent(self, prepared: Optional[dict]) -> None:
+        """A stop arrived before the prompt: give back a fresh, untouched claim (others stay held for a resume)."""
+        self.prepared = None
+        if not prepared:
+            return
+        try:
+            if workflow.release_unsent(self.project, self.lease, prepared):
+                self.log("stop_yield", card=prepared.get('card'))
+        except KankanError as err:
+            self.log("stop_yield_failed", status=err.status.value, error=err.message)
+
+    def assign(self, task, cls):
         self.task = task
         self.ready_since = None
         self.unknown_since = None
         self.inactivity_reported = False
         self.pending_writes = [self.adapter.new_conversation, messages.PROMPT]
         self.flush_assignment(cls)
-        return False
 
     def flush_assignment(self, cls: Classification) -> None:
         """Send the new-conversation command, then the prompt, each only when the pane is ready."""
         if not self.can_write(cls):
             return
+        now = clock.monotonic()
+        if now < self.next_flush:
+            return
+        stopping = self.stop_requested()
+        try:
+            active = None if stopping else workflow.refresh_task(self.project, self.lease, self.task)
+        except KankanError as err:
+            self.log('assignment_recheck_failed', error=err.message)
+            if err.status not in (Status.CONFIG_ERROR, Status.NOT_OWNER):
+                self.next_flush = now + self.cfg.poll_seconds  # retried at the tick's pace
+                return
+            self.stop_after_task = True
+            active = None
+        if active is None:
+            if stopping:
+                self.release_unsent(self.task)
+            task_id = self.task.get('id') if self.task else None
+            def cancel(state):
+                if state.task and state.task.get('id') == task_id:
+                    state.task = None
+                    state.signal = None
+            update_state(self.project.paths, self.lease.seat, cancel)
+            self.pending_writes = []
+            self.task = None
+            self.state = 'idle'
+            self.next_tick = 0.0
+            return
+        self.task = active
         text = self.pending_writes.pop(0)
         self.paste(text)
         if not self.pending_writes:
@@ -418,6 +756,8 @@ class Launcher:
         try:
             snap = self.project.trello.snapshot(self.cfg.board_id)
             check_registry(self.cfg, snap.desc)
+            boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap), self.adapters or boardsettings.adapters_for(self.project.paths))
+            boardsettings.drain_actions(self.project)
         except KankanError as err:
             if err.status == Status.CONFIG_ERROR:
                 self.registry_lost()

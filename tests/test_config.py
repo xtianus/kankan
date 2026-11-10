@@ -61,7 +61,7 @@ def test_invalid_attachment_max_bytes_config_error(git_repo, value):
 def test_credentials_lookup_order(git_repo, tmp_path, monkeypatch, isolated_home):
     paths = Paths.discover(git_repo)
     user = isolated_home / ".config" / "kankan" / "credentials"
-    user.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True, exist_ok=True)
     user.write_text("kankan.trello.key=ukey\nkankan.trello.token=utok\n")
     os.chmod(user, 0o600)
     assert load_credentials(paths, make_cfg()) == ("ukey", "utok")

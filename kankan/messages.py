@@ -68,3 +68,29 @@ FAIL = "kankan: {seat} needs help: {text}"
 
 ADMIN_RELEASED = "kankan: an administrator released this card (`kankan release --force`); it stays where it is."
 ADMIN_SEAT_RECOVERED = "kankan: an administrator recovered seat {seat} (`kankan seat recover`); the seat keeps this card."
+
+# Board settings and model selection.
+SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set seeds for both roles in ~/.config/kankan/agents.json.'
+SEEDS_INVALID = 'Invalid {type} {role} seed; choose one of the adapter model/effort combinations.'
+SEEDS_QUESTION = 'Choose the {type} {role} model and effort (one key):'
+SEEDS_STALE = 'The saved {type} {role} seed {model} · {effort} is no longer in the agent\'s model list: choose another.'
+SEEDS_SAVED = '{role}: {type} {pair} (seed saved in {path})'
+SETTINGS_APPLIED = 'applied: `{old}` → `{new}`, from the next task'
+SETTINGS_RESET = 'applied: reset to default `{default}`'
+SETTINGS_FIXED = 'fixed; still using `{current}`'
+SETTINGS_INVALID = '{problem}; still using `{current}`'
+SETTINGS_UNKNOWN = 'unknown setting `{name}`'
+SETTINGS_DUPLICATE = 'duplicate setting `{name}`'
+SETTINGS_HELP = 'Tick exactly one model · effort per agent checklist. Changes apply from the next task; invalid edits keep the last valid selection.'
+SETTINGS_CREATED = '{role}: {values} ({source}; change seeds in agents.json, or tick other items on the card)'
+SETTINGS_MISSING_LIST = 'The settings list is missing or archived; last valid settings stay in force. Run `kankan doctor`.'
+
+SETTINGS_PROBE_FAILED = '{type} `{pair}` was rejected: {message}'
+
+CLAIM_SELECTION = ' {role} with {type} `{model}/{effort}`.'
+
+MODEL_START_FAILED = '{type} `{model}/{effort}` could not start: {reason}'
+MODEL_START_UNAVAILABLE = 'Cannot start agent: {reason}'
+STATUS_SETTINGS = 'Settings:'
+STATUS_SETTING = '  {role}: {values}{error}'
+STATUS_RUNNING = ' (running {model}/{effort})'

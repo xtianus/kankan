@@ -54,6 +54,16 @@ def main() -> int:
             scenario = json.load(handle)
     if agent_type in scenario and isinstance(scenario[agent_type], dict):
         scenario = dict(scenario, **scenario[agent_type])
+    if '--version' in sys.argv:
+        print(scenario.get('version', 'fake-v1'))
+        return 0
+    if '-p' in sys.argv or 'exec' in sys.argv:
+        time.sleep(float(scenario.get('probe_sleep', 0)))
+        print(scenario.get('probe_message', 'OK'))
+        return int(scenario.get('probe_exit', 0))
+    if 'debug' in sys.argv and 'models' in sys.argv:
+        print(json.dumps(scenario.get('catalog', {'models': []})))
+        return 0
     screens = SCREENS[agent_type]
     log_path = scenario.get("log") or os.environ.get("FAKE_AGENT_LOG")
     steps = list(scenario.get("steps", []))
@@ -74,12 +84,16 @@ def main() -> int:
     def on_sigint(signum, frame):
         log("sigint")
     signal.signal(signal.SIGINT, on_sigint)
-    log("start", type=agent_type, pid=os.getpid(), cwd=os.getcwd(), seat=os.environ.get("KANKAN_SEAT"))
+    log("start", type=agent_type, pid=os.getpid(), cwd=os.getcwd(), seat=os.environ.get("KANKAN_SEAT"), argv=sys.argv[1:])
     if scenario.get("trust"):
         show(screens["trust"])
         line = sys.stdin.readline()
         log("trust_answer", line=line)
-    show(screens["ready"])
+    if scenario.get('startup_exit'):
+        return int(scenario.get('startup_exit'))
+    if scenario.get('ready_delay'):
+        time.sleep(float(scenario['ready_delay']))
+    show(screens['unknown'] if scenario.get('no_ready') else screens["ready"])
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -87,6 +101,12 @@ def main() -> int:
             return 0
         text = line.rstrip("\n")
         log("input", line=text)
+        if text == '/exit':
+            log('exit_command')
+            if not scenario.get('ignore_exit'):
+                return 0
+            show(screens['ready'])
+            continue
         if text in ("/clear", "/new"):
             if agent_type == "codex" and text == "/new":
                 show(screens["new"])
@@ -115,7 +135,7 @@ def run_step(step, screens, show, log):
     elif screen in screens:
         show(screens[screen].format(n=1))
     if step.get("spawn"):
-        argv = ["sleep", "1000"]
+        argv = list(step.get("spawn_argv") or ["sleep", "1000"])
         child = subprocess.Popen(argv, start_new_session=step["spawn"] == "setsid")
         log("spawned", pid=child.pid, mode=step["spawn"])
     for argv in step.get("do", []):

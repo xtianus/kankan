@@ -6,7 +6,7 @@ For using kankan see the [user manual](user-manual.md). The design is in [`aispe
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q -n auto         # everything except the live Trello tests, in parallel (about 1.5 min on 8 cores; about 8 min serially)
+setsid -w .venv/bin/python -m pytest -q -n auto         # everything except the live Trello tests, in parallel (about 1.5 min on 8 cores; about 8 min serially)
 .venv/bin/python -m pytest -q -m trello_live  # live Trello tests only (§3)
 .venv/bin/python -m tests.live.agents_e2e     # live run with real agents, manual (§3.5)
 ```
@@ -121,3 +121,11 @@ It spends real tokens and takes about 15–30 minutes. The agents load your glob
 - Every commit that adds, changes or removes a Trello endpoint call revises [`aispecs/kanban_requirements.md`](../aispecs/kanban_requirements.md) in the same commit.
 - An adapter for another Kanban backend is complete when it implements every MUST in that document and the `trello_live` acceptance tests pass against a dedicated test board of that product.
 - Before publishing the repository, check that no test fixture contains real board URLs or tokens: `git grep -nE 'trello.com/b/|[0-9a-f]{64}'`.
+
+## 5. Board settings tests
+
+The shared isolated HOME supplies explicit `seed` values, a deterministic version command and a no-network Python probe. Codex catalog discovery falls back deterministically in that home; catalog-specific tests exercise real discovery subprocesses with controlled JSON. Tests replacing model lists also replace their seeds so invalid user values are not silently accepted. No default adapter ships seeds.
+
+Settings tests cover server-time quiet boundaries, stale reads, input/schema fingerprints, durable feedback, human label ownership, pruning, construction recovery and user-cache locking. Process tests run in private tmux servers; subreaper checks run in disposable Python children, never in the pytest controller. Keep source files unchanged while process tests run: agents validate the hash of the launcher code.
+
+The live checklist/comment round trip creates its own marker-prefixed list and card and relies on the normal live fixture cleanup (card deletion also removes checklists). CLI context-isolation measurements and the Codex model fixture are documented in [adapter notes](adapter-notes.md). Real-agent restart dialogs, a daemon started under a subreaper, and UI-originated checklist activity remain explicit observation gates until recorded there. The manual live agent runner uses configured user seeds and can prompt for missing ones in its terminal.

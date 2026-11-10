@@ -54,10 +54,11 @@ class FakeTrello:
         self.download_redirects = {}  # attachment id -> Location
         self.omit_length = set()  # attachment ids served without Content-Length
         self.timeout_delay = 0.6
+        self.response_date = "auto"
         self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}  # the token owner
         self.owner = {"id": self.new_id(), "username": "boardowner", "fullName": "Board Owner"}  # the human
         self.members = {self.me["id"]: self.me, self.owner["id"]: self.owner}
-        self.state = {"boards": {}, "lists": {}, "cards": {}, "labels": {}, "comments": {}}
+        self.state = {"boards": {}, "lists": {}, "cards": {}, "labels": {}, "comments": {}, "checklists": {}}
         self.prev_state = copy.deepcopy(self.state)
         self.server = None
         self.thread = None
@@ -242,6 +243,9 @@ class FakeTrello:
             def log_message(self, *args):
                 pass
 
+            def date_time_string(self, timestamp=None):
+                return super().date_time_string(timestamp) if fake.response_date == "auto" else (fake.response_date or "")
+
             def _handle(self, method):
                 parsed = urlparse(self.path)
                 params = {k: v[-1] for k, v in parse_qs(parsed.query).items()}
@@ -367,11 +371,12 @@ class FakeTrello:
                     return candidate
         return obj
 
-    @staticmethod
-    def _card_out(card: dict, attachments: bool) -> dict:
+    def _card_out(self, card: dict, attachments: bool, checklists: bool = True) -> dict:
         out = {k: v for k, v in card.items() if k != "attachments"}
         if attachments:
             out["attachments"] = [dict(a) for a in card["attachments"]]
+        if checklists:
+            out["checklists"] = [copy.deepcopy(c) for c in self.state["checklists"].values() if c["idCard"] == card["id"]]
         return out
 
     def route(self, method: str, path: str, p: dict):
@@ -399,8 +404,10 @@ class FakeTrello:
                                     for l in st["lists"].values() if l["idBoard"] == board["id"]
                                     and (p["lists"] == "all" or not l["closed"])]
                 if p.get("cards"):
-                    out["cards"] = [self._card_out(c, p.get("card_attachments") == "true")
+                    out["cards"] = [self._card_out(c, p.get("card_attachments") == "true", checklists=False)
                                     for c in st["cards"].values() if c["idBoard"] == board["id"] and not c["closed"]]
+                if p.get("checklists"):
+                    out["checklists"] = [copy.deepcopy(c) for c in st["checklists"].values() if st["cards"].get(c["idCard"], {}).get("idBoard") == board["id"]]
                 if p.get("labels"):
                     limit = int(p.get("labels_limit", 50))
                     out["labels"] = [{k: l[k] for k in ("id", "name", "color")}
@@ -436,6 +443,8 @@ class FakeTrello:
                 return 404, "list not found"
             if len(parts) == 2 and method == "GET":
                 return 200, lst
+            if len(parts) == 3 and parts[2] == "cards" and method == "GET":
+                return 200, [self._card_out(c, False) for c in st["cards"].values() if c["idList"] == lst["id"] and not c["closed"]]
             if len(parts) == 3 and parts[2] == "closed" and method == "PUT":
                 lst["closed"] = str(p.get("value")).lower() == "true"
                 return 200, lst
@@ -448,6 +457,20 @@ class FakeTrello:
                 for card in st["cards"].values():
                     if parts[1] in card["idLabels"]:
                         card["idLabels"].remove(parts[1])
+                return 200, {}
+        if parts[0] == "checklists":
+            checklist = st["checklists"].get(parts[1])
+            if not checklist:
+                return 404, "checklist not found"
+            if len(parts) == 2 and method == "GET":
+                return 200, checklist
+            if len(parts) == 3 and parts[2] == "checkItems" and method == "POST":
+                item = {"id": self.new_id(), "name": p["name"], "state": "complete" if str(p.get("checked")).lower() == "true" else "incomplete", "pos": float(p["pos"])}
+                checklist["checkItems"].append(item)
+                st["cards"][checklist["idCard"]]["dateLastActivity"] = self._now()
+                return 200, item
+            if len(parts) == 4 and method == "DELETE":
+                checklist["checkItems"] = [item for item in checklist["checkItems"] if item["id"] != parts[3]]
                 return 200, {}
         if parts[0] == "cards":
             if len(parts) == 1 and method == "POST":
@@ -473,6 +496,23 @@ class FakeTrello:
                 return 200, self._card_out(card, False)
             if len(parts) == 2 and method == "DELETE":
                 del st["cards"][card["id"]]
+                return 200, {}
+            if parts[2:] == ["checklists"] and method == "POST":
+                checklist = {"id": self.new_id(), "idCard": card["id"], "name": p["name"], "pos": 1024*(len(st["checklists"])+1), "checkItems": []}
+                st["checklists"][checklist["id"]] = checklist
+                return 200, checklist
+            if len(parts) == 4 and parts[2] == "checkItem" and method == "PUT":
+                for checklist in st["checklists"].values():
+                    if checklist["idCard"] != card["id"]:
+                        continue
+                    for item in checklist["checkItems"]:
+                        if item["id"] == parts[3]:
+                            item.update(p)
+                            card["dateLastActivity"] = self._now()
+                            return 200, item
+                return 404, "item not found"
+            if len(parts) == 5 and parts[2] == "actions" and parts[4] == "comments" and method == "DELETE":
+                st["comments"].pop(parts[3], None)
                 return 200, {}
             if parts[2] == "idLabels":
                 if method == "POST":

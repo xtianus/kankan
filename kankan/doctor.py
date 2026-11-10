@@ -382,7 +382,8 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
         checks.append(Check("labels-restart", WARN, "running launchers read label IDs at startup; a recreated HOLD "
                             "does not restore which cards were held",
                             "restart the agents (kankan stop <seat>, then kankan up …)"))
-    issues = diag.reconcile(project)
+    checks += settings_checks(project, fix=fix, online=True)
+    issues = diag.reconcile(project, record=fix)
     checks.append(Check("reconcile", WARN, f"{len(issues)} issue(s)", "kankan reconcile, then kankan reconcile --fix "
                         "if appropriate") if issues else Check("reconcile", OK, "consistent"))
     return checks
@@ -401,11 +402,70 @@ def run(cwd: Optional[Path], fix: bool = True, online: bool = True,
     checks = machine_checks(fix, types, paths)
     if cwd is not None:
         checks += _project_checks(Path(cwd), fix, online, types)
+    if paths is not None and not online:
+        try:
+            from kankan.project import Project
+            from kankan.config import load_config
+            checks += settings_checks(SimpleNamespace(paths=paths, cfg=load_config(paths)), fix=False, online=False)
+        except KankanError as err:
+            checks.append(Check("settings", MANUAL, err.message, "kankan doctor"))
+    return checks
+
+
+def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
+    from kankan import boardconfig, boardsettings, model_catalog, seeds, settings_setup
+    from kankan.adapters import adapter_types
+    types = adapter_types(project.paths)
+    checks = []
+    try:
+        if online and fix:
+            for agent_type in types:
+                catalog = model_catalog.refresh(project.paths, agent_type, force=True)
+                checks.append(Check(f"catalog:{agent_type}", OK if catalog['source'] in ('command', 'override') else WARN, catalog['source']))
+        adapters = seeds.ensure(project.paths, types, interactive=online and fix, say=lambda text: print(text, file=sys.stderr))
+    except KankanError as err:
+        checks.append(Check("settings", MANUAL, err.message, "kankan doctor in a terminal, or set seeds in agents.json"))
+        if err.status != Status.NEEDS_ACTION:
+            return checks
+        adapters = boardsettings.adapters_for(project.paths)
+    if online:
+        try:
+            if fix:
+                reports = settings_setup.ensure(project, adapters, say=lambda text: None)
+                checks.extend(Check("settings-created", FIXED, report) for report in reports)
+            read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
+            result = boardsettings.apply_read(project, read, adapters, write=fix)
+            if fix:
+                boardsettings.drain_actions(project)
+            values = result.values
+        except KankanError as err:
+            if err.status == Status.TRELLO_ERROR and (err.data or {}).get('status') in (400, 404):
+                checks.append(Check("settings-backend", WARN, "backend lacks settings checklists; using seeds"))
+                values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters))
+            else:
+                raise
+    else:
+        values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters))
+    from kankan import modelcheck
+    for role, value in values.items():
+        checks.append(Check(f"settings:{role}", OK, boardconfig.display(value)))
+        for agent_type, pair in value.items():
+            result = modelcheck.check(adapters[agent_type], pair, read_only=not (online and fix))
+            checks.append(Check(f"model:{role}:{agent_type}", OK if result.status == 'passed' else WARN,
+                                f"{pair.name}: {result.status}" + (f" ({result.message})" if result.message else '')))
+            if online and fix:
+                state = boardconfig.load(project.paths)
+                request = boardconfig.CheckRequest(role, agent_type, pair, state.settings.get(role, {}).get('revision', 0))
+                boardsettings.record_check(project, request, result)
+    if online and fix:
+        boardsettings.drain_actions(project)
     return checks
 
 
 def preflight(types: Sequence[str], paths=None) -> None:
     """Offline checks before starting agents of ``types``: a missing CLI, kankan or skill stops the start."""
+    from kankan import seeds
+    seeds.preflight(paths, types)
     if os.environ.get("KANKAN_SKIP_PREFLIGHT") == "1":
         return
     checks = [check_kankan_path(),

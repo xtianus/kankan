@@ -33,3 +33,19 @@ def test_ancestors_contains_parent():
     if os.getppid() > 1:
         assert os.getppid() in procutil.ancestors(os.getpid())
     assert 1 not in procutil.ancestors(os.getpid())
+
+
+def test_subreaper_does_not_consume_owned_exit_status():
+    code = '''
+import subprocess,sys,time
+from kankan import procutil
+procutil.set_child_subreaper()
+owned=subprocess.Popen([sys.executable,'-c','import time; time.sleep(.1); raise SystemExit(7)'])
+parent=subprocess.Popen([sys.executable,'-c',"import subprocess; subprocess.Popen(['sleep','.05'])"])
+parent.wait()
+time.sleep(.2)
+procutil.reap_adopted({owned.pid})
+assert owned.wait() == 7
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr

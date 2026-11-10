@@ -1,13 +1,24 @@
 {
   "_comment": "Default adapters. Override only the keys that change in ~/.config/kankan/agents.json or <gcd>/kankan/agents.json. Patterns are case-insensitive Python regexes applied per line (multiline) to the last lines of the pane, with colours and URLs stripped. Answers are lists of tmux keys; text is sent literally.",
   "claude": {
-    "command": ["claude", "--dangerously-skip-permissions"],
-    "full_access": ["--dangerously-skip-permissions"],
-    "login_check": ["claude", "auth", "status"],
+    "command": [
+      "claude",
+      "--dangerously-skip-permissions"
+    ],
+    "full_access": [
+      "--dangerously-skip-permissions"
+    ],
+    "login_check": [
+      "claude",
+      "auth",
+      "status"
+    ],
     "new_conversation": "/clear",
     "submit_key": "Enter",
     "queue_while_working": true,
-    "ready": ["^❯(\\s|$)"],
+    "ready": [
+      "^❯(\\s|$)"
+    ],
     "working": [
       "esc.{0,20}to interrupt",
       "working.{0,40}esc.{0,20}interrupt",
@@ -34,18 +45,106 @@
       "(resets?|try again)\\s+in[:\\s]+[0-9]",
       "try again at(\\s|$)"
     ],
-    "trust": ["quick safety check", "yes, i trust this folder"],
-    "trust_answer": ["Down", "Enter"],
-    "known": []
+    "trust": [
+      "quick safety check",
+      "yes, i trust this folder"
+    ],
+    "trust_answer": [
+      "Down",
+      "Enter"
+    ],
+    "known": [],
+    "model_args": [
+      "--model",
+      "{model}"
+    ],
+    "effort_args": [
+      "--effort",
+      "{effort}"
+    ],
+    "exit_command": "/exit",
+    "version_command": [
+      "claude",
+      "--version"
+    ],
+    "models": {
+      "fable": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "opus": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "sonnet": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "haiku": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      }
+    },
+    "model_check": [
+      "claude",
+      "-p",
+      "--no-session-persistence",
+      "--model",
+      "{model}",
+      "--effort",
+      "{effort}",
+      "--setting-sources",
+      "",
+      "--settings",
+      "{{\"autoMemoryEnabled\":false}}",
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--disable-slash-commands",
+      "--exclude-dynamic-system-prompt-sections",
+      "Reply OK"
+    ]
   },
   "codex": {
-    "command": ["codex", "--dangerously-bypass-approvals-and-sandbox"],
-    "full_access": ["--dangerously-bypass-approvals-and-sandbox"],
-    "login_check": ["codex", "login", "status"],
+    "command": [
+      "codex",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ],
+    "full_access": [
+      "--dangerously-bypass-approvals-and-sandbox"
+    ],
+    "login_check": [
+      "codex",
+      "login",
+      "status"
+    ],
     "new_conversation": "/new",
     "submit_key": "Enter",
     "queue_while_working": false,
-    "ready": ["^› (?!\\d+\\.)", "\\? for shortcuts"],
+    "ready": [
+      "^› (?!\\d+\\.)",
+      "\\? for shortcuts"
+    ],
     "working": [
       "esc.{0,20}to interrupt",
       "working.{0,40}esc.{0,20}interrupt",
@@ -71,21 +170,156 @@
       "(resets?|try again)\\s+in[:\\s]+[0-9]",
       "try again at(\\s|$)"
     ],
-    "trust": ["trust this folder\\?"],
-    "trust_answer": ["Enter"],
+    "trust": [
+      "trust this folder\\?"
+    ],
+    "trust_answer": [
+      "Enter"
+    ],
     "known": [
       {
         "name": "model_switch",
-        "patterns": ["switch to .{1,60} for lower credit usage\\?", "keep current model \\(never show again\\)"],
+        "patterns": [
+          "switch to .{1,60} for lower credit usage\\?",
+          "keep current model \\(never show again\\)"
+        ],
         "all": true,
-        "answer": ["3"]
+        "answer": [
+          "3"
+        ]
       },
       {
         "name": "new_conversation_location",
-        "patterns": ["where should the new conversation run\\?", "use current git worktree"],
+        "patterns": [
+          "where should the new conversation run\\?",
+          "use current git worktree"
+        ],
         "all": true,
-        "answer": ["Enter"]
+        "answer": [
+          "Enter"
+        ]
       }
+    ],
+    "model_args": [
+      "--model",
+      "{model}"
+    ],
+    "effort_args": [
+      "-c",
+      "model_reasoning_effort=\"{effort}\""
+    ],
+    "exit_command": "/exit",
+    "version_command": [
+      "codex",
+      "--version"
+    ],
+    "models": {
+      "gpt-6.1-sol": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-6-astra": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-6.1-terra": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-6-sol": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-6-luna": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-5.6-sol": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-5.6-terra": {
+        "efforts": [
+          "ultra",
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "gpt-5.6-luna": {
+        "efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low"
+        ]
+      }
+    },
+    "models_from": {
+      "command": [
+        "codex",
+        "debug",
+        "models"
+      ],
+      "file": "{CODEX_HOME}/models_cache.json"
+    },
+    "model_check": [
+      "codex",
+      "exec",
+      "--ephemeral",
+      "--skip-git-repo-check",
+      "--model",
+      "{model}",
+      "-c",
+      "model_reasoning_effort=\"{effort}\"",
+      "Reply OK"
+    ],
+    "model_check_home": {
+      "env": "CODEX_HOME",
+      "files": [
+        "auth.json"
+      ]
+    },
+    "restart_keep": [
+      "\\bcodex\\s+app-server\\b.*--managed-daemon\\b"
     ]
   }
 }

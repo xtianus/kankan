@@ -210,8 +210,6 @@ With only one agent type running, implemented cards wait in `Implemented`; `kank
 
 ### 6.1 Model and effort
 
-*Planned: this section describes the next version of kankan.*
-
 The model and the reasoning effort the agents use decide how fast and how expensive each task is. You choose them on the board, in the `kankan` list, which holds two cards:
 
 - **`implementation`**: the model and effort for implementing a card (merge requests included);
@@ -219,12 +217,12 @@ The model and the reasoning effort the agents use decide how fast and how expens
 
 Each card has one checklist per agent type (`claude`, `codex`) listing every **combination** of model and effort that agent accepts, for example `sonnet · high` or `opus · max` (not every model accepts every effort, so only valid pairs are listed). **Tick exactly one item in each checklist.** There is no default: no tick, two ticks or an unknown item is an error. Trello does not untick the old item for you, so switch by ticking the new item and unticking the old one.
 
-kankan waits until a card has not been touched for 10 seconds and checks it within about half a minute while agents run (otherwise at the next `kankan up` or `kankan doctor`):
+kankan waits until a card has not been touched for 10 seconds and responds within about 10–40 seconds while agents run (otherwise at the next `kankan up` or `kankan doctor`):
 
 - **valid:** it comments "applied: …" and the new values are used from the **next task**; a task already running keeps its values. When a task needs other values than the agent was started with, kankan restarts the agent with them before giving it the task; nothing of the task is lost.
-- **invalid:** the card gets `Error` and a comment saying what is wrong; the **previous values stay in use** until you fix the card, then kankan removes the `Error`.
+- **invalid:** the card gets `Error` and a comment saying what is wrong; the **previous values stay in use** until you fix the card, then kankan removes the `Error` it set. An `Error` that you added stays.
 
-**Checking a combination.** The agents are updated independently of kankan, so a combination can stop working. Before a combination is first used, and after each update of an agent, kankan checks it with a tiny request to that agent (a few thousand tokens), run without your `CLAUDE.md`/`AGENTS.md` files, memory, tools or plugins. If the agent rejects it, the setting card gets `Error` with the agent's message, and that agent type takes no task of that role until you tick another combination; `kankan status` says which cards wait and why.
+**Checking a combination.** The agents are updated independently of kankan, so a combination can stop working. Before a combination is first used, and after each update of an agent, kankan checks it with a tiny request to that agent (a few thousand tokens), run without your `CLAUDE.md`/`AGENTS.md` files, memory, tools or plugins. If the agent rejects it, the setting card gets `Error` with the agent's message, and that agent type takes no task of that role until you tick another combination or the CLI version changes; its other role and other agent types continue. A timed-out check stays unverified and is retried after 10 minutes by default. `kankan status` distinguishes rejected and unverified pairs. Checks run in the background, so HOLD and stop requests remain responsive.
 
 kankan keeps only its latest 10 comments on each setting card; yours stay. Do not move the setting cards out of the `kankan` list: a card moved to `Backlog` becomes a task. If you delete a setting card, the last values stay in use and `kankan doctor` recreates it.
 
@@ -243,7 +241,9 @@ Press the key of your choice. kankan saves it in `~/.config/kankan/agents.json` 
 {"claude": {"seed": {"implementation": {"model": "sonnet", "effort": "high"}, "review": {"model": "opus", "effort": "high"}}}}
 ```
 
-Run `init` and `doctor` in a terminal the first time: from a script they cannot ask, and they stop telling you to set the seeds.
+Run `init` and `doctor` in a terminal the first time: from a script they cannot ask, and they stop with the manual step for setting seeds. `agent` and `up` never ask: they need a seed only for a type and role with no recorded valid board value. Seeds never replace a valid board selection. Invalid seeds are refused even when board values exist. If Codex's model list stops offering a seeded combination, the seed counts as missing: `kankan doctor` says so and asks for a new one.
+
+`doctor --offline` reads cached selections and checks; `doctor --no-fix` asks nothing, starts no model checks, and changes no files or board data. Online fixing `doctor` refreshes catalogs, repairs missing setting cards and synchronizes their items without choosing a replacement for an invalid existing selection.
 
 `kankan init` and `kankan doctor` print the values they tick and where they come from, and `doctor` always prints the model and effort in use per role and agent type. `kankan status` shows the model and effort each running agent was started with, and the comment kankan writes when it takes a card names them.
 
@@ -305,7 +305,9 @@ How kankan reads each agent's screen (ready, working, usage limit, trust window,
 
 `full_access` lists the arguments the agent's `command` must contain: kankan runs every agent in **full-access mode** (Claude Code with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox`), because a permission prompt or a sandbox stops the agent in the middle of a task (Codex's sandbox, for example, blocks the network kankan needs to reach Trello). If you override `command`, keep those arguments: otherwise `kankan up` refuses to start the agent and `kankan doctor` reports it.
 
-`models` lists each model with the efforts it accepts, the most powerful first (this order is used wherever kankan lists the combinations), which make the items of the setting cards' checklists ([section 6.1](#61-model-and-effort)); `seed` is the combination ticked when the cards are created, and `exit_command` the command kankan types to end the agent before restarting it with another model or effort. When a new model comes out, add it with its efforts to `models` in your `agents.json`; `kankan doctor` then adds it, unticked, to the checklists.
+`models` **replaces** the inherited model list, preserving the order you write. It lists each model with the efforts it accepts, the most powerful first (this order is used wherever kankan lists the combinations), which make the items of the setting cards' checklists ([section 6.1](#61-model-and-effort)); `seed` is the combination ticked when the cards are created, and `exit_command` the command kankan types to end the agent before restarting it with another model or effort. When a new model comes out, add it with its efforts to `models` in your `agents.json`; `kankan doctor` then adds it, unticked, to the checklists.
+
+Codex normally discovers its account model catalog through the installed CLI, cached per CLI version; an explicit `models` override takes precedence. Claude uses its shipped list or your override. Each model has an `efforts` array. At most 61 combinations fit the one-key seed picker. Startup and shutdown timeouts are configured locally with `start_timeout_seconds` (120) and `exit_timeout_seconds` (20); probe timeouts and retry intervals use `model_check_timeout_seconds` (90) and `model_check_retry_seconds` (600).
 
 `login_check` is the command `kankan doctor` runs to see whether an agent is logged in (exit 0 = logged in): `claude auth status` and `codex login status` by default; set it to `[]` to skip the check.
 

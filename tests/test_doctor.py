@@ -75,7 +75,7 @@ def test_login_check(fakebin, monkeypatch):
     fakebin("codex", 'sleep 3')
     assert by_name(doctor.check_agents(None, ("codex",)))["login:codex"].status == doctor.SKIPPED
     user_agents = Path(os.path.expanduser("~")) / ".config" / "kankan" / "agents.json"
-    user_agents.parent.mkdir(parents=True)
+    user_agents.parent.mkdir(parents=True, exist_ok=True)
     user_agents.write_text(json.dumps({"codex": {"login_check": []}}))
     fakebin("codex", 'exit 1')
     assert by_name(doctor.check_agents(None, ("codex",)))["login:codex"].status == doctor.SKIPPED
@@ -146,11 +146,16 @@ def test_no_fix_never_mutates(bound, fake_trello, fakebin):
     exclude.write_text("")
     del fake_trello.state["labels"][bound.cfg.label_question]
     labels_before = dict(fake_trello.state["labels"])
+    def files():
+        return {str(path): path.read_bytes() for root in (bound.paths.kankan_dir, Path.home()/'.config', Path.home()/'.cache')
+                if root.exists() for path in root.rglob('*') if path.is_file() and not path.is_symlink()}
+    files_before = files()
     checks = by_name(doctor.run(bound.paths.repo, fix=False, online=True))
     assert checks["hook"].status == checks["exclude"].status == checks["labels"].status == doctor.MANUAL
     assert checks["skill"].status == doctor.MANUAL
     assert not hook.exists() and exclude.read_text() == "" and fake_trello.state["labels"] == labels_before
     assert not any(t.exists() for t in skill_install.targets())
+    assert files() == files_before
 
 
 def test_missing_label_recreated(bound, fake_trello, fakebin):
@@ -391,10 +396,31 @@ def test_agent_without_full_access_refuses_to_start(fakebin, monkeypatch):
     monkeypatch.setattr(doctor, "check_kankan_path", lambda: doctor.Check("kankan-path", doctor.OK, "x"))
     fakebin("claude")
     user_agents = Path(os.path.expanduser("~")) / ".config" / "kankan" / "agents.json"
-    user_agents.parent.mkdir(parents=True)
-    user_agents.write_text(json.dumps({"claude": {"command": ["claude"]}}))  # override without the flag
+    user_agents.parent.mkdir(parents=True, exist_ok=True)
+    user_agents.write_text(json.dumps({"claude": {"command": ["claude"], "seed": {role: {"model": "sonnet", "effort": "high"} for role in ("implementation", "review")}}}))  # override without the flag
     check = by_name(doctor.check_agents(None, ("claude",)))["full-access:claude"]
     assert check.status == doctor.MANUAL and "--dangerously-skip-permissions" in check.action
     with pytest.raises(KankanError) as exc:
         doctor.preflight(["claude"])
     assert exc.value.status == Status.CONFIG_ERROR and "full-access" in exc.value.message
+
+
+def test_offline_settings_need_no_credentials(bound, monkeypatch, fakebin):
+    monkeypatch.delenv('KANKAN_TRELLO_KEY', raising=False)
+    monkeypatch.delenv('KANKAN_TRELLO_TOKEN', raising=False)
+    checks = by_name(doctor.run(bound.paths.repo, fix=False, online=False))
+    assert checks['settings:implementation'].status == doctor.OK
+    assert checks['settings:review'].status == doctor.OK
+
+
+def test_missing_seed_still_reports_recorded_effective_values(bound, fakebin):
+    from kankan.config import atomic_write_json
+    target = Path.home()/'.config/kankan/agents.json'
+    data = json.loads(target.read_text())
+    data['claude'].pop('seed')
+    target.write_text(json.dumps(data))
+    atomic_write_json(bound.paths.kankan_dir/'board-settings.json', {'settings': {
+        role: {'value': {'claude': {'model': 'opus', 'effort': 'high'}}} for role in ('implementation', 'review')}})
+    checks = by_name(doctor.run(bound.paths.repo, fix=False, online=False))
+    assert checks['settings'].status == doctor.MANUAL
+    assert 'opus/high' in checks['settings:implementation'].detail

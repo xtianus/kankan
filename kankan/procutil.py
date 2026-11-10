@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import signal
 import time
 from typing import Iterable, List, Optional, Set
@@ -99,14 +100,77 @@ def _signal_all(pids: Iterable[int], sig: int) -> None:
             pass
 
 
-def _reap() -> None:
+def _reap(pids: Iterable[int]) -> List[int]:
+    reaped = []
+    for pid in pids:
+        try:
+            child, _ = os.waitpid(pid, os.WNOHANG)
+            if child:
+                reaped.append(child)
+        except ChildProcessError:
+            pass
+    return reaped
+
+
+def set_child_subreaper() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), 'prctl(PR_SET_CHILD_SUBREAPER) failed')
+
+
+def reap_adopted(own: Set[int]) -> List[int]:
     try:
-        while True:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-            if pid == 0:
-                return
+        # Peek only (WNOWAIT collects nothing): without any exited child there is nothing to scan /proc for.
+        if os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            return []
     except ChildProcessError:
-        return
+        return []
+    return _reap(pid for pid in all_pids() if pid not in own and parent_pid(pid) == os.getpid())
+
+
+def agent_tree(agent_pid: int, started: int, *, keep: List[str], own: Set[int]) -> List[tuple]:
+    """Snapshot identities in the agent tree and adopted orphans, excluding shared services and owned probes."""
+    pids = all_pids()
+    parents = {pid: parent_pid(pid) for pid in pids}
+    protected = set(own) - {agent_pid}
+    for pid in pids:
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as handle:
+                command = handle.read().replace(b'\x00', b' ').decode('utf-8', 'replace')
+            if any(re.search(pattern, command) for pattern in keep):
+                protected.add(pid)
+        except OSError:
+            pass
+    changed = True
+    while changed:
+        additions = {pid for pid, parent in parents.items() if parent in protected} - protected
+        changed = bool(additions)
+        protected.update(additions)
+    roots = {pid for pid, parent in parents.items() if parent == os.getpid() and pid not in own}
+    if alive(agent_pid, started):
+        roots.add(agent_pid)
+    changed = True
+    while changed:
+        additions = {pid for pid, parent in parents.items() if parent in roots} - roots
+        changed = bool(additions)
+        roots.update(additions)
+    return [(pid, start_time(pid)) for pid in roots if pid not in protected and pid != os.getpid()
+            and pid not in ancestors(os.getpid()) and alive(pid, start_time(pid))]
+
+
+def terminate_agent_tree(agent_pid: int, started: int, *, grace: float, keep: List[str], own: Set[int]) -> List[int]:
+    targets = agent_tree(agent_pid, started, keep=keep, own=own)
+    _signal_all([pid for pid, _ in targets], signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(alive(pid, start) for pid, start in targets):
+        _reap(pid for pid, _ in targets if pid not in own)
+        time.sleep(.05)
+    _signal_all([pid for pid, start in targets if alive(pid, start)], signal.SIGKILL)
+    deadline = time.monotonic()+2
+    while time.monotonic() < deadline and any(alive(pid, start) for pid, start in targets):
+        _reap(pid for pid, _ in targets if pid not in own)
+        time.sleep(.05)
+    return [pid for pid, start in targets if alive(pid, start)]
 
 
 def terminate_session(sid: int, exclude: Set[int], grace: float = 5.0) -> List[int]:
@@ -120,14 +184,14 @@ def terminate_session(sid: int, exclude: Set[int], grace: float = 5.0) -> List[i
     _signal_all(pending, signal.SIGTERM)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        _reap()
+        _reap(pending)
         if not targets():
             return []
         time.sleep(0.05)
     _signal_all(targets(), signal.SIGKILL)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        _reap()
+        _reap(pending)
         if not targets():
             return []
         time.sleep(0.05)
@@ -140,12 +204,12 @@ def terminate_pids(pids: Iterable[tuple], grace: float = 5.0) -> List[int]:
     _signal_all([pid for pid, _ in targets], signal.SIGTERM)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline and any(alive(p, s) for p, s in targets):
-        _reap()
+        _reap(pid for pid, _ in targets)
         time.sleep(0.05)
     _signal_all([pid for pid, start in targets if alive(pid, start)], signal.SIGKILL)
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and any(alive(p, s) for p, s in targets):
-        _reap()
+        _reap(pid for pid, _ in targets)
         time.sleep(0.05)
     return [pid for pid, start in targets if alive(pid, start)]
 

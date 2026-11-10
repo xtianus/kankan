@@ -17,6 +17,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from collections import deque
 from dataclasses import dataclass, field
 from typing import BinaryIO, Callable, Dict, List, Optional, Tuple
@@ -29,6 +31,42 @@ MARKER_PREFIX = "kankan:"
 
 def marker(op_id: str) -> str:
     return f"`{MARKER_PREFIX}{op_id}`"
+
+
+@dataclass
+class CheckItem:
+    id: str
+    name: str
+    state: str
+    pos: float
+
+
+@dataclass
+class Checklist:
+    id: str
+    card_id: str
+    name: str
+    pos: float
+    items: list[CheckItem] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Response:
+    status: int
+    payload: object
+    response_date: Optional[datetime] = None
+
+    def __iter__(self):
+        yield self.status
+        yield self.payload
+
+
+def _date(value) -> Optional[datetime]:
+    try:
+        result = parsedate_to_datetime(value)
+        return result.astimezone(timezone.utc) if result.tzinfo is not None else None
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
 
 
 @dataclass
@@ -45,6 +83,7 @@ class Card:
     attachments: List[str]
     closed: bool
     last_activity: str
+    checklists: list[Checklist] = field(default_factory=list)
 
 
 @dataclass
@@ -69,6 +108,14 @@ class Snapshot:
     lists: Dict[str, TList] = field(default_factory=dict)
     cards: Dict[str, Card] = field(default_factory=dict)
     labels: Dict[str, Label] = field(default_factory=dict)
+    response_date: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class SettingsRead:
+    cards: list[Card]
+    response_date: Optional[datetime]
+    list_available: bool
 
 
 @dataclass
@@ -177,7 +224,17 @@ def _card(data: dict) -> Card:
                 name=data.get("name", ""), desc=data.get("desc", ""), url=data.get("url", ""),
                 list_id=data.get("idList", ""), pos=data.get("pos", 0), label_ids=list(data.get("idLabels", [])),
                 attachments=[a.get("url", "") for a in data.get("attachments", [])],
-                closed=bool(data.get("closed", False)), last_activity=data.get("dateLastActivity", ""))
+                closed=bool(data.get("closed", False)), last_activity=data.get("dateLastActivity", ""),
+                checklists=[_checklist(c, data["id"]) for c in data.get("checklists", [])])
+
+
+def _checkitem(data: dict) -> CheckItem:
+    return CheckItem(data["id"], data.get("name", ""), data.get("state", "incomplete"), data.get("pos", 0))
+
+
+def _checklist(data: dict, card_id: str = "") -> Checklist:
+    return Checklist(data["id"], data.get("idCard", card_id), data.get("name", ""), data.get("pos", 0),
+                     sorted((_checkitem(item) for item in data.get("checkItems", [])), key=lambda item: item.pos))
 
 
 def _tlist(data: dict) -> TList:
@@ -239,7 +296,7 @@ class TrelloClient:
         try:
             with _OPENER.open(request, timeout=self.timeout) as response:
                 raw = response.read()
-                return response.status, json.loads(raw) if raw else None
+                return Response(response.status, json.loads(raw) if raw else None, _date(response.headers.get("Date")))
         except urllib.error.HTTPError as err:
             text = err.read().decode("utf-8", "replace")[:200]
             if err.code == 429:
@@ -247,7 +304,7 @@ class TrelloClient:
                 raise _Transient("rate limited (429)", float(retry) if retry and retry.isdigit() else None)
             if err.code >= 500:
                 raise _Transient(f"server error {err.code}")
-            return err.code, text
+            return Response(err.code, text)
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as err:
             reason = getattr(err, "reason", err)
             raise _Transient(f"connection failed: {type(reason).__name__}")
@@ -265,7 +322,8 @@ class TrelloClient:
         attempt = 0
         while True:
             try:
-                status, payload = self._once(method, path, params, body, raw)
+                response = self._once(method, path, params, body, raw)
+                status, payload = response
             except _Transient as err:
                 attempt += 1
                 delay = err.retry_after if err.retry_after is not None else min(0.5 * 2 ** (attempt - 1), 4.0)
@@ -275,10 +333,10 @@ class TrelloClient:
                 clock.sleep(delay)
                 continue
             if status in ok_codes:
-                return status, payload
+                return response
             if status in (401, 403):
                 raise KankanError(Status.CONFIG_ERROR, f"Trello refused the credentials ({status}) on {method} {path}")
-            return status, payload
+            return response
 
     def _ok(self, method: str, path: str, params: Optional[dict] = None, body: Optional[dict] = None, retry: bool = True,
             raw: Optional[Tuple[bytes, str]] = None):
@@ -348,11 +406,20 @@ class TrelloClient:
         params = {"fields": "name,desc", "lists": "all", "list_fields": "name,closed,pos", "cards": "open",
                   "card_fields": "name,desc,idBoard,idList,pos,idLabels,url,shortLink,closed,dateLastActivity",
                   "card_attachments": "true", "card_attachment_fields": "url", "labels": "all",
-                  "labels_limit": "1000", "label_fields": "name,color"}
-        data = self._ok("GET", f"/1/boards/{board_id}", params)
-        snap = Snapshot(board_id=data.get("id", board_id), desc=data.get("desc", ""))
+                  "labels_limit": "1000", "label_fields": "name,color", "checklists": "all"}
+        response = self._request("GET", f"/1/boards/{board_id}", params)
+        if response.status != 200:
+            raise KankanError(Status.TRELLO_ERROR, f"Trello board read: HTTP {response.status}")
+        data = response.payload
+        snap = Snapshot(board_id=data.get("id", board_id), desc=data.get("desc", ""), response_date=response.response_date)
         snap.lists = {l["id"]: _tlist(l) for l in data.get("lists", [])}
         snap.cards = {c["id"]: _card(c) for c in data.get("cards", [])}
+        for raw in data.get("checklists", []):
+            checklist = _checklist(raw)
+            if checklist.card_id in snap.cards:
+                card = snap.cards[checklist.card_id]
+                if not any(existing.id == checklist.id for existing in card.checklists):
+                    card.checklists.append(checklist)
         labels = data.get("labels", [])
         if len(labels) >= 1000:
             labels = self._all_labels(board_id)
@@ -373,13 +440,56 @@ class TrelloClient:
 
     def card(self, id_or_short: str) -> Optional[Card]:
         status, payload = self._request("GET", f"/1/cards/{urllib.parse.quote(id_or_short)}", {
-            "attachments": "true", "attachment_fields": "url",
+            "attachments": "true", "attachment_fields": "url", "checklists": "all",
             "fields": "name,desc,idBoard,idList,pos,idLabels,url,shortLink,closed,dateLastActivity"})
         if status in (400, 404):
             return None
         if status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello GET card: HTTP {status}")
         return _card(payload)
+
+    def settings_cards(self, list_id: str) -> SettingsRead:
+        status, meta = self._request("GET", f"/1/lists/{list_id}", {"fields": "closed"})
+        if status in (400, 404) or (status == 200 and meta.get("closed")):
+            return SettingsRead([], None, False)
+        if status != 200:
+            raise KankanError(Status.TRELLO_ERROR, f"Trello list read: HTTP {status}")
+        response = self._request("GET", f"/1/lists/{list_id}/cards", {
+            "fields": "name,desc,idBoard,idList,pos,idLabels,url,shortLink,closed,dateLastActivity",
+            "checklists": "all"})
+        if response.status != 200:
+            raise KankanError(Status.TRELLO_ERROR, f"Trello settings read: HTTP {response.status}", {"status": response.status})
+        return SettingsRead([_card(c) for c in response.payload], response.response_date, True)
+
+    def create_checklist(self, card_id: str, name: str) -> Checklist:
+        def find():
+            card = self.card(card_id)
+            return next((c for c in card.checklists if c.name == name), None) if card else None
+        return self._write_once(lambda: _checklist(self._ok("POST", f"/1/cards/{card_id}/checklists",
+                                                            body={"name": name}, retry=False), card_id), find)
+
+    def create_check_item(self, checklist_id: str, name: str, checked: bool, pos: float) -> CheckItem:
+        def find():
+            data = self._ok("GET", f"/1/checklists/{checklist_id}", {"checkItems": "all"})
+            return next((_checkitem(item) for item in data.get("checkItems", []) if item["name"] == name), None)
+        return self._write_once(lambda: _checkitem(self._ok("POST", f"/1/checklists/{checklist_id}/checkItems",
+                    body={"name": name, "checked": checked, "pos": pos}, retry=False)), find)
+
+    def move_check_item(self, card_id: str, item_id: str, pos: float) -> None:
+        self._ok("PUT", f"/1/cards/{card_id}/checkItem/{item_id}", body={"pos": pos})
+
+    def delete_check_item(self, checklist_id: str, item_id: str) -> None:
+        status, _ = self._request("DELETE", f"/1/checklists/{checklist_id}/checkItems/{item_id}")
+        if status not in (200, 404):
+            raise KankanError(Status.TRELLO_ERROR, f"Trello delete checklist item: HTTP {status}")
+
+    def delete_comment(self, card_id: str, comment_id: str) -> None:
+        status, _ = self._request("DELETE", f"/1/cards/{card_id}/actions/{comment_id}/comments")
+        if status not in (200, 404):
+            raise KankanError(Status.TRELLO_ERROR, f"Trello delete comment: HTTP {status}")
+
+    def unarchive_list(self, list_id: str) -> None:
+        self._ok("PUT", f"/1/lists/{list_id}/closed", body={"value": False})
 
     def attachments(self, card_id: str) -> List[Attachment]:
         """The card's attachments (uploads and links) in the card's order."""
@@ -502,10 +612,11 @@ class TrelloClient:
         return result
 
     # ------------------------------------------------------------------ writes
-    def create_list(self, board_id: str, name: str, pos: str = "bottom") -> TList:
+    def create_list(self, board_id: str, name: str, pos: str = "bottom", exclude=()) -> TList:
+        """``exclude``: IDs of lists that existed before this call, never taken for the one it creates."""
         def find():
             board = self._ok("GET", f"/1/boards/{board_id}", {"lists": "open", "list_fields": "name,closed,pos", "fields": "id"})
-            matches = [l for l in board.get("lists", []) if l["name"] == name and not l.get("closed")]
+            matches = [l for l in board.get("lists", []) if l["name"] == name and not l.get("closed") and l["id"] not in exclude]
             return _tlist(matches[-1]) if matches else None
         return self._write_once(lambda: _tlist(self._ok("POST", "/1/lists", body={"name": name, "idBoard": board_id, "pos": pos},
                                                          retry=False)), find)
@@ -551,13 +662,13 @@ class TrelloClient:
     def set_board_desc(self, board_id: str, desc: str) -> None:
         self._ok("PUT", f"/1/boards/{board_id}", body={"desc": desc})
 
-    def add_comment(self, card_id: str, text: str, op_id: str) -> Comment:
+    def add_comment(self, card_id: str, text: str, op_id: str, *, member_id: Optional[str] = None) -> Comment:
         """Comment ending with the op-id marker; after a timeout an existing marker means success."""
         full = f"{text}\n\n{marker(op_id)}"
 
         def find():
             for comment in reversed(self.comments(card_id)):
-                if comment.text.rstrip().endswith(marker(op_id)):
+                if comment.text.rstrip().endswith(marker(op_id)) and (member_id is None or comment.member_id == member_id):
                     return comment
             return None
         return self._write_once(lambda: _comment(self._ok("POST", f"/1/cards/{card_id}/actions/comments",

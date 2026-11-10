@@ -18,6 +18,8 @@ T = TypeVar("T")
 @dataclass
 class SeatState:
     task: Optional[dict] = None
+    running_selection: Optional[dict] = None
+    planned_restart: Optional[dict] = None
     launcher_state: str = "stopped"
     convergence_failures: Dict[str, int] = field(default_factory=dict)
     pending_forward: Optional[dict] = None

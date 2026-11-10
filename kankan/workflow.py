@@ -6,13 +6,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
-from kankan import gitutil, labels, messages, worktrees
+from kankan import boardconfig, boardsettings, gitutil, labels, messages, modelcheck, worktrees
 from kankan.cards import OWNED_PHASES, CardMeta, Phase, _parse_refs, converge, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import CARD_PREFIX, RefValue
 from kankan.seats import Lease, seat_type
-from kankan.seatstate import update_state
+from kankan.seatstate import load_state, update_state
 from kankan.trello import Card, Snapshot
 
 
@@ -122,7 +122,7 @@ def choose(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue], ski
     return None
 
 
-def claim_impl(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
+def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Claimed]:
     """Claim a Backlog card: branch check, ref transition, HOLD recheck, branch checkout."""
     card = choice.card
     repo = project.paths.repo
@@ -145,7 +145,7 @@ def claim_impl(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
                     implementer=lease.seat, implementer_type=lease.type, branch=branch,
                     target_list=target_list_for(project.cfg, Phase.IMPL.value, lease.seat, None))
     result = transition(project, lease, card, choice.ref, meta,
-                        messages.CLAIMED.format(seat=lease.seat, branch=branch))
+                        messages.CLAIMED.format(seat=lease.seat, branch=branch) + _claim_selection(lease, pair, "implementation"))
     fresh = project.trello.card(card.id)
     if fresh is not None and has_hold(project, fresh):
         park = CardMeta.from_dict(result.ref.meta).evolve(phase=Phase.PARKED.value, owner=None, cause="yield",
@@ -178,7 +178,7 @@ def _free_branch_for_review(project, lease: Lease, card: Card, value: RefValue) 
     raise KankanError(Status.INELIGIBLE, f"branch {branch} is checked out in {where}")
 
 
-def claim_review(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
+def claim_review(project, lease: Lease, choice: Choice, pair=None) -> Optional[Claimed]:
     """Claim a card in an Implemented list for review (§9.2, §11)."""
     card, value = choice.card, choice.ref
     worktree = project.paths.seat_worktree(lease.seat)
@@ -189,7 +189,7 @@ def claim_review(project, lease: Lease, choice: Choice) -> Optional[Claimed]:
         phase=Phase.REVIEW.value, owner=lease.seat, session=lease.session, cause=None,
         target_list=target_list_for(project.cfg, Phase.REVIEW.value, lease.seat, None))
     result = transition(project, lease, card, value, meta, messages.REVIEW_CLAIMED.format(
-        seat=lease.seat, branch=meta.branch, implementer=meta.implementer))
+        seat=lease.seat, branch=meta.branch, implementer=meta.implementer) + _claim_selection(lease, pair, "review"))
     fresh = project.trello.card(card.id)
     if fresh is not None and has_hold(project, fresh):
         back = CardMeta.from_dict(result.ref.meta).evolve(
@@ -210,7 +210,17 @@ def _prepare_resume(project, lease: Lease, choice: Choice) -> None:
         worktrees.checkout(worktree, branch)
 
 
-def tick(project, lease: Lease) -> Optional[dict]:
+def task_role(choice: Choice) -> str:
+    phase = choice.ref.meta.get("phase") if choice.ref else None
+    return 'review' if choice.kind in ('review', 'resume_review') or phase == 'review' else 'implementation'
+
+
+def _claim_selection(lease, pair, role):
+    return messages.CLAIM_SELECTION.format(role='reviewing' if role == 'review' else 'implementing',
+                                         type=lease.type, model=pair.model, effort=pair.effort) if pair else ''
+
+
+def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[dict]:
     """One launcher iteration without the agent: checks, convergence, choice and preparation.
 
     Returns the task dict stored in seat state, or None when nothing was assigned.
@@ -221,6 +231,9 @@ def tick(project, lease: Lease) -> Optional[dict]:
     check_lists(cfg, snap.lists)
     if converge(project, lease, snap):
         snap = project.trello.snapshot(cfg.board_id)
+    adapters = boardsettings.adapters_for(project.paths)
+    boardsettings.apply_read(project, boardsettings.from_snapshot(project, snap), adapters)
+    boardsettings.drain_actions(project)
     refs = card_refs(project)
     skip: Set[str] = set()
     while True:
@@ -229,7 +242,34 @@ def tick(project, lease: Lease) -> Optional[dict]:
             return None
         skip.add(choice.card.id)
         try:
-            task = _prepare(project, lease, choice)
+            role = task_role(choice)
+            pair = boardconfig.effective(project.paths, role).get(lease.type)
+            cleanup = choice.kind in ('hold_yield', 'moved_yield')
+            if not cleanup:
+                if pair is None:
+                    continue
+                if not defer_assignment:
+                    modelcheck.check(adapters[lease.type], pair)
+                if boardsettings.role_block(project, lease.type, role, pair):
+                    continue
+            with project_lock(project.paths):
+                from kankan import seats
+                seats.verify_owner(project, lease.seat, lease.session)
+                if load_state(project.paths, lease.seat).stop_requested:
+                    return None
+                fresh = project.trello.snapshot(cfg.board_id)
+                check_registry(cfg, fresh.desc)
+                current_refs = card_refs(project)
+                # Recheck eligibility after any outside-lock model check.
+                candidates = _own_choices(project, lease, fresh, current_refs) + review_candidates(project, lease, fresh, current_refs) + backlog_candidates(project, fresh, current_refs)
+                updated = next((candidate for candidate in candidates if candidate.card.id == choice.card.id and candidate.kind == choice.kind), None)
+                if updated is None:
+                    continue
+                if not cleanup:
+                    current_pair = boardconfig.effective(project.paths, role).get(lease.type)
+                    if current_pair != pair or boardsettings.role_block(project, lease.type, role, pair):
+                        continue
+                task = _prepare(project, lease, updated, pair=pair)
         except KankanError as err:
             if err.status in (Status.ALREADY_CLAIMED, Status.INELIGIBLE):
                 project.log("claim_skipped", card=choice.card.id, reason=err.message)
@@ -237,13 +277,19 @@ def tick(project, lease: Lease) -> Optional[dict]:
                 continue
             raise
         if task is not None:
-            return task
+            return task if defer_assignment else activate_task(project, lease, task)
         if choice.kind in ("impl", "review"):
             return None
         refs = card_refs(project)
 
 
-def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
+def _prepare(project, lease: Lease, choice: Choice, pair=None) -> Optional[dict]:
+    def store(project, lease, kind, card, branch, resumed):
+        from kankan.refstore import card_ref
+        value = project.refs.read(card_ref(card.id))
+        return {"kind": kind, "card": card.id, "short": card.short, "branch": branch, "resumed": resumed,
+                "role": task_role(choice), "model": pair.model if pair else None, "effort": pair.effort if pair else None,
+                "ref_oid": value.oid if value else None, "session": lease.session}
     kind = choice.kind
     if kind == "hold_yield":
         from kankan import agentcmds
@@ -251,17 +297,17 @@ def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
         project.log("hold_yield", card=choice.card.id)
         return None
     if kind == "impl":
-        claimed = claim_impl(project, lease, choice)
+        claimed = claim_impl(project, lease, choice, pair)
         if claimed is None or not claimed.moved:
             return None
-        return _store_task(project, lease, "impl", choice.card, claimed.meta.branch, resumed=False)
+        return store(project, lease, "impl", choice.card, claimed.meta.branch, resumed=False)
     if kind == "review":
-        claimed = claim_review(project, lease, choice)
+        claimed = claim_review(project, lease, choice, pair)
         if claimed is None or not claimed.moved:
             return None
-        return _store_task(project, lease, "review", choice.card, claimed.meta.branch, resumed=False)
+        return store(project, lease, "review", choice.card, claimed.meta.branch, resumed=False)
     if kind == "hold_wip":
-        return _store_task(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
+        return store(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
     if kind in ("moved_yield", "moved_wip"):
         cause = _user_cause(project, choice.card)
         if kind == "moved_yield":
@@ -269,13 +315,99 @@ def _prepare(project, lease: Lease, choice: Choice) -> Optional[dict]:
             agentcmds.kankan_yield(project, lease, None if cause == "user_deleted" else choice.card, choice.ref, cause)
             project.log("user_move_yield", card=choice.card.id, cause=cause)
             return None
-        task = _store_task(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
-        update_state(project.paths, lease.seat, lambda s: s.task.__setitem__("suspend_cause", "user_moved"))
+        task = store(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
         task["suspend_cause"] = "user_moved"
         return task
     _prepare_resume(project, lease, choice)
-    return _store_task(project, lease, kind.replace("resume_", ""), choice.card, choice.ref.meta.get("branch"),
+    return store(project, lease, kind.replace("resume_", ""), choice.card, choice.ref.meta.get("branch"),
                        resumed=True)
+
+
+def _validate_prepared(project, lease: Lease, prepared: dict):
+    """Called under the project lock, both at activation and immediately before pane writes."""
+    from kankan import agentcmds, seats
+    from kankan.refstore import card_ref
+    cfg = project.reload_config()
+    seats.verify_owner(project, lease.seat, lease.session)
+    if prepared.get('session') != lease.session or load_state(project.paths, lease.seat).stop_requested:
+        return None
+    snap = project.trello.snapshot(cfg.board_id)
+    check_registry(cfg, snap.desc)
+    check_lists(cfg, snap.lists)
+    value = project.refs.read(card_ref(prepared['card']))
+    if value is None or ('ref_oid' in prepared and value.oid != prepared['ref_oid']) or value.meta.get('owner') != lease.seat:
+        return None
+    role = 'review' if value.meta.get('phase') == 'review' else 'implementation'
+    if value.meta.get('phase') not in ('impl', 'review') or prepared.get('role', role) != role:
+        return None
+    card = snap.cards.get(prepared['card']) or project.trello.card(prepared['card'])
+    gone = card is None or card.closed or card.list_id != value.meta.get('target_list')
+    held = card is not None and has_hold(project, card)
+    task = dict(prepared)
+    if gone or held:
+        dirty = worktrees.dirty_files(project.paths.seat_worktree(lease.seat))
+        if not dirty:
+            cause = _user_cause(project, card or _gone_card(prepared['card'], value.meta)) if gone else 'yield'
+            agentcmds.kankan_yield(project, lease, card, value, cause)
+            return None
+        task['kind'] = 'hold_wip'
+        task['suspend_cause'] = 'user_moved' if gone else 'hold'
+    card = card or _gone_card(prepared['card'], value.meta)
+    return task, card
+
+
+def activate_task(project, lease: Lease, prepared: dict) -> Optional[dict]:
+    with project_lock(project.paths):
+        validated = _validate_prepared(project, lease, prepared)
+        if validated is None:
+            return None
+        task, card = validated
+        return _store_task(project, lease, task['kind'], card, task['branch'], task['resumed'], prepared=task)
+
+
+def refresh_task(project, lease: Lease, task: dict) -> Optional[dict]:
+    """Revalidate an activated but unsent assignment, retaining its task ID and pinned pair."""
+    with project_lock(project.paths):
+        validated = _validate_prepared(project, lease, dict(task, session=lease.session))
+        if validated is None:
+            return None
+        updated = {key: value for key, value in validated[0].items() if key != 'session'}
+        def replace(state):
+            if state.task and state.task.get('id') == task['id']:
+                state.task = updated
+                return updated
+            return None
+        return update_state(project.paths, lease.seat, replace)
+
+
+def release_unsent(project, lease: Lease, prepared: dict) -> bool:
+    """A stop arrived between a fresh claim and its prompt: give the untouched card back (T§3 Restart step 6).
+
+    Resumed work, a WIP-only task, a dirty worktree, a changed ref or a card no longer where the claim put it
+    stay as they are: the seat keeps them for its next start (or the user-move path handles them).
+    """
+    from kankan import agentcmds, seats
+    from kankan.refstore import card_ref
+    if prepared.get('resumed') or prepared.get('kind') not in ('impl', 'review') or not prepared.get('ref_oid'):
+        return False
+    with project_lock(project.paths):
+        seats.verify_owner(project, lease.seat, lease.session)
+        value = project.refs.read(card_ref(prepared['card']))
+        if value is None or value.oid != prepared['ref_oid'] or value.meta.get('owner') != lease.seat:
+            return False
+        if worktrees.dirty_files(project.paths.seat_worktree(lease.seat)):
+            return False
+        card = project.trello.card(prepared['card'])
+        if card is None or card.closed or card.list_id != value.meta.get('target_list'):
+            return False
+        agentcmds.kankan_yield(project, lease, card, value)
+        def clear(state):
+            if state.task and state.task.get('card') == prepared['card']:
+                state.task = None
+                state.signal = None
+        update_state(project.paths, lease.seat, clear)
+    project.log("stop_yield", seat=lease.seat, card=prepared['card'])
+    return True
 
 
 def _user_cause(project, card: Card) -> str:
@@ -284,9 +416,11 @@ def _user_cause(project, card: Card) -> str:
     return "user_archived" if card.closed else "user_moved"
 
 
-def _store_task(project, lease: Lease, kind: str, card: Card, branch: Optional[str], resumed: bool) -> dict:
+def _store_task(project, lease: Lease, kind: str, card: Card, branch: Optional[str], resumed: bool, *, prepared=None) -> dict:
     task = {"id": uuid.uuid4().hex[:12], "kind": kind, "card": card.id, "short": card.short, "branch": branch,
             "resumed": resumed}
+    if prepared:
+        task.update({key: prepared[key] for key in ("role", "model", "effort", "suspend_cause", "ref_oid") if key in prepared})
 
     def store(state):
         state.task = task
@@ -324,4 +458,19 @@ def waiting_reasons(project, snap: Snapshot, refs: Dict[str, RefValue], types: O
                 reasons[card.id] = "ineligible_phase"
             elif not (types - {value.meta.get("implementer_type")}):
                 reasons[card.id] = "no_reviewer_type"
+    for card in snap.cards.values():
+        if card.id in reasons:
+            continue
+        if card.list_id == project.cfg.backlog:
+            eligible, role = types, 'implementation'
+        elif card.list_id in implemented_lists:
+            value = refs.get(card.id)
+            eligible, role = types - {value.meta.get('implementer_type')} if value else set(), 'review'
+        else:
+            continue
+        if eligible:
+            value = boardconfig.effective(project.paths, role)
+            blocks = [boardsettings.role_block(project, name, role, value[name]) if name in value else 'model_check_unverified' for name in eligible]
+            if all(blocks):
+                reasons[card.id] = 'model_check_failed' if 'model_check_failed' in blocks else 'model_check_unverified'
     return reasons

@@ -22,13 +22,13 @@ REGISTRY_START = "--- kankan-registry ---"
 REGISTRY_END = "--- end kankan-registry ---"
 
 
-def atomic_write_json(path: Path, obj) -> None:
+def atomic_write_json(path: Path, obj, *, sort_keys: bool = True) -> None:
     """Write JSON to a temp file in the same directory, fsync, then rename over ``path``."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
     try:
-        os.write(fd, (json.dumps(obj, indent=2, sort_keys=True, default=str) + "\n").encode())
+        os.write(fd, (json.dumps(obj, indent=2, sort_keys=sort_keys, default=str) + "\n").encode())
         os.fsync(fd)
         os.close(fd)
         fd = -1
@@ -125,6 +125,8 @@ class Config:
     new_conversation: Dict[str, str] = field(default_factory=dict)
     kankan_member_id: str = ""  # kankan's own Trello account (the token owner)
     kankan_username: str = ""
+    settings_list: Optional[str] = None
+    settings_poll_seconds: int = 30
     attachment_max_bytes: int = 26214400  # per downloaded card attachment (spec §13.3)
 
     def to_dict(self) -> dict:
@@ -143,6 +145,8 @@ class Config:
         if "credentials_keys" in data:
             data["credentials_keys"] = tuple(data["credentials_keys"])
         cfg = cls(**data)
+        if isinstance(cfg.settings_poll_seconds, bool) or not isinstance(cfg.settings_poll_seconds, int) or cfg.settings_poll_seconds <= 0:
+            raise ValueError("settings_poll_seconds must be a positive integer")
         limit = cfg.attachment_max_bytes
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError(f"attachment_max_bytes must be a positive integer, not {limit!r}")
@@ -166,7 +170,10 @@ class Config:
 
 
 def load_config(paths: Paths) -> Config:
-    raw = read_json(paths.kankan_dir / "config.json", None)
+    try:
+        raw = read_json(paths.kankan_dir / "config.json", None)
+    except ValueError as err:  # malformed JSON
+        raise KankanError(Status.CONFIG_ERROR, f"invalid {paths.kankan_dir / 'config.json'}: {err}")
     if raw is None:
         raise KankanError(Status.CONFIG_ERROR, "kankan is not initialized in this repository: run `kankan init <board-url>`")
     try:

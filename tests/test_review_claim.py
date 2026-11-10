@@ -89,6 +89,9 @@ def test_single_type_leaves_cards_waiting(board):
     refs = {card["id"]: ref({"phase": "implemented", "implementer": "claude-1", "implementer_type": "claude"})}
     snap = project.trello.snapshot(project.cfg.board_id)
     assert workflow.waiting_reasons(project, snap, refs, types={"claude"}) == {card["id"]: "no_reviewer_type"}
+    from kankan.adapters import load_adapter, ModelEffort
+    from kankan.modelcheck import check
+    check(load_adapter(project.paths, 'codex'), ModelEffort('gpt-6.1-sol', 'high'))
     assert workflow.waiting_reasons(project, snap, refs, types={"claude", "codex"}) == {}
 
 

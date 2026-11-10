@@ -60,7 +60,7 @@ def test_override_changes_classification(git_repo, isolated_home):
     adapter = load_adapter(paths, "claude")
     assert adapter.working and adapter.new_conversation == "/clear"
     user = isolated_home / ".config" / "kankan" / "agents.json"
-    user.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True, exist_ok=True)
     user.write_text(json.dumps({"claude": {"new_conversation": "/new"}}))
     assert load_adapter(paths, "claude").new_conversation == "/new"
 
@@ -91,3 +91,43 @@ def test_adapter_check_cli_file(capsys):
     code = cli.main(["adapter", "check", str(SCREENS / "working__codex_working.txt"), "--json"])
     out = json.loads(capsys.readouterr().out)
     assert code == 0 and out["data"]["state"] == "working" and out["data"]["type"] == "codex"
+
+
+def test_ordered_models_replace_and_build_argv(git_repo, isolated_home):
+    from kankan.adapters import ModelEffort, adapter_types, combinations, start_command
+    from kankan.config import atomic_write_json
+    paths = Paths.discover(git_repo)
+    target = paths.kankan_dir / 'agents.json'
+    atomic_write_json(target, {'claude': {'models': {'z-model': {'efforts': ['high', 'low']},
+                                                   'a-model': {'efforts': ['low']}},
+                                        'seed': {role: {'model': 'z-model', 'effort': 'high'} for role in ('implementation', 'review')}}},
+                      sort_keys=False)
+    adapter = load_adapter(paths, 'claude', read_only=True)
+    assert combinations(adapter) == [ModelEffort('z-model', 'high'), ModelEffort('z-model', 'low'), ModelEffort('a-model', 'low')]
+    assert start_command(adapter, ModelEffort('z-model', 'high'))[-4:] == ['--model', 'z-model', '--effort', 'high']
+    assert adapter.exit_timeout_seconds == 20 and adapter.start_timeout_seconds == 120
+    assert adapter.model_check_timeout_seconds == 90 and adapter.model_check_retry_seconds == 600
+    data = json.loads(target.read_text())
+    from importlib import resources
+    third = json.loads(resources.files('kankan').joinpath('adapters_default.json').read_text())['claude']
+    data['third'] = third | data['claude'] | {'command': ['third']}
+    atomic_write_json(target, data, sort_keys=False)
+    assert adapter_types(paths) == ['claude', 'codex', 'third']
+    assert load_adapter(paths, 'third').command == ['third']
+
+
+@pytest.mark.parametrize('change', [
+    {'models': {'bad': {'efforts': []}}}, {'models': {'bad\nmodel': {'efforts': ['high']}}},
+    {'model_args': ['{unknown}']}, {'model_args': ['{model!r}']},
+    {'model_args': ['{model', '}']}, {'start_timeout_seconds': False},
+    {'model_check_retry_seconds': 0}, {'restart_keep': ['[']},
+    {'seed': {'implementation': {'model': 'absent', 'effort': 'low'}}},
+    {'models': {f'm{i}': {'efforts': ['high']} for i in range(62)}},
+])
+def test_invalid_model_adapter_rejected(git_repo, change):
+    from kankan.config import atomic_write_json
+    from kankan.errors import KankanError
+    paths = Paths.discover(git_repo)
+    atomic_write_json(paths.kankan_dir / 'agents.json', {'claude': change})
+    with pytest.raises(KankanError):
+        load_adapter(paths, 'claude', read_only=True)
