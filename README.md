@@ -15,7 +15,7 @@ The agents integrate into the branch `kankan-agents`; `main` stays yours: `git m
 
 - User manual: [docs/user-manual.md](docs/user-manual.md)
 - Developer manual: [docs/developer-manual.md](docs/developer-manual.md)
-- Specification: [functional](aispecs/kankan_spec_functional.md) and [technical](aispecs/kankan_spec_technical.md)
+- Specification: the initial [functional](aispecs/initial_spec_functional.md) and [technical](aispecs/initial_spec_technical.md) specification, plus one pair per feature: [board settings](aispecs/boardsettings_spec_functional.md) (draft)
 - Kanban backend requirements: [aispecs/kanban_requirements.md](aispecs/kanban_requirements.md)
 - Adapter observations: [docs/adapter-notes.md](docs/adapter-notes.md)
 - Implementation plan: [aiplans/2026-11-08-kankan.md](aiplans/2026-11-08-kankan.md)

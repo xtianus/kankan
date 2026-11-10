@@ -1,6 +1,7 @@
 # kankan — agent instructions
 
-- Always update the specification before writing a plan for a new feature. Specification: `aispecs/kankan_spec_functional.md` (what users and agents observe) and `aispecs/kankan_spec_technical.md` (how kankan implements it); both share one section numbering.
+- Always update the specification before writing a plan for a new feature. The specification is the set of files in `aispecs/`: the initial pair `initial_spec_functional.md` (what users and agents observe) and `initial_spec_technical.md` (how kankan implements it), which share one section numbering, plus one pair per feature, `<feature>_spec_functional.md` and `<feature>_spec_technical.md`.
+- A new feature gets its own pair, with its own numbering and a chapter stating how it changes the initial behaviour (by initial section number); it is planned from its pair. A feature's pair stays its specification after implementation and is never merged into the initial files; its status line says whether it is implemented. Current features: `boardsettings_spec_*` (board settings, model and effort; draft).
 - Kanban backend requirements: `aispecs/kanban_requirements.md`.
 - Implementation plans: `aiplans/`. Project knowledge base: `aiknowledge/notes.md`.
 - Python code uses 4-space indentation (PEP 8), overriding the global tabs rule (see `.editorconfig`).

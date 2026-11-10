@@ -1,6 +1,6 @@
 # kankan developer manual
 
-For using kankan see the [user manual](user-manual.md). The design is in [`aispecs/kankan_spec_functional.md`](../aispecs/kankan_spec_functional.md) and [`aispecs/kankan_spec_technical.md`](../aispecs/kankan_spec_technical.md), which share one section numbering; links marked "spec §" point to their sections, links marked "section" to this manual's.
+For using kankan see the [user manual](user-manual.md). The design is in [`aispecs/initial_spec_functional.md`](../aispecs/initial_spec_functional.md) and [`aispecs/initial_spec_technical.md`](../aispecs/initial_spec_technical.md), which share one section numbering; links marked "spec §" point to their sections, links marked "section" to this manual's.
 
 ## 1. Setup and tests
 
@@ -17,7 +17,7 @@ Runtime code uses the Python standard library only (Python ≥ 3.10); pytest is 
 - `slow`: slow tests;
 - `trello_live`: runs against a real Trello test board; excluded by default (`addopts = "-m 'not trello_live'"`).
 
-The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent ([spec §18.1](../aispecs/kankan_spec_technical.md#181-strategy)).
+The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent ([spec §18.1](../aispecs/initial_spec_technical.md#181-strategy)).
 
 ## 2. Agent adapters
 
@@ -25,7 +25,7 @@ The default adapters are in `kankan/adapters_default.json`; the screens they wer
 
 ## 3. Live Trello test board
 
-The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and labels on a real board ([spec §18.2](../aispecs/kankan_spec_technical.md#182-test-board)). Use a **dedicated** board: never point them at a board with real work.
+The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and labels on a real board ([spec §18.2](../aispecs/initial_spec_technical.md#182-test-board)). Use a **dedicated** board: never point them at a board with real work.
 
 Two Trello accounts take part, as in real use: **yours**, which owns the test board, and **the kankan bot account**, a separate Trello account that kankan acts as. Create the bot account as described in [user manual §3.1](user-manual.md#31-a-trello-account-for-kankan) (with an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake); the sections below say which account does what.
 

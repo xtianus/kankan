@@ -17,7 +17,7 @@ Observations made on 2026-11-08 on the development server with Claude Code 2.1.3
 ## Codex 0.167.0
 
 - **Trust window:** "Folder access … Trust this folder? … › 1. Trust and continue". Digits do not select; the first option is preselected. Answer: `Enter`.
-- **Ready:** `› Ask Codex to do anything` with the footer `? for shortcuts`. The same footer stays visible while Codex works, so *working* must take precedence over *ready* (it does, [spec §8.6](../aispecs/kankan_spec_technical.md#86-pane-observation-and-writes)).
+- **Ready:** `› Ask Codex to do anything` with the footer `? for shortcuts`. The same footer stays visible while Codex works, so *working* must take precedence over *ready* (it does, [spec §8.6](../aispecs/initial_spec_technical.md#86-pane-observation-and-writes)).
 - **Working:** `• Working (3s • esc to interrupt)`.
 - **New conversation:** `/new` opens the dialog "Where should the new conversation run? › 1. Use current Git worktree / 2. Create new Git worktree"; it is a known dialog answered with `Enter` (keeps the seat worktree).
 - **Queueing while working:** a message typed and submitted while Codex was working stayed in the composer and was not sent, so `queue_while_working: false`: the launcher waits for *ready* before sending a suspension request.
