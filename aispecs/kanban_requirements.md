@@ -2,7 +2,7 @@
 
 **Status:** v1.2 (v1.1: card attachments, [section 9](#9-card-attachments), planned for spec v1.3; v1.2: card attachment endpoints in use)
 **Date:** 2026-11-09
-**Related:** [`kankan_spec.md`](kankan_spec.md)
+**Related:** [`kankan_spec_functional.md`](kankan_spec_functional.md), [`kankan_spec_technical.md`](kankan_spec_technical.md)
 
 ## 1. Purpose
 
@@ -24,7 +24,7 @@ Requirement levels:
 | G5 | MUST | Distinguishable error classes: authentication, not found, validation, rate limiting (with a retry hint such as HTTP 429 and `Retry-After`) and server errors. |
 | G6 | MUST | A documented rate limit high enough for ~10 agents polling every 2 minutes plus bursts of a few dozen requests (Trello: about 100 requests per 10 seconds per token). |
 | G7 | SHOULD | Writes are idempotent or can carry a client-supplied idempotency key, so a retry after a timeout cannot duplicate a comment or a label. kankan's workaround: read back before retrying and embed an operation marker in comment text. |
-| G8 | MAY | Conditional updates (ETag/`If-Match`, a version number or "move only if still in list X"). Trello lacks them; with them, kankan could guarantee that a human's concurrent move is never overwritten (see [spec §14.5](kankan_spec.md#145-precedence-of-human-changes)). |
+| G8 | MAY | Conditional updates (ETag/`If-Match`, a version number or "move only if still in list X"). Trello lacks them; with them, kankan could guarantee that a human's concurrent move is never overwritten (see [spec §14.5](kankan_spec_functional.md#145-precedence-of-human-changes)). |
 | G9 | MAY | Webhooks or an event stream for card moves, label changes and new comments, to replace polling. |
 
 ## 3. Boards
@@ -44,7 +44,7 @@ Requirement levels:
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| L1 | MUST | Create a list with a given name on a board. Used by `init` (Backlog, Done, Blocked) and by automatic seat creation (three lists per seat). Existing lists with the same name are found through the B3 read and adopted (after confirmation in `init`). | `POST /1/lists` (`name`, `idBoard`, `pos`) |
+| L1 | MUST | Create a list with a given name on a board. Used by `init` (Backlog, Done, Blocked), by automatic seat creation (three lists per seat) and, planned, by `init` and `doctor` for the `kankan` settings list ([spec §14.7](kankan_spec_functional.md#147-board-settings)). Existing lists with the same name are found through the B3 read and adopted (after confirmation in `init`). | `POST /1/lists` (`name`, `idBoard`, `pos`) |
 | L2 | MUST | Archive (or delete) a list. Used by `seat remove` and by test cleanup. | `PUT /1/lists/{id}/closed` |
 | L3 | MUST | Detect that a configured list was archived or deleted. | `GET /1/lists/{id}` (`closed`, or 404) |
 | L4 | MUST | Unlimited, or at least several dozen, lists per board, and lists created by humans that kankan ignores. | — |
@@ -59,7 +59,7 @@ Requirement levels:
 | C3 | MUST | Move a card to another list of the same board and place it at the top. kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top`) then `GET /1/cards/{id}` |
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
-| C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; deletion is used only by the live test suites. Without it, merge requests are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
+| C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; planned: `init` and `doctor` create the setting cards of the `kankan` list ([spec §14.7](kankan_spec_functional.md#147-board-settings)). Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
 
 ## 6. Labels
 
@@ -80,6 +80,7 @@ Requirement levels:
 | M3 | MUST | Mentioning a user in a comment (e.g. `@username`) sends that user a notification (app, push or email). This is how kankan alerts the user about Question, Error and Blocked. | Trello `@mention` behaviour |
 | M4 | SHOULD | React to a comment or reply to it, to acknowledge that a comment was forwarded. Workaround: post a new comment. | `POST /1/actions/{id}/reactions` |
 | M5 | MUST | Identify the authenticated user (ID and username). | `GET /1/members/me` |
+| M6 | SHOULD | Delete a comment written by kankan's own account. Planned: kankan keeps only its latest 10 comments on each setting card ([spec §14.7](kankan_spec_functional.md#147-board-settings)). Without it, setting cards accumulate kankan's comments. | planned: `DELETE /1/cards/{id}/actions/{idAction}/comments` |
 
 ## 8. Card-to-card links (dependencies)
 
@@ -92,7 +93,7 @@ Requirement levels:
 
 ## 9. Card attachments
 
-Files and links the user attaches to a card are task inputs for the agent ([spec §13.3](kankan_spec.md#133-card-attachments)). Card-to-card links are dependencies ([section 8](#8-card-to-card-links-dependencies)), not task inputs.
+Files and links the user attaches to a card are task inputs for the agent ([spec §13.3](kankan_spec_functional.md#133-card-attachments)). Card-to-card links are dependencies ([section 8](#8-card-to-card-links-dependencies)), not task inputs.
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
@@ -116,4 +117,4 @@ Files and links the user attaches to a card are task inputs for the agent ([spec
 
 ## 12. Adapter checklist
 
-An adapter for a new backend is complete when it implements every MUST above behind the interface of kankan's `trello` module, and the `trello_live` acceptance tests ([spec §18](kankan_spec.md#18-tests)) pass against a dedicated test board of that product.
+An adapter for a new backend is complete when it implements every MUST above behind the interface of kankan's `trello` module, and the `trello_live` tests ([spec §18.2](kankan_spec_technical.md#182-test-board)) pass against a dedicated test board of that product.

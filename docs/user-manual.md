@@ -2,8 +2,6 @@
 
 kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours ([section 4.1](#41-working-alongside-the-agents)). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
 
-The design is in [`aispecs/kankan_spec.md`](../aispecs/kankan_spec.md); links marked "spec §" point to its sections, links marked "section" to this manual's.
-
 ## 1. Requirements
 
 - Linux, Python ≥ 3.10, Git ≥ 2.38, tmux ≥ 3.2 and pipx; Claude Code and/or Codex CLI installed and logged in. Install both agent CLIs for the workflow where an agent of the other type reviews each implementation.
