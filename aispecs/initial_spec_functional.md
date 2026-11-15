@@ -4,7 +4,7 @@
 **Date:** 2026-11-10
 **Companion:** [`initial_spec_technical.md`](initial_spec_technical.md) — how kankan implements this behaviour.
 **Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (requirements for backends other than Trello)
-**Feature specifications:** the kankan specification is the set of specification files in this folder: this initial pair and one pair per feature, `<feature>_spec_functional.md` and `<feature>_spec_technical.md`, each with its own numbering and a chapter stating how the feature changes the initial behaviour. Features: [board settings](boardsettings_spec_functional.md) (draft, not implemented).
+**Feature specifications:** the kankan specification is the set of specification files in this folder: this initial pair and one pair per feature, `<feature>_spec_functional.md` and `<feature>_spec_technical.md`, each with its own numbering and a chapter stating how the feature changes the initial behaviour. Features: [board settings](boardsettings_spec_functional.md), [questions (Q&A)](questions_spec_functional.md).
 **Language:** everything is in English: this specification, the implementation plan, the code, code comments and the user manual.
 
 **Split rule.** This file describes what users and agents observe: the board, the CLI, the workflow, labels and comments, branches, guarantees and acceptance tests. The technical file describes how: modules, local files, refs, locks, processes, protocols and test strategy. Both files share one section numbering; a number missing here lives in the other file.
