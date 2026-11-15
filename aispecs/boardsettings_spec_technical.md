@@ -1,6 +1,6 @@
 # kankan board settings — technical specification
 
-**Status:** implemented locally; release observation gates remain for Claude exit behavior, UI-originated Trello checklist activity and execution under Python 3.10. See the [implementation review](../aiplans/2026-11-10-boardsettings-review.md).
+**Status:** implemented locally; Claude and Codex exit behavior and UI-originated Trello checklist activity observed in the live agents run of 2026-11-15 ([adapter notes](../docs/adapter-notes.md)); the release observation gate remaining is execution under Python 3.10. See the [implementation review](../aiplans/2026-11-10-boardsettings-review.md).
 **Date:** 2026-11-10
 **Base:** [`initial_spec_technical.md`](initial_spec_technical.md) v1.3; this feature changes it as listed in [§4](#4-changes-to-the-initial-technical-specification).
 **Companion:** [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md) — the behaviour this file implements; read it first.

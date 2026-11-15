@@ -386,10 +386,13 @@ def _main(args, state) -> int:
                 sha256 = es.attachment_sha256(client, cards["attach"].id, upload, cfg.attachment_max_bytes)
         problems += es.verify_run(project, client, cards, origin, ask_ran=not args.no_ask, hold_ran=not args.no_hold,
                                   user_refs=user_refs, attach_sha256=sha256, selection=selection)
+        from kankan import auditlog
+        events = auditlog.read(project.paths)
         if selection is not None:
-            from kankan import auditlog
-            for line in es.restart_report(auditlog.read(project.paths))[1]:
+            for line in es.restart_report(events)[1]:
                 say(f"observed: {line}")
+        if "hold" in cards and es.hold_path(events, cards["hold"].id):
+            say(f"observed: HOLD noticed first by {es.hold_path(events, cards['hold'].id)}")
         if problems:
             say("FAILED:")
             for p in problems:

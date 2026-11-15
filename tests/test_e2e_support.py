@@ -254,8 +254,16 @@ def test_hold_problems():
             _ev("transition", card="H", phase="parked"),
             _ev("task_assigned", seat="codex-1", kind="impl", card="H", branch="26kankan-Hh")]
     assert es.hold_problems(good, "H") == []
-    no_suspend = [e for e in good if e["event"] != "suspend_requested"]
-    assert len(es.hold_problems(no_suspend, "H")) == 1
+    assert es.hold_path(good, "H").startswith("the launcher")
+    # The agent saw HOLD in `kankan task` and yielded before the launcher's request (live run ke-1794762085).
+    agent_first = [good[0], good[2], good[1], good[3]]
+    assert es.hold_problems(agent_first, "H") == []
+    assert es.hold_path(agent_first, "H").startswith("the agent")
+    not_parked = [e for e in good if e["event"] != "transition"]
+    assert "not parked" in es.hold_problems(not_parked, "H")[0]
+    assert es.hold_path(not_parked, "H") is None
+    never_resumed = good[:3]
+    assert "not implemented again" in es.hold_problems(never_resumed, "H")[0]
     other_branch = good[:3] + [_ev("task_assigned", seat="codex-1", kind="impl", card="H", branch="26kankan-Xx")]
     assert len(es.hold_problems(other_branch, "H")) == 1
 

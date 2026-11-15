@@ -453,27 +453,48 @@ def settled(project, client: TrelloClient, cards: Dict[str, Card], origin: Path)
     return _rev(origin, f"refs/heads/{branch}") == _rev(project.paths.repo, f"refs/heads/{branch}")
 
 
-def hold_problems(events: List[dict], card_id: str) -> List[str]:
-    """impl → suspend_requested by that seat → parked → impl again on the same branch."""
+def _hold_parking(events: List[dict], card_id: str):
+    """(index of the first impl assignment, index of the first parking after it), each None when absent."""
     impls = [i for i, e in enumerate(events)
              if e.get("event") == "task_assigned" and e.get("card") == card_id and e.get("kind") == "impl"]
     if not impls:
-        return ["hold: the card was never assigned for implementation"]
-    first = events[impls[0]]
-    suspend = next((i for i in range(impls[0] + 1, len(events)) if events[i].get("event") == "suspend_requested"
-                    and events[i].get("seat") == first.get("seat")), None)
-    if suspend is None:
-        return [f"hold: no suspension was requested from {first.get('seat')} (was HOLD set while it worked?)"]
-    parked = next((i for i in range(suspend + 1, len(events)) if events[i].get("event") == "transition"
+        return None, None
+    parked = next((i for i in range(impls[0] + 1, len(events)) if events[i].get("event") == "transition"
                    and events[i].get("card") == card_id and events[i].get("phase") == "parked"), None)
+    return impls[0], parked
+
+
+def hold_problems(events: List[dict], card_id: str) -> List[str]:
+    """impl → parked (the agent yielded) → impl again on the same branch.
+
+    Either side may notice HOLD first: the launcher (suspension request queued for the agent) or the agent itself,
+    when `kankan task` reports `hold: true` (spec §9.4, skill); so the order of `suspend_requested` and the parking
+    is not checked (see ``hold_path``)."""
+    first_i, parked = _hold_parking(events, card_id)
+    if first_i is None:
+        return ["hold: the card was never assigned for implementation"]
+    first = events[first_i]
     if parked is None:
-        return ["hold: the card was not parked after the suspension request"]
-    resumed = [events[i] for i in impls if i > parked]
-    if not resumed:
+        return [f"hold: the card was not parked after {first.get('seat')} started it (was HOLD set while it worked?)"]
+    impls = [i for i, e in enumerate(events) if i > parked and e.get("event") == "task_assigned"
+             and e.get("card") == card_id and e.get("kind") == "impl"]
+    if not impls:
         return ["hold: the card was not implemented again after HOLD was removed"]
-    if resumed[0].get("branch") != first.get("branch"):
-        return [f"hold: resumed on branch {resumed[0].get('branch')} instead of {first.get('branch')}"]
+    resumed = events[impls[0]]
+    if resumed.get("branch") != first.get("branch"):
+        return [f"hold: resumed on branch {resumed.get('branch')} instead of {first.get('branch')}"]
     return []
+
+
+def hold_path(events: List[dict], card_id: str) -> Optional[str]:
+    """Who noticed HOLD first on the slow card, for the run's observations."""
+    first_i, parked = _hold_parking(events, card_id)
+    if parked is None:
+        return None
+    seat = events[first_i].get("seat")
+    asked = any(e.get("event") == "suspend_requested" and e.get("seat") == seat for e in events[first_i:parked])
+    return ("the launcher: suspension request, then the agent yielded" if asked else
+            "the agent: `kankan task` reported HOLD and it yielded before the launcher's request")
 
 
 def review_problems(events: List[dict], card: Card) -> List[str]:
