@@ -34,11 +34,11 @@ def lists_named(fake, board_id, name):
 
 
 def test_scenario_flags():
-    assert [c.key for c in es.scenario(ask=False, hold=False)] == ["hello", "word", "name"]
+    assert [c.key for c in es.scenario(ask=False, hold=False, attach=False)] == ["hello", "word", "name"]
     full = es.scenario()
-    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold"]
+    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold", "attach"]
     assert {c.key: c.interactive for c in full} == {"hello": None, "word": None, "name": None, "ask": "ask",
-                                                     "hold": "hold"}
+                                                     "hold": "hold", "attach": "attach"}
     assert all("never push `main`" in c.desc for c in full)
 
 
@@ -110,7 +110,7 @@ def test_create_cards_order_and_names(board, tmp_path, virtual_time):
     clone, _ = es.make_repos(tmp_path)
     cfg = es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     cards = es.create_cards(client(fake), cfg, "ke-1-abc", es.scenario())
-    assert list(cards) == ["hello", "word", "name", "ask", "hold"]
+    assert list(cards) == ["hello", "word", "name", "ask", "hold", "attach"]
     assert cards["hello"].name == "ke-1-abc Say hello" and "greetings.txt" in cards["hello"].desc
     order = sorted((c for c in fake.state["cards"].values() if c["idList"] == cfg.backlog), key=lambda c: c["pos"])
     assert [c["id"] for c in order] == [c.id for c in cards.values()]
@@ -372,3 +372,150 @@ def test_kankan_link_refuses_another_installation(isolated_home, tmp_path, monke
     assert str(link) in str(exc.value)
     es.remove_kankan_link(link)  # never removes something that is not our link
     assert link.exists()
+
+
+# ---------------------------------------------------------------- attachments and board settings
+
+def test_attach_card_starts_on_hold(board, tmp_path, virtual_time):
+    fake, b, creds = board
+    clone, _ = es.make_repos(tmp_path)
+    cfg = es.bind(clone, tmp_path, b["url"], creds, lambda text: None)
+    cards = es.create_cards(client(fake), cfg, "ke-1", es.scenario(ask=False, hold=False))
+    assert cfg.label_hold in fake.state["cards"][cards["attach"].id]["idLabels"]
+    assert cfg.label_hold not in fake.state["cards"][cards["hello"].id]["idLabels"]
+
+
+def test_user_upload_and_sha256(fake_trello):
+    import hashlib
+    b = fake_trello.add_board("b")
+    card = fake_trello.add_card(fake_trello.add_list(b["id"], "Backlog")["id"], "c")
+    person = fake_trello.add_member("person")
+    c = client(fake_trello)
+    fake_trello.upload(card["id"], "mine.txt", b"bot\n", member_id=fake_trello.me["id"])  # kankan's own upload is not a task input
+    fake_trello.add_attachment(card["id"], "https://example.com/x", member_id=person["id"])
+    assert es.user_upload(c, card["id"], fake_trello.me["id"]) is None
+    fake_trello.upload(card["id"], "theirs.txt", b"from a person\n", "text/plain", member_id=person["id"])
+    upload = es.user_upload(c, card["id"], fake_trello.me["id"])
+    assert upload.file_name == "theirs.txt"
+    assert es.attachment_sha256(c, card["id"], upload, 1024) == hashlib.sha256(b"from a person\n").hexdigest()
+
+
+def test_attach_expected_file():
+    path, check, _ = es.EXPECTED_FILES["attach"]
+    assert path == "hashes.txt"
+    assert check("ab" * 32 + "\n", {"sha256": "ab" * 32})
+    assert not check("ab" * 32 + "  theirs.txt\n", {"sha256": "ab" * 32})
+    assert not check("\n", {"sha256": ""})
+
+
+def _settings_read(ticks):
+    """A settings read with cards {role: {type: [(item, ticked)]}}."""
+    from kankan.trello import Card, CheckItem, Checklist, SettingsRead
+    cards = []
+    for n, (role, lists) in enumerate(ticks.items()):
+        card = Card(f"c{n}", f"s{n}", "b", role, "", "", "l", n, [], [], False, "")
+        card.checklists = [Checklist(f"{role}-{t}", card.id, t, i,
+                                     [CheckItem(f"{role}-{t}-{j}", name, "complete" if on else "incomplete", j)
+                                      for j, (name, on) in enumerate(items)])
+                           for i, (t, items) in enumerate(lists.items())]
+        cards.append(card)
+    return SettingsRead(cards, None, True)
+
+
+def _adapters():
+    from types import SimpleNamespace
+    return {"claude": SimpleNamespace(type="claude", command=["claude"], model_args=[], effort_args=[],
+                                      models={"opus": {"efforts": ["high", "low"]}, "haiku": {"efforts": ["low"]}})}
+
+
+def test_settings_targets_pick_cheapest_new_review_pair():
+    from kankan.adapters import ModelEffort
+    items = [("opus · high", False), ("opus · low", False), ("haiku · low", False)]
+    impl = [(n, n == "opus · high") for n, _ in items]
+    review = [(n, n == "haiku · low") for n, _ in items]
+    read = _settings_read({"implementation": {"claude": impl}, "review": {"claude": review}})
+    targets = es.settings_targets(read, _adapters())
+    assert targets == {"claude": ModelEffort("opus", "low")}
+    assert not es.settings_ready(read, targets)
+    done = _settings_read({"review": {"claude": [(n, n == "opus · low") for n, _ in items]}})
+    assert es.settings_ready(done, targets)
+    two = _settings_read({"review": {"claude": [(n, n != "opus · high") for n, _ in items]}})
+    assert not es.settings_ready(two, targets)
+
+
+def test_settings_targets_without_a_free_pair():
+    items = [("opus · high", True), ("opus · low", True), ("haiku · low", True)]
+    read = _settings_read({"implementation": {"claude": items}, "review": {"claude": items}})
+    with pytest.raises(ValueError):
+        es.settings_targets(read, _adapters())
+
+
+def test_selection_problems():
+    from kankan.adapters import ModelEffort, start_command
+    adapters = _adapters()
+    adapters["claude"].model_args, adapters["claude"].effort_args = ["--model", "{model}"], ["--effort", "{effort}"]
+    card = type("C", (), {"id": "card1", "name": "ke-1 word"})()
+    impl, review = ModelEffort("opus", "high"), ModelEffort("opus", "low")
+    expected = {"implementation": {"claude": impl}, "review": {"claude": review}}
+    events = [_ev("agent_started", seat="claude-1", command=start_command(adapters["claude"], impl)),
+              _ev("task_assigned", seat="claude-1", card="card1", role="implementation", model="opus", effort="high"),
+              _ev("task_assigned", seat="claude-1", card="card1", role="review", model="opus", effort="low")]
+    problems = es.selection_problems(events, {"word": card}, expected, adapters)
+    assert len(problems) == 1 and "started with" in problems[0], problems
+    events.insert(2, _ev("agent_started", seat="claude-1", command=start_command(adapters["claude"], review)))
+    assert es.selection_problems(events, {"word": card}, expected, adapters) == []
+    events[-1]["effort"] = "high"
+    assert "instead of opus/low" in es.selection_problems(events, {"word": card}, expected, adapters)[0]
+
+
+def test_applied_problems():
+    from kankan.adapters import ModelEffort
+    targets = {"claude": ModelEffort("haiku", "low"), "codex": ModelEffort("mini", "low")}
+    ok = "applied: `claude opus/high, codex big/high` → `claude haiku/low, codex mini/low`, from the next task"
+    assert es.applied_problems(["help", ok], targets) == []
+    assert "no `applied:`" in es.applied_problems([], targets)[0]
+    wrong = "applied: `claude haiku/low, codex big/high` → `claude opus/high, codex mini/low`, from the next task"
+    assert len(es.applied_problems([wrong], targets)) == 1
+
+
+def test_restart_report():
+    events = [_ev("task_assigned", seat="claude-1", model="opus", effort="high"),
+              _ev("task_assigned", seat="claude-1", model="opus", effort="low"),
+              _ev("task_assigned", seat="codex-1", model="big", effort="high"),
+              _ev("task_assigned", seat="codex-1", model="mini", effort="low"),
+              _ev("agent_restart", seat="codex-1", ended="exit_command"),
+              _ev("task_assigned", seat="codex-2", model="big", effort="high"),
+              _ev("task_assigned", seat="codex-2", model="big", effort="high")]
+    problems, seen = es.restart_report(events)
+    assert problems == ["claude-1: ran tasks with 2 model/effort pairs but never restarted its agent"]
+    assert seen == ["codex-1: old agent ended by exit_command"]
+    events.append(_ev("agent_restart", seat="claude-1", ended="sigterm"))
+    problems, _ = es.restart_report(events)
+    assert problems == ["claude-1: old agent needed sigterm (the exit command did not end it)"]
+
+
+def test_verify_run_checks_selection_and_claim_comments(run):
+    from kankan import boardconfig
+    project, fake, c, cards, origin, refs, _ = run
+    selection = {role: dict(boardconfig.effective(project.paths, role)) for role in es.ROLES}
+    problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs,
+                             selection=selection)
+    assert problems == [], problems
+    other = {role: dict(values) for role, values in selection.items()}
+    from kankan.adapters import ModelEffort
+    other["review"]["codex"] = ModelEffort("not-a-model", "low")
+    problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs,
+                             selection=other)
+    assert any("not-a-model" in p and "review" in p for p in problems), problems
+    events = [dict(e, model="other") if e.get("event") == "task_assigned" else e for e in auditlog.read(project.paths)]
+    assert es.claim_comment_problems(c, events, cards, project.cfg.kankan_member_id), "claim comments not checked"
+
+
+def test_verify_run_attachment_dir_left(run):
+    from kankan import attachments
+    project, fake, c, cards, origin, refs, _ = run
+    attachments.card_dir(project.paths, cards["word"].short).mkdir(parents=True)
+    cards = {"attach": cards["word"], "name": cards["name"]}
+    problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs,
+                             attach_sha256="ab" * 32)
+    assert any("attachment directory" in p for p in problems), problems

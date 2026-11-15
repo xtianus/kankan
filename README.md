@@ -20,7 +20,7 @@ The agents integrate into the branch `kankan-agents`; `main` stays yours: `git m
 - Adapter observations: [docs/adapter-notes.md](docs/adapter-notes.md)
 - Implementation plan: [aiplans/2026-11-08-kankan.md](aiplans/2026-11-08-kankan.md)
 
-Development: `python -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m pytest -q` (tests marked `tmux` need tmux; `-m trello_live` runs against a real test board, see the developer manual).
+Development: `python -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/python -m pytest -q` (tests marked `tmux` need tmux; tests marked `trello_live` run against a real test board when one is configured and skip otherwise, see the developer manual).
 
 ## License
 

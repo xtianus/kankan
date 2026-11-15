@@ -1,7 +1,7 @@
 """Manual live run with real Claude Code and Codex agents on the Trello test board.
 
-    .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--timeout MIN] [--keep]
-                                              [--base DIR]
+    .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--no-attach] [--no-settings]
+                                              [--timeout MIN] [--keep] [--base DIR]
 
 Never collected by pytest. See docs/developer-manual.md §3.5.
 """
@@ -26,6 +26,8 @@ POLL = 10
 SETTLE_SECONDS = 300
 SHUTDOWN_SECONDS = 60
 SESSION_PREFIX = f"ai-{es.PROJECT_NAME}-"
+SETTINGS_WAIT_SECONDS = 900
+QUIET_SECONDS = 15  # kankan judges a setting card only when its last activity is at least 10 s old
 
 
 def say(text: str = "") -> None:
@@ -68,7 +70,7 @@ class Watch:
     def __init__(self, client, cfg, cards: Dict[str, object]):
         self.client, self.cfg, self.cards = client, cfg, cards
         self.last: Dict[str, str] = {}
-        self.ask_prompted = self.hold_prompted = self.hold_parked = False
+        self.ask_prompted = self.hold_prompted = self.hold_parked = self.attach_prompted = False
 
     def poll(self) -> Dict[str, object]:
         snap = self.client.snapshot(self.cfg.board_id)
@@ -96,6 +98,11 @@ class Watch:
                   f"@{cfg.kankan_username}), "
                   "for example: blue")
             self.ask_prompted = True
+        attach = state.get("attach")
+        if attach is not None and cfg.label_hold in attach.label_ids and not self.attach_prompted:
+            alert(f"Attach any small file to {attach.url} from your own account (not @{cfg.kankan_username}): "
+                  "\"Add > Attachment > Computer\". Then remove HOLD from the card so an agent takes it")
+            self.attach_prompted = True
         hold = state.get("hold")
         if hold is None:
             return
@@ -110,6 +117,47 @@ class Watch:
 
     def all_done(self, state) -> bool:
         return len(state) == len(self.cards) and all(c.list_id == self.cfg.done for c in state.values())
+
+
+def choose_settings(client, project, clone) -> tuple:
+    """Have the user tick, in the Trello UI, a different model and effort for reviews; return (selection, problems).
+
+    The review values differ from the implementation ones for every agent type, so each seat restarts its agent
+    between roles. Done before the agents start, so every task runs with the new values."""
+    from kankan import boardconfig, boardsettings, doctor
+    cfg, paths = project.cfg, project.paths
+    adapters = {t: a for t, a in boardsettings.adapters_for(paths).items() if t in ("claude", "codex")}
+    read = client.settings_cards(cfg.settings_list)
+    targets = es.settings_targets(read, adapters)
+    review = next(c for c in read.cards if c.name == "review" and not c.closed)
+    before = {c.id for c in client.comments(review.id)}
+    alert(f"On the `review` card of the `kankan` list ({review.url}), in each checklist untick the ticked item and "
+          "tick:\n" + "\n".join(f"      {t}: {pair.name}" for t, pair in targets.items()))
+    deadline = time.monotonic() + SETTINGS_WAIT_SECONDS
+    while not es.settings_ready(client.settings_cards(cfg.settings_list), targets):
+        if time.monotonic() > deadline:
+            say(f"timeout: the review card does not have the ticks above after {SETTINGS_WAIT_SECONDS // 60} min")
+            raise TimeoutError
+        time.sleep(POLL)
+    say(f"ticks seen; waiting {QUIET_SECONDS} s for the card to settle, then `kankan doctor` applies them")
+    effective = {}
+    for _ in range(4):
+        time.sleep(QUIET_SECONDS)
+        if not es.settings_ready(client.settings_cards(cfg.settings_list), targets):
+            say("the review ticks changed again; waiting for them to match")
+            continue
+        doctor.run(clone, fix=True, online=True, types=tuple(adapters))
+        effective = boardconfig.effective(paths, "review")
+        if all(effective.get(t) == pair for t, pair in targets.items()):
+            break
+    else:
+        say(f"timeout: kankan did not apply the review ticks (effective: {boardconfig.display(effective)})")
+        raise TimeoutError
+    selection = {"implementation": dict(boardconfig.effective(paths, "implementation")), "review": dict(effective)}
+    for role, values in selection.items():
+        say(f"  {role}: {boardconfig.display(values)}")
+    new = [c.text for c in client.comments(review.id) if c.id not in before and c.member_id == cfg.kankan_member_id]
+    return selection, es.applied_problems(new, targets)
 
 
 def save_diagnostics(project, tmux, run_dir: Path) -> Path:
@@ -200,6 +248,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m tests.live.agents_e2e", description=__doc__.splitlines()[0])
     parser.add_argument("--no-ask", action="store_true", help="skip the card that asks you a question")
     parser.add_argument("--no-hold", action="store_true", help="skip the card you put on HOLD")
+    parser.add_argument("--no-attach", action="store_true", help="skip the card you attach a file to")
+    parser.add_argument("--no-settings", action="store_true", help="skip ticking other review models on the board "
+                        "(the agents then use the model and effort already ticked)")
     parser.add_argument("--timeout", type=int, default=60, help="minutes before giving up (default 60)")
     parser.add_argument("--keep", action="store_true", help="leave agents, cards, registry and run directory "
                         "(for debugging; clean up later with --clean)")
@@ -289,7 +340,9 @@ def _main(args, state) -> int:
             say(doctor.report_text(project_checks))
             return 2
         project = Project.open(clone)
-        cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold))
+        selection, pre_problems = (None, []) if args.no_settings else choose_settings(client, project, clone)
+        cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold,
+                                                                 attach=not args.no_attach))
         card_ids += [c.id for c in cards.values()]
         wt = run_dir / "user-work-wt"
         subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "user-work", str(wt), "main"], check=True)
@@ -323,8 +376,20 @@ def _main(args, state) -> int:
         settle_deadline = time.monotonic() + SETTLE_SECONDS
         while time.monotonic() < settle_deadline and not es.settled(project, client, cards, origin):
             time.sleep(POLL)
-        problems = es.verify_run(project, client, cards, origin, ask_ran=not args.no_ask, hold_ran=not args.no_hold,
-                                 user_refs=user_refs)
+        sha256, problems = None, list(pre_problems)
+        if "attach" in cards:
+            upload = es.user_upload(client, cards["attach"].id, cfg.kankan_member_id)
+            if upload is None:
+                problems.append(f"{cards['attach'].name}: no file uploaded by a board member other than kankan")
+                sha256 = ""
+            else:
+                sha256 = es.attachment_sha256(client, cards["attach"].id, upload, cfg.attachment_max_bytes)
+        problems += es.verify_run(project, client, cards, origin, ask_ran=not args.no_ask, hold_ran=not args.no_hold,
+                                  user_refs=user_refs, attach_sha256=sha256, selection=selection)
+        if selection is not None:
+            from kankan import auditlog
+            for line in es.restart_report(auditlog.read(project.paths))[1]:
+                say(f"observed: {line}")
         if problems:
             say("FAILED:")
             for p in problems:

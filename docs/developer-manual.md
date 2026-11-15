@@ -6,7 +6,7 @@ For using kankan see the [user manual](user-manual.md). The design is in [`aispe
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-setsid -w .venv/bin/python -m pytest -q -n auto         # everything except the live Trello tests, in parallel (about 1.5 min on 8 cores; about 8 min serially)
+setsid -w .venv/bin/python -m pytest -q -n auto         # everything, in parallel (about 1.5 min on 8 cores; about 8 min serially); the live Trello tests skip without a test board (§3.3)
 .venv/bin/python -m pytest -q -m trello_live  # live Trello tests only (§3)
 .venv/bin/python -m tests.live.agents_e2e     # live run with real agents, manual (§3.5)
 ```
@@ -15,7 +15,7 @@ Runtime code uses the Python standard library only (Python ≥ 3.10); pytest is 
 
 - `tmux`: needs a real tmux server;
 - `slow`: slow tests;
-- `trello_live`: runs against a real Trello test board; excluded by default (`addopts = "-m 'not trello_live'"`).
+- `trello_live`: runs against a real Trello test board; part of the default run when a test board is configured ([section 3.3](#33-configure-the-tests)), skipped otherwise. `-m 'not trello_live'` leaves them out, `-m trello_live` runs only them.
 
 The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent ([spec §18.1](../aispecs/initial_spec_technical.md#181-strategy)).
 
@@ -77,6 +77,8 @@ Without a complete configuration the live tests are skipped with "no test board 
 .venv/bin/python -m pytest -q -m trello_live
 ```
 
+The plain `pytest` run includes them too whenever a test board is configured; add `-m 'not trello_live'` to leave them out (offline, or to spare the board).
+
 Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item (and the `ke-` cards and registry block of an interrupted [section 3.5](#35-live-run-with-real-agents) run) from the test board with:
 
 ```bash
@@ -91,7 +93,7 @@ It deletes `kt-`/`ke-` cards and `kt-` labels, archives `kt-` lists, removes any
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m tests.live.agents_e2e --clean --keep   # options: --clean --clean-only --no-ask --no-hold --timeout 60 --keep --base DIR
+.venv/bin/python -m tests.live.agents_e2e --clean --keep   # options: --clean --clean-only --no-ask --no-hold --no-attach --no-settings --timeout 60 --keep --base DIR
 ```
 
 Codex runs its commands with your login `PATH`, so the runner links `~/.local/bin/kankan` to this checkout's `.venv/bin/kankan` for the run and removes the link at the end. With `--keep` the link stays while the agents run; `--clean-only` removes it later. If `~/.local/bin/kankan` is another installation (for example a pipx copy), the runner stops and asks you to move it away for the run.
@@ -102,13 +104,15 @@ What it does:
 
 1. Checks the machine with `kankan doctor` (git, tmux, both agents and their login, skill links, `kankan` reachable), the test board configuration ([section 3.3](#33-configure-the-tests)) and its marker, and that `Backlog`, `Done`, `Blocked` and the seat lists hold no cards.
 2. Creates a throw-away clone on `main` with a local bare `origin` in `<temp>/kankan-e2e-<run-id>/`, binds it to the test board with `kankan init` (taking over the registry block, after printing who held it), with the real list and label names (`Backlog`, `Done`, `Blocked`, `claude-1 · …`, `codex-1 · …`, `HOLD`, `Question`, `Error`): they are adopted by name and **stay on the board** between runs. The agents integrate into `kankan-agents`, which is pushed to the bare origin.
-3. Creates the cards, named `ke-<timestamp>-<random> <title>`: *Say hello*, *Type one random word*, *What's your name* (each appends to a file), *Ask for a colour* (the agent asks you), *Count slowly* (counts to 5 with pauses, for HOLD), and a merge request of a branch `user-work` holding a `user.txt` commit.
-4. Starts `kankan up claude=1 codex=1` on your default tmux server and prints the board URL and `tmux attach -t ai-kankan-e2e-claude-1` / `ai-kankan-e2e-codex-1` (detach with `Ctrl-b d`).
-5. Watches the board every 10 s, printing each card's list and labels when they change, and rings the bell when you are needed:
+3. Unless `--no-settings`, asks you to tick, in the Trello UI, another model and effort on the `review` card of the `kankan` list, one item per agent checklist: for each agent type the least powerful combination that differs from both the implementation and the review values ticked now. Reviews then use other values than implementations, so every seat restarts its agent between roles. The runner waits until exactly those items are ticked, lets the card settle for 15 s and runs `kankan doctor`, which applies the change (kankan comments "applied: … → …" on the card) before any agent starts. The setting cards stay on the board: the new ticks remain after the run.
+4. Creates the cards, named `ke-<timestamp>-<random> <title>`: *Say hello*, *Type one random word*, *What's your name* (each appends to a file), *Ask for a colour* (the agent asks you), *Count slowly* (counts to 5 with pauses, for HOLD), *Hash the attached file* (created with `HOLD`; unless `--no-attach`), and a merge request of a branch `user-work` holding a `user.txt` commit.
+5. Starts `kankan up claude=1 codex=1` on your default tmux server and prints the board URL and `tmux attach -t ai-kankan-e2e-claude-1` / `ai-kankan-e2e-codex-1` (detach with `Ctrl-b d`).
+6. Watches the board every 10 s, printing each card's list and labels when they change, and rings the bell when you are needed:
    - the colour card gets `Question`: answer with a comment on the card from your own account (any board member except the bot);
-   - the slow card enters an `In Progress` list: add `HOLD` to it; when it is back in `Backlog`, remove `HOLD` so it resumes from its branch.
-6. When every card is in `Done` it waits up to 5 minutes for the side effects (ref deletion, labels, push), then verifies: one merge per card on `kankan-agents` with correct trailers, file contents, `main` and `user-work` untouched, origin up to date, each card reviewed by the other agent type, the HOLD suspension and resumption on the same branch, a clean `kankan reconcile`.
-7. Stops the agents, deletes its cards and its registry block, and removes the run directory on success. On failure, timeout or Ctrl-C it first saves pane captures, `log.jsonl` and `kankan status` in `<run dir>/diagnostics/` and keeps the run directory.
+   - the slow card enters an `In Progress` list: add `HOLD` to it; when it is back in `Backlog`, remove `HOLD` so it resumes from its branch;
+   - at the start, for the attachment card: attach any small file to it from your own account ("Add > Attachment > Computer"), then remove `HOLD`. Files uploaded by the bot are never task inputs, which is why you upload it; the agent writes the file's SHA-256 to `hashes.txt`.
+7. When every card is in `Done` it waits up to 5 minutes for the side effects (ref deletion, labels, push), then verifies: one merge per card on `kankan-agents` with correct trailers, file contents (including the SHA-256 of your upload, downloaded by the runner), `main` and `user-work` untouched, origin up to date, each card reviewed by the other agent type, the HOLD suspension and resumption on the same branch, the attachment card's local directory deleted, a clean `kankan reconcile`. With the settings step it also verifies the "applied" comment, that every task ran with its role's model and effort (audit log and claim comments) on an agent started with them, and that each seat restarted its agent when the values changed through its exit command: an old agent that needed `SIGTERM` or `SIGKILL` fails the run. It prints how each restart ended (`observed: …`), which is the release observation of the agents' exit behaviour.
+8. Stops the agents, deletes its cards and its registry block, and removes the run directory on success. On failure, timeout or Ctrl-C it first saves pane captures, `log.jsonl` and `kankan status` in `<run dir>/diagnostics/` and keeps the run directory.
 
 **Debugging: use `--keep`.** Without it, a successful run deletes its run directory and a failed one keeps only `diagnostics/`. With `--keep` the agents stay alive in tmux, the cards stay on the board and the whole run directory (clone, worktrees, `log.jsonl`) stays in place, so you can inspect what really happened, also after a success. Use it whenever you want to look at a run, and always when something looks wrong.
 
@@ -128,4 +132,4 @@ The shared isolated HOME supplies explicit `seed` values, a deterministic versio
 
 Settings tests cover server-time quiet boundaries, stale reads, input/schema fingerprints, durable feedback, human label ownership, pruning, construction recovery and user-cache locking. Process tests run in private tmux servers; subreaper checks run in disposable Python children, never in the pytest controller. Keep source files unchanged while process tests run: agents validate the hash of the launcher code.
 
-The live checklist/comment round trip creates its own marker-prefixed list and card and relies on the normal live fixture cleanup (card deletion also removes checklists). CLI context-isolation measurements and the Codex model fixture are documented in [adapter notes](adapter-notes.md). Real-agent restart dialogs, a daemon started under a subreaper, and UI-originated checklist activity remain explicit observation gates until recorded there. The manual live agent runner uses configured user seeds and can prompt for missing ones in its terminal.
+The live checklist/comment round trip creates its own marker-prefixed list and card and relies on the normal live fixture cleanup (card deletion also removes checklists). CLI context-isolation measurements and the Codex model fixture are documented in [adapter notes](adapter-notes.md). Real-agent restart dialogs, a daemon started under a subreaper, and UI-originated checklist activity remain explicit observation gates until recorded there. The manual live agent runner uses configured user seeds and can prompt for missing ones in its terminal. Its settings step ([section 3.5](#35-live-run-with-real-agents)) has you tick the review values in the Trello UI and forces an agent restart between roles, so a passing run records UI-originated checklist activity and the agents' exit behaviour (audit event `agent_restart`, field `ended`: `exit_command`, `sigterm`, `sigkill` or `died`).

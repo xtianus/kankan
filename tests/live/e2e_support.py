@@ -56,7 +56,7 @@ def new_run_id() -> str:
     return f"{RUN_PREFIX}{int(time.time())}-{secrets.token_hex(3)}"
 
 
-def scenario(ask: bool = True, hold: bool = True) -> List[ScenarioCard]:
+def scenario(ask: bool = True, hold: bool = True, attach: bool = True) -> List[ScenarioCard]:
     cards = [
         ScenarioCard("hello", "Say hello", "Append the line `hello` to `greetings.txt`, then post `kankan note \"hello\"`."),
         ScenarioCard("word", "Type one random word",
@@ -73,6 +73,11 @@ def scenario(ask: bool = True, hold: bool = True) -> List[ScenarioCard]:
                                   "Append the numbers 1 to 5 to `count.txt`, one per line: before each number run "
                                   "`sleep 30`, then append it and commit. If the file already has numbers, continue "
                                   "from the last one.", "hold"))
+    if attach:
+        cards.append(ScenarioCard("attach", "Hash the attached file",
+                                  "This card has one file attachment (see `attachments` in `kankan task --json`). "
+                                  "Append one line to `hashes.txt` with the file's SHA-256 in lowercase hex, only the "
+                                  "64 hex digits (the first field printed by `sha256sum`).", "attach"))
     for card in cards:
         card.desc += FOOTER
     return cards
@@ -189,7 +194,159 @@ def blocking_cards(client: TrelloClient, board_id: str) -> List[Card]:
 
 
 def create_cards(client: TrelloClient, cfg: Config, run_id: str, cards: List[ScenarioCard]) -> Dict[str, Card]:
-    return {c.key: client.create_card(cfg.backlog, f"{run_id} {c.title}", desc=c.desc) for c in cards}
+    """Create the run's cards in Backlog; the attachment card gets HOLD so no agent takes it before its file."""
+    created = {}
+    for c in cards:
+        created[c.key] = client.create_card(cfg.backlog, f"{run_id} {c.title}", desc=c.desc)
+        if c.interactive == "attach":
+            client.add_label(created[c.key].id, cfg.label_hold)
+    return created
+
+
+# ---------------------------------------------------------------- attachments (spec §13.3)
+
+def user_upload(client: TrelloClient, card_id: str, kankan_id: str):
+    """The first file uploaded to the card by someone other than kankan's account (only those reach the agent)."""
+    return next((a for a in client.attachments(card_id) if a.is_upload and a.member_id != kankan_id), None)
+
+
+def attachment_sha256(client: TrelloClient, card_id: str, attachment, max_bytes: int) -> str:
+    """Download the attachment as kankan does and return its SHA-256 (lowercase hex)."""
+    import hashlib
+    import io
+
+    from kankan import attachments, clock
+    path = attachments.download_path(client.base_url, attachment.url, card_id, attachment.id)
+    if path is None:
+        raise ValueError(f"unexpected download URL {attachment.url}")
+    buf = io.BytesIO()
+    client.download(path, buf, max_bytes, clock.monotonic() + 60)
+    return hashlib.sha256(buf.getvalue()).hexdigest()
+
+
+def attachment_dir_problems(project, cards: Dict[str, Card]) -> List[str]:
+    """The card's attachment directory is deleted when its ref is (card verified in Done)."""
+    from kankan import attachments
+    return [f"{card.name}: attachment directory {attachments.card_dir(project.paths, card.short)} left behind"
+            for key, card in cards.items() if attachments.card_dir(project.paths, card.short).exists()]
+
+
+# ---------------------------------------------------------------- model and effort settings (boardsettings §3)
+
+ROLES = ("implementation", "review")
+
+
+def ticked(read, role: str) -> Dict[str, List[str]]:
+    """Ticked item names per agent checklist of the open setting card named ``role``."""
+    card = next((c for c in read.cards if c.name == role and not c.closed), None)
+    if card is None:
+        return {}
+    return {cl.name: [i.name for i in cl.items if i.state == "complete"] for cl in card.checklists}
+
+
+def _same(a: str, b: str) -> bool:
+    from kankan.boardconfig import item_name
+    return item_name(a) == item_name(b)
+
+
+def settings_targets(read, adapters: dict) -> Dict[str, object]:
+    """Per agent type, the review combination to tick: the least powerful one (the adapter's last) that differs from
+    both the implementation and the review values ticked now, so the change is applied and each seat must restart
+    its agent between an implementation and a review."""
+    from kankan.adapters import combinations
+    impl, review = ticked(read, "implementation"), ticked(read, "review")
+    targets = {}
+    for agent_type, adapter in adapters.items():
+        taken = impl.get(agent_type, []) + review.get(agent_type, [])
+        choices = [p for p in combinations(adapter) if not any(_same(p.name, t) for t in taken)]
+        if not choices:
+            raise ValueError(f"{agent_type}: no review combination differs from the ticked ones")
+        targets[agent_type] = choices[-1]
+    return targets
+
+
+def settings_ready(read, targets: Dict[str, object]) -> bool:
+    """The review card has exactly the target ticked in every agent checklist."""
+    now = ticked(read, "review")
+    return all(len(now.get(t, [])) == 1 and _same(now[t][0], pair.name) for t, pair in targets.items())
+
+
+def selection_problems(events: List[dict], cards: Dict[str, Card], expected: Dict[str, Dict[str, object]],
+                       adapters: dict) -> List[str]:
+    """Every task on the run's cards ran with its role's model and effort, on an agent started with them."""
+    from kankan.adapters import ModelEffort, start_command
+    ids = {c.id: c.name for c in cards.values()}
+    started: Dict[str, list] = {}
+    problems = []
+    for e in events:
+        seat = str(e.get("seat"))
+        if e.get("event") == "agent_started":
+            started[seat] = e.get("command")
+        if e.get("event") != "task_assigned" or e.get("card") not in ids or e.get("role") not in expected:
+            continue
+        agent_type = seat.split("-")[0]
+        want = expected[e["role"]].get(agent_type)
+        if want is None:
+            continue
+        name = ids[e["card"]]
+        if (e.get("model"), e.get("effort")) != (want.model, want.effort):
+            problems.append(f"{name}: {e['role']} by {seat} with {e.get('model')}/{e.get('effort')} instead of "
+                            f"{want.model}/{want.effort}")
+        elif seat in started and agent_type in adapters and \
+                started[seat] != start_command(adapters[agent_type], ModelEffort(want.model, want.effort)):
+            problems.append(f"{name}: {seat}'s agent was started with {started[seat]} for a "
+                            f"{want.model}/{want.effort} {e['role']}")
+    return problems
+
+
+def claim_comment_problems(client: TrelloClient, events: List[dict], cards: Dict[str, Card], kankan_id: str) -> List[str]:
+    """Each implementation and review claim comment names the model and effort the task was assigned with."""
+    from kankan import messages
+    ids = {c.id: c for c in cards.values()}
+    wanted: Dict[str, set] = {}
+    for e in events:
+        if e.get("event") == "task_assigned" and e.get("card") in ids and e.get("kind") in ("impl", "review") \
+                and e.get("model"):
+            role = "review" if e["kind"] == "review" else "implementation"
+            wanted.setdefault(e["card"], set()).add(messages.CLAIM_SELECTION.format(
+                role="reviewing" if role == "review" else "implementing", type=str(e.get("seat")).split("-")[0],
+                model=e["model"], effort=e["effort"]).strip())
+    problems = []
+    for card_id, texts in wanted.items():
+        posted = [c.text for c in client.comments(card_id) if c.member_id == kankan_id]
+        for text in sorted(texts):
+            if not any(text in p for p in posted):
+                problems.append(f"{ids[card_id].name}: no claim comment saying `{text}`")
+    return problems
+
+
+def applied_problems(new_comments: List[str], targets: Dict[str, object]) -> List[str]:
+    """kankan confirmed the review change on the setting card ("applied: … → …", boardsettings §2)."""
+    applied = [t for t in new_comments if t.startswith("applied:")]
+    if not applied:
+        return ["review setting card: no `applied:` comment for the new ticks"]
+    tail = applied[-1].split("→", 1)[-1]
+    return [f"review setting card: `{applied[-1]}` does not name {t} {p.model}/{p.effort}"
+            for t, p in targets.items() if f"{t} {p.model}/{p.effort}" not in tail]
+
+
+def restart_report(events: List[dict]) -> Tuple[List[str], List[str]]:
+    """(problems, observations) about agent restarts: a seat whose tasks used different models or efforts must have
+    restarted its agent; how each old agent ended is the release observation for the agents' exit behaviour."""
+    pairs: Dict[str, set] = {}
+    restarts: Dict[str, List[str]] = {}
+    for e in events:
+        seat = str(e.get("seat"))
+        if e.get("event") == "task_assigned" and e.get("model"):
+            pairs.setdefault(seat, set()).add((e["model"], e.get("effort")))
+        elif e.get("event") == "agent_restart":
+            restarts.setdefault(seat, []).append(str(e.get("ended")))
+    problems = [f"{seat}: ran tasks with {len(used)} model/effort pairs but never restarted its agent"
+                for seat, used in sorted(pairs.items()) if len(used) > 1 and not restarts.get(seat)]
+    observations = [f"{seat}: old agent ended by {', '.join(ended)}" for seat, ended in sorted(restarts.items())]
+    problems += [f"{seat}: old agent needed {how} (the exit command did not end it)"
+                 for seat, ended in sorted(restarts.items()) for how in ended if how in ("sigterm", "sigkill")]
+    return problems, observations
 
 
 def strip_registry_block(desc: str) -> str:
@@ -254,6 +411,8 @@ EXPECTED_FILES = {
             "one of the user's answers"),
     "merge": ("user.txt", lambda text, ctx: text == "from the user\n", "`from the user`"),
     "hold": ("count.txt", lambda text, ctx: text == "1\n2\n3\n4\n5\n", "the numbers 1 to 5"),
+    "attach": ("hashes.txt", lambda text, ctx: bool(ctx.get("sha256")) and text == f"{ctx['sha256']}\n",
+               "one line with the attached file's SHA-256"),
 }
 
 
@@ -335,8 +494,12 @@ def review_problems(events: List[dict], card: Card) -> List[str]:
 
 
 def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Path, ask_ran: bool, hold_ran: bool,
-               user_refs: Optional[Dict[str, str]] = None) -> List[str]:
-    """Every check of the live run; an empty list means pass."""
+               user_refs: Optional[Dict[str, str]] = None, attach_sha256: Optional[str] = None,
+               selection: Optional[Dict[str, Dict[str, object]]] = None) -> List[str]:
+    """Every check of the live run; an empty list means pass.
+
+    ``attach_sha256``: the SHA-256 of the user's upload on the attachment card (None: the card did not run).
+    ``selection``: the model and effort expected per role and agent type (None: settings not checked)."""
     from kankan import diag, workflow
     from kankan.integrate import merges_on_main
     cfg, repo = project.cfg, project.paths.repo
@@ -362,10 +525,11 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
     if ask_ran and not answers:
         problems.append("ask: the user's answer was not found on the card")
     for key, (path, check, what) in EXPECTED_FILES.items():
-        if key not in cards or (key == "ask" and not ask_ran) or (key == "hold" and not hold_ran):
+        if key not in cards or (key == "ask" and not ask_ran) or (key == "hold" and not hold_ran) or \
+                (key == "attach" and attach_sha256 is None):
             continue
         text = _show(repo, f"refs/heads/{branch}", path)
-        if text is None or not check(text, {"answers": answers}):
+        if text is None or not check(text, {"answers": answers, "sha256": attach_sha256}):
             problems.append(f"{cards[key].name}: {path} does not contain {what} (found {text!r})")
     if "hello" in cards and not any("hello" in c.text for c in client.comments(cards["hello"].id)):
         problems.append(f"{cards['hello'].name}: no `hello` note on the card")
@@ -384,5 +548,12 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
         problems += review_problems(events, card)
     if hold_ran and "hold" in cards:
         problems += hold_problems(events, cards["hold"].id)
+    if attach_sha256 is not None and "attach" in cards:
+        problems += attachment_dir_problems(project, {"attach": cards["attach"]})
+    if selection is not None:
+        from kankan import boardsettings
+        problems += selection_problems(events, cards, selection, boardsettings.adapters_for(project.paths))
+        problems += claim_comment_problems(client, events, cards, cfg.kankan_member_id)
+        problems += restart_report(events)[0]
     problems += [f"reconcile: {issue}" for issue in diag.reconcile(project)]
     return problems

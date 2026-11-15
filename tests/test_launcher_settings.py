@@ -33,6 +33,10 @@ def test_new_task_restarts_agent_and_keeps_seat(git_repo, fake_trello, monkeypat
     assert load_state(project.paths, 'claude-1').running_selection == {'model': 'opus', 'effort': 'high'}
     assert load_state(project.paths, 'claude-1').planned_restart is None
     assert any(e['event'] == 'exit_command' for e in agent_events(log))
+    from kankan import auditlog
+    restarts = [e for e in auditlog.read(project.paths) if e['event'] == 'agent_restart']
+    assert [(e['ended'], e['model'], e['effort'], e['old_pid']) for e in restarts] == \
+        [('exit_command', 'opus', 'high', old['agent']['pid'])]
 
 
 @pytest.mark.parametrize('ignore_exit', [True, False])

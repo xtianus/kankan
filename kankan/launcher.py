@@ -26,6 +26,8 @@ from kankan.tmux import Tmux, session_name
 STATES = ("starting", "idle", "working", "waiting_human", "limited", "suspending", "closing", "stopping")
 SCREEN_POLL = 1.0
 FATAL_EXIT = 3  # configuration problems: the supervisor does not restart the launcher
+# Restart phase at the moment the old agent was found dead → how it ended (audit event `agent_restart`).
+RESTART_ENDINGS = {'wait_exit': 'exit_command', 'term': 'sigterm', 'kill': 'sigkill'}
 
 
 def _wall() -> float:
@@ -387,6 +389,8 @@ class Launcher:
                     self.failed_start('old agent survived termination', [restart['pid']])
                 restart.update(phase='kill' if sig == signal.SIGKILL else 'term', deadline=now+(2 if sig == signal.SIGKILL else seats.KILL_GRACE))
             return False
+        # How the old agent ended, recorded once: its exit command, a signal, or on its own before the command.
+        restart.setdefault('ended', RESTART_ENDINGS.get(restart['phase'], 'died'))
         targets = dict(restart['targets'])
         targets.update(procutil.agent_tree(restart['pid'], restart['start'], keep=self.adapter.restart_keep, own=self.own_children()))
         live = [(pid, start) for pid, start in targets.items() if pid != restart['pid'] and procutil.alive(pid, start)]
@@ -402,6 +406,7 @@ class Launcher:
                 restart.update(phase='cleanup_kill', deadline=now+2)
             return False
         pair = ModelEffort(self.prepared['model'], self.prepared['effort'])
+        self.log("agent_restart", old_pid=restart['pid'], ended=restart['ended'], model=pair.model, effort=pair.effort)
         self.spawn_agent(pair)
         restart['phase'] = 'ready'
         return False
