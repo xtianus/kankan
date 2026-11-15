@@ -2,103 +2,133 @@
 
 **Status:** draft, not implemented.
 **Date:** 2026-11-15
-**Base:** [`initial_spec_technical.md`](initial_spec_technical.md) and [`boardsettings_spec_technical.md`](boardsettings_spec_technical.md); this feature changes them as listed in [§9](#9-changes-to-the-initial-technical-specification) and [§10](#10-changes-to-the-board-settings-technical-specification).
+**Base:** [`initial_spec_technical.md`](initial_spec_technical.md) and [`boardsettings_spec_technical.md`](boardsettings_spec_technical.md); this feature changes them as listed in [§10](#10-changes-to-the-initial-technical-specification) and [§11](#11-changes-to-the-board-settings-technical-specification).
 **Companion:** [`questions_spec_functional.md`](questions_spec_functional.md) — what users and agents observe.
 
 **Split rule.** This file describes how kankan implements the feature; the functional file describes what users and agents observe. Section numbers are this feature's own.
 
 ## 1. Scope
 
-The Q&A seat, its card ref phase, the launcher's conversation loop, the delivery of follow-ups, the agent commands `answer` and `handoff`, and the Trello calls they need ([functional §1](questions_spec_functional.md#1-scope)).
+The Q&A seat, its card ref phase, the launcher's conversation loop, the delivery of follow-ups, the agent commands `answer` and `handoff`, the handoff data given to implementers, and the Trello calls they need ([functional §1](questions_spec_functional.md#1-scope)).
 
 ## 2. Configuration and seat
 
-**Configuration.** `config.json` gains `qa_list` (list ID, found or created by `init`, restored by `doctor`) and `qa_poll_seconds` (default 30). The Q&A seat is registered in `seats` like the others, with no list IDs; `Config.seat_lists()` skips it, `workflow_lists()` includes `qa_list` but a missing or archived `qa_list` is not a `config_error` (only the Q&A launcher refuses to run without it).
+**Configuration.** `config.json` gains `qa_list` (list ID, found or created by `init`, restored by `doctor`) and `qa_poll_seconds` (default 30). A missing `qa_list` in an existing configuration is not an error: the Q&A seat refuses to start until `doctor` or `init` creates it, and every other command works as before. Seats are registered in `seats` as today; `SeatConfig` gains `role` (`work`, the default when absent, or `qa`), and a `qa` seat has no list IDs. `Config.seat_lists()` and the list checks skip `qa` seats; `workflow_lists()` includes `qa_list`, but a missing or archived `qa_list` is not a `config_error` (only the Q&A launcher refuses to run without it).
 
-**Seat name.** `<type>-qa`. `refstore`'s seat pattern becomes `^[a-z]+-([0-9]+|qa)$`, so `seats.seat_type()` (the part before the last `-`) keeps giving the type, and the agent commands, the lease and the launcher work unchanged. The places that parse the seat number skip Q&A seats: the free-seat choice and the next-number computation in `seats`, the per-type cap, the seat sort in `diag`; `reconcile`'s "seats without their lists" skips them too. At most one `*-qa` seat is registered; `agents_cmd` replaces a dead one of another type (`seat remove` semantics, plus the end of its conversation, [§3](#3-card-ref-phase-qa)) and refuses when it is alive.
+**Seat name.** `<type>-qa`. `refstore`'s seat pattern becomes `^[a-z]+-([0-9]+|qa)$`, so `seats.seat_type()` (the part before the last `-`) keeps giving the type, and the agent commands, the lease and the launcher work unchanged. The places that parse the seat number skip `qa` seats: the free-seat choice and the next-number computation in `seats`, the per-type cap, the seat sort in `diag`; `reconcile`'s "seats without their lists" skips them too. At most one `qa` seat is registered.
 
-**Worktree.** `~/coding/.kankan/<project>/<type>-qa`, created like a seat worktree. At every claim, under the seat's ownership, kankan runs `git reset --hard`, `git clean -fdx` (the seat file lives in the worktree's private Git directory, outside the tree) and `git checkout --detach <integration tip>`. The worktree never holds user work, so the reset is safe.
+**Replacement.** `agents_cmd` starting a Q&A seat of another type, under the project lock: refuses if the registered `qa` seat is alive; otherwise registers the new seat, rewrites the `qa` card ref (if any) with the new owner in a transaction that verifies the old ref value and the old seat ref, removes the old seat (its seat ref, its worktree if clean, its configuration entry) and moves the conversation directory ([§5](#5-conversation-record-and-delivery)) unchanged, since it is keyed by conversation and not by seat.
 
-**Q&A record.** `<gcd>/kankan/qa.json` lists the card IDs that have been Q&A cards and were not handed off, written atomically at claim and updated at handoff. `reconcile` exempts them from `done_without_merge`; `reconcile --fix` removes the entries of deleted cards.
+**Worktree.** `~/coding/.kankan/<project>/<type>-qa`, created like a seat worktree. At every claim, under the seat's ownership, kankan runs `git reset --hard`, `git clean -fdx` (the seat file lives in the worktree's private Git directory, outside the tree) and `git checkout --detach <integration tip>`, and records the base commit and the length of the worktree's `HEAD` reflog. The worktree never holds user work, so the reset is safe.
+
+**Q&A record.** `<gcd>/kankan/qa.json` lists the IDs of cards that have been Q&A cards. An entry is added under the project lock before the claim's Git transaction (an entry for a claim that then fails is harmless); every implementation claim (none/`parked` → `impl`, [initial §10.3](initial_spec_technical.md#103-phases-and-transitions)) removes the card's entry under the same lock, right after its transaction. `reconcile` exempts the listed cards from `done_without_merge`; a crash between an implementation claim's transaction and the removal leaves an entry that can only hide that report for that card, and `reconcile --fix` removes the entries of cards that hold an `impl`, `implemented`, `review` or `integrated` ref, or that no longer exist.
 
 ## 3. Card ref phase `qa`
 
-Blob fields as in [initial §10.2](initial_spec_technical.md#102-metadata-blobs), with `phase: "qa"`, `owner: <type>-qa`, `target_list: qa_list`, no branch. Transitions, each under the project lock with the Git transaction first ([initial §10.3](initial_spec_technical.md#103-phases-and-transitions)):
+Blob fields as in [initial §10.2](initial_spec_technical.md#102-metadata-blobs), with `phase: "qa"`, `owner: <type>-qa`, `target_list: qa_list`, no branch, and:
+- `conversation`: a random ID created at claim and kept by every `qa` → `qa` rewrite, the key of the conversation directory and of the comment markers;
+- `covered`: the inputs covered by the latest completed answer (the ID of the newest comment delivered in that turn and the IDs of the attachments delivered up to that turn), absent before the first answer.
+
+Transitions, under the project lock with the Git transaction first ([initial §10.3](initial_spec_technical.md#103-phases-and-transitions)); each lock hold is bounded: at most one card read, the Git transaction, and one move with its verification read.
 
 | Transition | Phase | Holder | Trello |
 |---|---|---|---|
 | Q&A claim | none/`parked` → `qa` | Q&A seat | no move (card verified in `Q&A`, open, no `HOLD`) |
-| `handoff` | `qa` → `parked` (`cause: handoff`, `target_list: Backlog`, `pos: bottom`) | none | move to the bottom of `Backlog`, verified |
+| Answer completed | `qa` → `qa` (`covered` updated) | Q&A seat | none |
+| Seat replacement | `qa` → `qa` (new `owner`) | new Q&A seat | none |
+| `handoff` | `qa` → `parked` (`cause: handoff`, `target_list: Backlog`, `pos: bottom`, `handoff` comment IDs) | none | move to the bottom of `Backlog`, verified |
 | End: card left `Q&A`, archived, deleted, or `HOLD`, `yield` | `qa` → ref deleted | — | none |
 
 The claim from `parked` keeps any `branch` field out of the new blob; the card branch stays as it was, and a later implementation claim finds it through `??kankan-<shortLink>` ([initial §11](initial_spec_functional.md#11-branches-and-worktrees)). Convergence ([initial §10.4](initial_spec_technical.md#104-convergence)) never moves a card in phase `qa`: when the card is not in `qa_list`, closed or gone, the Q&A launcher ends the conversation instead; other launchers ignore `qa` refs. `parked` with `pos: bottom` is converged with `pos=bottom`; a parked ref in `Backlog` is already eligible for implementation ([initial §9.2](initial_spec_functional.md#92-eligibility)).
 
-Every end deletes the ref with a transaction that verifies the seat's ref, so a command of a turn still running afterwards gets `not_owner`. The attachment directory of the card is deleted at the end unless the transition was `handoff`, with the per-card attachment lock rules of [initial §13.3](initial_spec_functional.md#133-card-attachments).
+Every end deletes the ref with a transaction that verifies the seat's ref, so a command of a turn still running afterwards gets `not_owner`. The attachment directory of the card and the conversation directory are deleted at the end unless the transition was `handoff`, with the per-card attachment lock rules of [initial §13.3](initial_spec_functional.md#133-card-attachments); after a handoff the conversation directory is deleted when the card's ref is deleted in `Done`.
 
 ## 4. Launcher
 
-**Task identity and turns.** A conversation is one task: the task ID is generated at claim and stays until the end. The seat state's `qa` record holds the card, a turn counter, the delivery cursors ([§5](#5-delivery-of-follow-ups)) and the turn's outcome. `answer` and `fail` are non-terminal signals carrying the task ID and the turn number; `handoff` and `yield` are terminal. A signal with an old turn number is ignored for the "stopped without a signal" check, so an earlier answer never covers a later turn.
+**Task identity and turns.** A conversation is one task: the task ID is generated at claim (and again at every launcher start) and stays until the end. A turn starts with each prompt written to the agent (the first prompt, a delivery, a restart prompt, or a user typing in the pane) and gets a random **turn token**, saved in the seat state before the prompt is written and included in it. `answer` and `handoff` must carry the current token; `fail` and a missing signal refer to the current turn. `answer` and `fail` end the turn and not the task; `handoff` and `yield` end the task. The "stopped without a signal" check applies per turn, so an earlier answer never covers a later turn.
 
-**States.** The Q&A launcher uses the states of [initial §8.4](initial_spec_technical.md#84-state-machine) plus `qa_waiting` (after `answer` or `fail`: no inactivity check, follow-up polling). In `idle` it reads the board every `qa_poll_seconds` and claims the top eligible `Q&A` card; in `working` the usual inactivity check applies per turn; `closing` after an end waits for the pane to be "ready", sends the adapter's new-conversation command and returns to `idle`.
+**States.** The Q&A launcher uses the states of [initial §8.4](initial_spec_technical.md#84-state-machine) plus `qa_waiting`: after `answer`, `fail`, or a "stopped without a signal" `Error`, with no inactivity check and follow-up polling. In `idle` it reads the board every `qa_poll_seconds` and claims the top eligible `Q&A` card; in `working` the usual inactivity check applies per turn; `closing` after an end waits for the pane to be "ready", sends the adapter's new-conversation command and returns to `idle`. `limited` keeps the conversation; deliveries wait for resumption. A stop request is honoured in `qa_waiting` and `idle` without ending the conversation.
 
-**Polling the active card.** In `working` and `qa_waiting`, every `qa_poll_seconds`: one card read (C1 with attachments, labels, list and `closed`) and one comment read from the cursor (M2). A card no longer in `qa_list`, closed, deleted (404) or with `HOLD` ends the conversation ([§3](#3-card-ref-phase-qa)); in `working` the end is recorded at once and the clear waits for "ready". Both reads together are two requests every 30 seconds for the whole project.
+**Polling the active card.** In `working` and `qa_waiting`, every `qa_poll_seconds`, without the project lock: one card read (C1, with the attachment fields of [§8](#8-trello-usage), labels, list and `closed`) and the comment read from the cursor (M2, one request unless more than 50 comments arrived). A card no longer in `qa_list`, closed, deleted (404) or with `HOLD` ends the conversation ([§3](#3-card-ref-phase-qa)); in `working` the end is recorded at once (ref deleted, so later commands get `not_owner`) and the clear waits for "ready". The suspension request for `HOLD` asks the agent to `yield` without the "commit WIP" text.
 
-**Restart.** A launcher starting on the Q&A seat with a ref in phase `qa` resumes it as a new task ID with the turn counter reset; the first prompt asks the agent to read the thread with `kankan task --json` and continue. A model or effort change ([§10](#10-changes-to-the-board-settings-technical-specification)) restarts the agent only in `qa_waiting` or `idle`.
+**Restart.** A launcher starting on the Q&A seat with a ref in phase `qa` resumes it with a new task ID and a restart prompt asking the agent to read the thread with `kankan task --json` and continue; a pending answer or handoff operation ([§6](#6-agent-commands)) is completed first. A model or effort change ([§11](#11-changes-to-the-board-settings-technical-specification)) restarts the agent only in `qa_waiting` or `idle`.
 
-## 5. Delivery of follow-ups
+## 5. Conversation record and delivery
 
-**What is new.** An item (comment or attachment) is new when it is by a board member other than kankan's account (`notify.input_members`) and has not been delivered in an earlier turn. The seat state records, per conversation, the IDs of the attachments and the cursor of the last comment delivered; both are saved **before** the delivery is written to the pane (a crash can lose a follow-up, never deliver it twice, as in [initial §14.3](initial_spec_functional.md#143-answers-through-comments)). The first turn delivers the description and every item already on the card. On a restart, when the seat state has no record for the active card, kankan rebuilds it from the thread: the items dated up to the latest comment with kankan's answer marker count as delivered, the later ones are new; dates are Trello's (comment `date`, attachment `date`), never the local clock.
+**Conversation directory.** `<gcd>/kankan/qa/<conversation>/` holds `turn.json` (the current turn's token and the IDs of the comments and attachments delivered in it) and the pending operation of [§6](#6-agent-commands). It is keyed by the conversation ID of the ref, so it survives launcher restarts and seat replacement. Files are written atomically.
 
-**Delivery.** In `qa_waiting`, the new items found by a poll are delivered at once: the turn counter is incremented, the cursors are saved, and one prompt is written through the pane queue ([initial §8.6](initial_spec_technical.md#86-pane-observation-and-writes)), e.g. "New on the Q&A card: 2 comments, 1 attachment (`screenshot.png`) — run `kankan task --json` and reply with `kankan answer`". The comment texts are not pasted: the agent reads them from `task`, which keeps quoting out of the pane. Items found in `working` wait for the end of the turn. After a delivery kankan comments "forwarded to the agent"; after a delivery that follows `fail`, it removes the `Error` label whose cause is that `fail`. A user typing in the pane while in `qa_waiting` is detected as in [initial §8.5](initial_spec_technical.md#85-cycle-and-signals) and starts a turn without a delivery.
+**What is new.** An item (comment or attachment) is a candidate when it is by a board member other than kankan's account (`notify.input_members`). The inputs of a turn are the candidates not covered by the ref's `covered` and not delivered in an earlier turn of this launcher run: in practice, everything since the last completed answer, including what arrived while that answer was being written. The first turn of a new conversation delivers the description and every item on the card; when the card was answered in an earlier conversation, the candidates dated after the latest comment carrying kankan's answer marker are marked `new` (Trello's dates, never the local clock), the others are context.
 
-**`task --json`.** `agentcmds.task` for a `qa` task reads the card, its attachments (`attachments.for_task`, which downloads them), the board members and the whole comment thread (M2, paginated), and marks `new` from the seat state's record of the current turn. `role` is `agent` for comments carrying kankan's answer or handoff marker, `kankan` for kankan's other comments, `user` for board members.
+**Delivery.** In `qa_waiting`, the candidates found by a poll are delivered at once: a new turn token and the turn's input IDs are saved in `turn.json` **before** the prompt is written through the pane queue ([initial §8.6](initial_spec_technical.md#86-pane-observation-and-writes)), e.g. "New on the Q&A card: 2 comments, 1 attachment (`screenshot.png`) — turn `<token>`: run `kankan task --json` and reply with `kankan answer --turn <token>`". A crash between saving and writing loses the prompt but not the inputs: they stay uncovered and the restart prompt delivers them. The comment texts are not pasted: the agent reads them from `task`, which keeps quoting out of the pane. Candidates found in `working` wait for the end of the turn. After a delivery kankan comments "forwarded to the agent" and removes the `Error` label whose cause is the conversation's `fail` or inactivity. `fail` and the inactivity `Error` do not move any cursor: the inputs of the failed turn stay uncovered and are delivered again with the follow-up. A user typing in the pane while in `qa_waiting` is detected as in [initial §8.5](initial_spec_technical.md#85-cycle-and-signals) and starts a turn whose inputs are the current candidates.
+
+**`task --json`.** `agentcmds.task` for a `qa` task reads the card, its attachments (`attachments.for_task`, which downloads them), the board members and the whole comment thread (M2, paginated, within `task`'s time budget), and sets `new` from `turn.json`, so repeated calls in a turn agree. `role` is `agent` for comments carrying kankan's answer or handoff marker, `kankan` for kankan's other comments, `user` for board members. For implementation tasks `task` also reads the thread and fills `comments` and `handoff` (the text of the comments listed in the parked ref's `handoff` field when the claim came from a handoff, otherwise the latest comment carrying the handoff marker, otherwise `null`).
 
 ## 6. Agent commands
 
-**`answer`.** Validates the task (`qa`, current task ID and turn), the clean worktree and `HEAD` equal to the commit recorded at claim (`needs_action` otherwise), reads the text (argument or `--file`, UTF-8), and under the project lock re-checks the ref (`not_owner` if the conversation ended). It splits the text into chunks of at most 16 384 characters including the prefix `n/m`, the anti-duplicate marker and, on the last chunk, the mention: split at the last blank line before the limit, else at the last newline, else hard. Each chunk is posted with its own `kankan:<op-id>` marker derived from the task ID, turn and chunk index, so a retry finds and skips the chunks already posted (M2). The signal is recorded after the last chunk is confirmed.
+**`answer`.** Steps:
+1. Without the project lock: validates the task (`qa`, current task and turn token, else `needs_action` or `usage_error`), the clean worktree and `HEAD` equal to the base commit (`needs_action` with the restore command otherwise), reads the text (argument or `--file`, UTF-8) and splits it.
+2. Writes the **pending operation** to the conversation directory: kind, turn token, the turn's input IDs, the text's hash, the chunk plan and the chunks already posted. An existing pending operation for the same turn with the same hash is resumed; with another hash it is refused with `needs_action` (the previous answer is still being posted).
+3. For each chunk, without the project lock: reads the card (C1) and stops with `not_owner` if it left `Q&A`, is closed, has `HOLD` or the ref changed; posts the chunk with `comment_once` and the marker `kankan:qa-<conversation>-<turn>-<i>`, so a retry after a crash finds and skips the chunks already posted (M2); records it in the pending operation.
+4. Under the project lock: the transaction `qa` → `qa` with the new `covered`, then the signal in the seat state, then deletes the pending operation.
 
-**`handoff`.** Same checks; posts the summary (split like an answer) with the handoff marker and the mention, then the transition `qa` → `parked` and the verified move to the bottom of `Backlog`, then updates `qa.json`.
+Chunking: chunks of at most 16 384 characters including the prefix `n/m`, the marker and, on the last chunk, the mention; split at the last blank line before the limit, else at the last newline, else hard. The reflog check: when the worktree's `HEAD` reflog grew since the claim beyond kankan's own checkout, the answer is posted and the card gets `Error` with the commit warning (label cause `qa_commit`).
 
-**Other commands.** `done`, `ask`, `sync`, `verify`, `integrate`, `block` refuse a `qa` task with `usage_error`; `answer`/`handoff` refuse a non-`qa` task with `usage_error`. `fail` and `note` work as usual; `yield` ends the conversation.
+**`handoff`.** Same steps 1–3 with the handoff marker; step 4 is the transition `qa` → `parked` (recording the summary's comment IDs) and the verified move to the bottom of `Backlog`, then the `qa.json` entry stays (removed by the implementation claim). A crash after step 3 is completed by the launcher's restart from the pending operation; a crash after the transition is completed by convergence.
 
-## 7. Trello usage
+**Other commands.** `done`, `ask`, `sync`, `verify`, `integrate`, `block` refuse a `qa` task with `usage_error`; `answer`/`handoff` refuse a non-`qa` task with `usage_error`. `fail` posts its comment as usual but does not move the comment cursor of the conversation ([§5](#5-conversation-record-and-delivery)); `note` works as usual; `yield` ends the conversation.
 
-The feature uses existing capabilities with three revisions of [`kanban_requirements.md`](kanban_requirements.md), made in the implementation commit as required by the project rule:
+## 7. Implementation tasks of handed-off cards
+
+The implementation claim of a card whose `parked` ref has `cause: handoff` copies the summary's comment IDs into the `impl` ref, so `task` returns the same `handoff` after a restart. The skill tells the implementer that the summary prevails over the description.
+
+## 8. Trello usage
+
+The feature uses existing capabilities with four revisions of [`kanban_requirements.md`](kanban_requirements.md), made in the implementation commit as required by the project rule:
 
 - **M1:** comments have a maximum length (Trello: 16 384 characters); kankan splits longer texts.
-- **F2:** attachments carry their creation date (`date` in the requested fields), used to rebuild the delivery record ([§5](#5-delivery-of-follow-ups)).
+- **C1:** the single-card read returns the attachments with ID, name, file name, URL, size, MIME type, uploader, upload flag and creation date (`attachment_fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,date`), for follow-up polling.
+- **F2:** the attachment list includes the creation date (`date`).
 - **C3:** a card can also be moved to the **bottom** of a list (`pos=bottom`), for `handoff`.
 
-The B3 board read is unchanged; the polling of the active card uses C1 and M2.
+M2 (comment reads) is also used for implementation tasks, to give them the card's thread. The B3 board read is unchanged. The Q&A seat adds, per `qa_poll_seconds`, one board read while idle, or at least two requests (C1 and M2) during a conversation.
 
-## 8. Tests
+## 9. Tests
 
-The fake Trello server gains attachment `date` fields, `pos=bottom` on moves, and comment-length enforcement (400 beyond 16 384 characters). The fake agent gains a scripted Q&A mode (answer, answer after a follow-up, handoff, fail, stop without a signal). Unit tests cover chunking, the delivery record and its reconstruction from a thread, the seat-name pattern and the seat-number parsers skipping `*-qa`. Integration tests with a private tmux server cover the acceptance tests of [functional §8](questions_spec_functional.md#8-acceptance-tests); the crash points are after the `handoff` transition, after each answer chunk, and between saving the delivery cursor and writing to the pane. A live Trello test checks the comment length limit, `pos=bottom` and attachment `date`; the live agents run ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) gains a Q&A dialogue with a follow-up attachment and a handoff.
+The fake Trello server gains attachment `date` and the full C1 attachment fields, `pos=bottom` on moves, and comment-length enforcement (400 beyond 16 384 characters). The fake agent gains a scripted Q&A mode (answer, answer after a follow-up, handoff, fail, stop without a signal, a forbidden commit). Unit tests cover chunking, the pending operation and its resumption, the computation of `new` from `covered` and `turn.json`, the seat-name pattern and the seat-number parsers skipping `qa` seats, configuration without `qa_list` and seats without `role`. Integration tests with a private tmux server cover the acceptance tests of [functional §8](questions_spec_functional.md#8-acceptance-tests); the crash points are after each answer chunk, after the last chunk before the `covered` transaction, after the handoff summary, after the `handoff` transition, between saving `turn.json` and writing to the pane, and during seat replacement; the independence test delays Trello responses for one seat at a time. A live Trello test checks the comment length limit, `pos=bottom` and the attachment fields of C1; the live agents run ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) gains a Q&A dialogue with a follow-up attachment and a handoff implemented by another seat.
 
-## 9. Changes to the initial technical specification
+## 10. Changes to the initial technical specification
 
-How this feature changes [`initial_spec_technical.md`](initial_spec_technical.md), by its section numbers. That file is not edited.
+How this feature changes [`initial_spec_technical.md`](initial_spec_technical.md), by its section numbers. That file is not edited. Where the board settings feature already replaced the same text, the replacement below includes its additions.
 
 **§5.2 Local state.** Add:
 
 | Q&A record | `<gcd>/kankan/qa.json` ([§2](#2-configuration-and-seat)) |
+| Q&A conversations | `<gcd>/kankan/qa/<conversation>/` ([§5](#5-conversation-record-and-delivery)) |
 | Q&A seat worktree | `~/coding/.kankan/<project>/<type>-qa` |
 
 **§5.2 Local state.** Replace the text starting “| Seat state | `<gcd>/kankan/seats/<seat>.state.json` (current…” with:
 
-| Seat state | `<gcd>/kankan/seats/<seat>.state.json` (current task, signals, label causes, comment cursor, test verifications, stop request; for the Q&A seat the conversation record of [§4](#4-launcher)) |
+| Seat state | `<gcd>/kankan/seats/<seat>.state.json` (current task, signals, label causes, comment cursor, test verifications, stop request, model and effort of the running agent, planned agent restart; for the Q&A seat the current turn token) |
 
 **§5.3 Components.** Add:
 
-| `qa` | Q&A seat policy: claim, conversation end, delivery record, answer chunking, handoff. |
+| `qa` | Q&A seat policy: claim, conversation end, conversation record, delivery, answer chunking and pending operations, handoff. |
 
 **§8.4 State machine.** Add:
 
-| `qa_waiting` | Q&A seat after `answer`/`fail`: follow-up polling ([§4](#4-launcher)) | no |
+| `qa_waiting` | Q&A seat after `answer`, `fail` or an inactivity `Error`: follow-up polling ([§4](#4-launcher)) | no |
 
 **§8.5 Cycle and signals.** Add:
 
-> On the Q&A seat a task is a conversation: `answer` and `fail` end a turn and not the task; follow-ups start new turns in the same agent conversation ([§4](#4-launcher)).
+> On the Q&A seat a task is a conversation: `answer` and `fail` end a turn and not the task; follow-ups start new turns, each with its own token, in the same agent conversation ([§4](#4-launcher)).
+
+**§10.1 Primitives (`refstore`).** Replace the text starting “Inputs validated before reaching Git: …” with:
+
+> Inputs validated before reaching Git: card ID `^[0-9a-f]{24}$`, shortLink `^[A-Za-z0-9]{8}$`, seat `^[a-z]+-([0-9]+|qa)$`.
+
+**§10.2 Metadata blobs.** Add:
+
+> Phase `qa` has `conversation` and `covered`; a `parked` ref with `cause: handoff` and the `impl` ref claimed from it have `handoff` (comment IDs); a `parked` ref may have `pos: bottom` ([§3](#3-card-ref-phase-qa)).
 
 **§10.3 Phases and transitions.** Add the rows of [§3](#3-card-ref-phase-qa).
 
@@ -106,16 +136,12 @@ How this feature changes [`initial_spec_technical.md`](initial_spec_technical.md
 
 - cards in phase `qa` are never moved; `parked` refs with `pos: bottom` are moved to the bottom of the target list.
 
-**§10.1 Primitives (`refstore`).** Replace the text starting “Inputs validated before reaching Git: …” with:
+**§18.1 Strategy.** Add the tests of [§9](#9-tests).
 
-> Inputs validated before reaching Git: card ID `^[0-9a-f]{24}$`, shortLink `^[A-Za-z0-9]{8}$`, seat `^[a-z]+-([0-9]+|qa)$`.
-
-**§18.1 Strategy.** Add the tests of [§8](#8-tests).
-
-## 10. Changes to the board settings technical specification
+## 11. Changes to the board settings technical specification
 
 How this feature changes [`boardsettings_spec_technical.md`](boardsettings_spec_technical.md), by its section numbers. That file is not edited.
 
 **§3 Model and effort.** Add:
 
-> A third role, `questions`, with its setting card, seeds and probes, as `implementation` and `review`. The Q&A seat pins the `questions` pair at claim and at every restart; the planned restart for a changed pair happens only in `idle` or `qa_waiting`, never during a turn, and there is no fallback to another role's pair.
+> A third role, `questions`, with its setting card, seeds and probes, as `implementation` and `review`, active only when a `qa` seat is configured: `seeds`, `boardconfig` and the adapter validation accept the role, `init`/`doctor` ask its seeds and create its card only then, and its absence or invalidity never affects the evaluation of the other roles or the start of `work` seats. The Q&A seat pins the `questions` pair at claim and at every start; the planned restart for a changed pair happens only in `idle` or `qa_waiting`, never during a turn, and there is no fallback to another role's pair.
