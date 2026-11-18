@@ -277,13 +277,18 @@ def _finish(project, lease, task: dict, pending: dict) -> None:
                     raise _ended(task)
                 project.log("qa_answered", seat=lease.seat, card=task["card"], conversation=pending["conversation"],
                             turn=pending["turn"], covered=covered, old=value.oid, new=oid)
+            else:
+                qa.check_seat(project, lease)  # no transaction verified the seat ref before the signal
             faults.point("qa_after_covered")
         elif not qa.handed_off(value, pending["conversation"], pending["posted"]):
             qa.handoff_transition(project, lease, task, pending["posted"])
+        else:
+            qa.check_seat(project, lease)  # the transition happened earlier: nothing verified the seat ref now
         if (qa.read_turn(project.paths, pending["conversation"]) or {}).get("token") == pending["turn"]:
             # only the current turn is signalled: an older turn is over, its signal would replace a newer one
             write_signal(project, lease.seat, task["id"], pending["kind"],
                          {"turn": pending["turn"], "comments": list(pending["posted"])})
+            faults.point("qa_after_signal")
         _record_completed(project, pending)
     _commit_check(project, lease, task, pending["kind"])
 
@@ -364,6 +369,7 @@ def complete_pending(project, lease, task: dict, lock_timeout: float = LOCK_TIME
     with qa.conversation_lock(project.paths, conversation, lock_timeout):
         pending = read_pending(project.paths, conversation)
         if pending is None:
+            qa.drop_orphan(project, task["card"], conversation)  # an end in between: the lock re-created it
             return None
         turn_data = qa.read_turn(project.paths, conversation) or {}
         kind = _complete_locked(project, lease, task, pending, turn_data)

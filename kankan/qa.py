@@ -255,6 +255,11 @@ def to_deliver(cands: Inputs, covered: Optional[dict], delivered: Inputs) -> Opt
     return None
 
 
+def _newest(comment_ids: List[str]) -> Optional[str]:
+    """The newest of ``comment_ids`` (Trello action IDs grow with time), None when empty."""
+    return max(comment_ids, key=lambda c: (len(c), c)) if comment_ids else None
+
+
 def coverage(previous: Optional[dict], inputs: Inputs, context: Optional[Inputs] = None) -> dict:
     """The ``covered`` value after an answer: the newest comment among the turn's inputs, its context and the
     previous ``covered``, and the union of the attachments."""
@@ -263,7 +268,7 @@ def coverage(previous: Optional[dict], inputs: Inputs, context: Optional[Inputs]
     comments = list(inputs.comments) + list(context.comments)
     if previous.get("comment"):
         comments.append(previous["comment"])
-    newest = max(comments, key=lambda c: (len(c), c)) if comments else None
+    newest = _newest(comments)
     seen = set(previous.get("attachments") or []) | set(inputs.attachments) | set(context.attachments)
     return {"comment": newest, "attachments": sorted(seen)}
 
@@ -291,7 +296,8 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
     """``(inputs, context)`` of a new conversation's first turn. When an earlier conversation answered the card
     (a comment by kankan's account carrying an answer or handoff marker), the inputs are the candidates dated
     after the latest such comment by Trello's dates, never the local clock (an unreadable date counts as
-    after), and the others are context; otherwise every candidate is an input."""
+    after), and the others are context: the newest such comment (it covers the older ones) and every such
+    attachment; otherwise every candidate is an input."""
     cands = candidates(project, card, comments)
     me = notify.kankan_member_id(project)
     answers = [c for c in comments if c.member_id == me and QA_MARKER.search(c.text)]
@@ -314,8 +320,8 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
         return when is None or when > latest_when
 
     inputs = Inputs([c for c in cands.comments if comment_new(c)], [a for a in cands.attachments if attachment_new(a)])
-    context = Inputs([c for c in cands.comments if c not in inputs.comments],
-                     [a for a in cands.attachments if a not in inputs.attachments])
+    newest_old = _newest([c for c in cands.comments if c not in inputs.comments])
+    context = Inputs([newest_old] if newest_old else [], [a for a in cands.attachments if a not in inputs.attachments])
     return inputs, context
 
 
@@ -455,6 +461,7 @@ def take_over(project, lease, value: RefValue, pair) -> dict:
     current = project.refs.read(card_ref(meta["card"]))
     if not ours(current, lease.seat, conversation):
         raise KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=meta.get("short", meta["card"])))
+    check_seat(project, lease)  # before the worktree reset and the seat task, as claim, start_turn and end do
     old = load_state(project.paths, lease.seat).task or {}
     same = old.get("kind") == "qa" and old.get("card") == meta["card"] and old.get("conversation") == conversation
     if same and old.get("base"):

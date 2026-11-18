@@ -213,3 +213,20 @@ def test_every_impl_claim_removes_qa_record_entry(board):
     claimed = workflow.claim_impl(project, lease, choice)
     assert claimed is not None and "handoff" not in claimed.meta.to_dict()
     assert qa.recorded(project.paths) == {other}
+
+
+def test_a_failed_qa_record_removal_keeps_the_claim(board, monkeypatch):
+    from kankan import auditlog, qa
+    project, fake = board
+    card = add(fake, project, "plain")
+    lease = seats.acquire(project, "claude")
+    project.reload_config()
+
+    def broken(paths, card_id):
+        raise OSError("disk full")
+    monkeypatch.setattr(qa, "record_remove", broken)
+    snap = project.trello.snapshot(project.cfg.board_id)
+    claimed = workflow.claim_impl(project, lease, workflow.choose(project, lease, snap, workflow.card_refs(project)))
+    assert claimed is not None and project.refs.read(card_ref(card["id"])).meta["phase"] == "impl"
+    events = [e for e in auditlog.read(project.paths) if e["event"] == "qa_record_remove_failed"]
+    assert events and events[0]["card"] == card["id"] and "disk full" in events[0]["error"]

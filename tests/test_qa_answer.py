@@ -255,6 +255,39 @@ def test_crash_around_the_covered_transaction_is_completed_by_complete_pending(c
     assert len(signals(conv)) == 1
 
 
+def _stale(lease):
+    from dataclasses import replace
+    return replace(lease, seat_oid="0" * 39 + "1")
+
+
+def test_complete_pending_without_a_transaction_checks_the_seat_before_signalling(conv, monkeypatch):
+    monkeypatch.setenv("KANKAN_FAULT", "qa_after_covered")
+    with pytest.raises(faults.SimulatedCrash):
+        qa_answer.answer(conv.ctx, "answer", conv.token)
+    monkeypatch.delenv("KANKAN_FAULT")
+    task = load_state(conv.project.paths, conv.lease.seat).task
+    with pytest.raises(KankanError) as err:
+        qa_answer.complete_pending(conv.project, _stale(conv.lease), task)
+    assert err.value.status == Status.NOT_OWNER
+    assert signals(conv) == [] and load_state(conv.project.paths, conv.lease.seat).signal is None
+
+
+def test_crash_after_the_signal_is_completed_without_a_second_answer(conv, monkeypatch):
+    monkeypatch.setenv("KANKAN_FAULT", "qa_after_signal")
+    with pytest.raises(faults.SimulatedCrash):
+        qa_answer.answer(conv.ctx, "answer", conv.token)
+    monkeypatch.delenv("KANKAN_FAULT")
+    assert load_state(conv.project.paths, conv.lease.seat).signal["payload"]["turn"] == conv.token
+    posts_before = len(conv.fake.requests)
+    task = load_state(conv.project.paths, conv.lease.seat).task
+    assert qa_answer.complete_pending(conv.project, conv.lease, task) == "answer"
+    assert not any(m == "POST" for m, _ in conv.fake.requests[posts_before:])
+    assert len(marked(conv)) == 1
+    assert meta(conv)["covered"] == {"comment": conv.question, "attachments": []}
+    assert not (qa.conversation_dir(conv.project.paths, task["conversation"]) / "pending.json").exists()
+    assert qa_answer.complete_pending(conv.project, conv.lease, task) is None
+
+
 def test_complete_pending_posts_the_remaining_chunks(conv, monkeypatch):
     monkeypatch.setenv("KANKAN_FAULT", "qa_after_chunk")
     with pytest.raises(faults.SimulatedCrash):
@@ -269,6 +302,24 @@ def test_complete_pending_posts_the_remaining_chunks(conv, monkeypatch):
 def test_complete_pending_without_pending_is_none(conv):
     assert qa_answer.complete_pending(conv.project, conv.lease, conv.task) is None
     assert qa.conversations(conv.project.paths) == [conv.task["conversation"]]
+
+
+def test_complete_pending_after_an_end_racing_the_lock_leaves_no_directory(conv, monkeypatch):
+    monkeypatch.setenv("KANKAN_FAULT", "qa_after_chunk")
+    with pytest.raises(faults.SimulatedCrash):
+        qa_answer.answer(conv.ctx, long_text(), conv.token)
+    monkeypatch.delenv("KANKAN_FAULT")
+    task = load_state(conv.project.paths, conv.lease.seat).task
+    real = qa.conversation_lock
+
+    def ending_first(paths, conversation, timeout):
+        # the conversation ends between the pending.json check and the lock: the lock re-creates the directory
+        monkeypatch.setattr(qa, "conversation_lock", real)
+        qa.end(conv.project, conv.lease, task)
+        return real(paths, conversation, timeout)
+    monkeypatch.setattr(qa, "conversation_lock", ending_first)
+    assert qa_answer.complete_pending(conv.project, conv.lease, task) is None
+    assert qa.conversations(conv.project.paths) == []
 
 
 def test_card_moved_to_done_between_chunks_gives_not_owner(conv, monkeypatch):

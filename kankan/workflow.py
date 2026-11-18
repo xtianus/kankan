@@ -148,7 +148,10 @@ def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Cla
     with project_lock(project.paths):
         result = transition(project, lease, card, choice.ref, meta,
                             messages.CLAIMED.format(seat=lease.seat, branch=branch) + _claim_selection(lease, pair, "implementation"))
-        qa.record_remove(project.paths, card.id)  # questions T§2: right after the claim's transaction
+        try:
+            qa.record_remove(project.paths, card.id)  # questions T§2: right after the claim's transaction
+        except OSError as err:  # the claim stands: a stale entry only makes reconcile report the card
+            project.log("qa_record_remove_failed", card=card.id, error=str(err))
     fresh = project.trello.card(card.id)
     if fresh is not None and has_hold(project, fresh):
         park = CardMeta.from_dict(result.ref.meta).evolve(phase=Phase.PARKED.value, owner=None, cause="yield",

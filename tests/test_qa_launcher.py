@@ -90,6 +90,26 @@ def comment_new(task, comment_id):
     return next(c["new"] for c in task["comments"] if c["id"] == comment_id)
 
 
+def _gets(env, path):
+    return sum(1 for method, seen in list(env.fake.requests) if method == "GET" and seen == path)
+
+
+def _wait_gets(env, path, cycles, timeout):
+    start = _gets(env, path)
+    assert wait_for(lambda: _gets(env, path) >= start + cycles, timeout=timeout), f"no {cycles} reads of {path}"
+
+
+def wait_card_polls(env, card, cycles=2, timeout=15):
+    """Wait until the launcher has read ``card``'s comments ``cycles`` more times (the active-card poll, once per
+    ``qa_poll_seconds``): every poll before the last one, and what it delivers, is complete."""
+    _wait_gets(env, f"/1/cards/{card['id']}/actions", cycles, timeout)
+
+
+def wait_board_polls(env, cycles=2, timeout=15):
+    """Wait until the idle launcher has read the board ``cycles`` more times (its tick, which claims)."""
+    _wait_gets(env, f"/1/boards/{env.project.cfg.board_id}", cycles, timeout)
+
+
 # ---------------------------------------------------------------------- conversation
 
 def test_first_answer_leads_to_qa_waiting_without_labels(chain):
@@ -115,7 +135,7 @@ def test_follow_up_is_delivered_once_with_forwarded(chain):
     assert wait_for(lambda: len(prompts(log)) == 2, timeout=6)
     assert prompts(log)[1] == messages.QA_FOLLOWUP.format(counts="1 comment", turn=tokens(log)[1])
     assert wait_for(lambda: with_text(env, card, "second answer") and state(env) == "qa_waiting", timeout=20)
-    time.sleep(3)
+    wait_card_polls(env, card)
     assert len(prompts(log)) == 2  # delivered once
     assert len(with_text(env, card, messages.FORWARDED)) == 1
     assert tokens(log)[0] != tokens(log)[1]
@@ -162,7 +182,7 @@ def test_fail_sets_error_and_a_follow_up_clears_it_with_the_failed_inputs(chain)
          "text": "now I see it"}])
     assert wait_for(lambda: env.project.cfg.label_error in labels_of(env, card), timeout=40)
     assert wait_for(lambda: state(env) == "qa_waiting", timeout=10)
-    time.sleep(2)
+    wait_card_polls(env, card)
     assert len(prompts(log)) == 1  # the failed turn's inputs alone are not delivered again
     followup = env.fake.user_comment(card["id"], "here it is again")
     assert wait_for(lambda: with_text(env, card, "now I see it"), timeout=20)
@@ -239,7 +259,7 @@ def test_card_moved_to_done_while_working_ends_at_once(chain):
     env.fake.user_move(first["id"], env.project.cfg.done)
     assert wait_for(lambda: ref_meta(env, first) is None, timeout=5)  # ended at once, during the turn
     assert state(env) == "working"
-    time.sleep(1)
+    time.sleep(1)  # the ended conversation is no longer polled: only time shows that the clear waits
     assert pane_writes(env).count("/clear") == 1  # the clear waits for "ready"
     assert wait_for(lambda: out.exists() and "not_owner" in out.read_text(), timeout=15)
     assert wait_for(lambda: with_text(env, second, "second card answer"), timeout=30)
@@ -262,7 +282,7 @@ def test_hold_in_qa_waiting_ends_the_conversation_and_the_card_stays(chain):
     assert wait_for(lambda: state(env) == "idle", timeout=10)
     assert agent_inputs(log)[-1] == "/clear"
     assert env.fake.card_list(card["id"]) == env.qa_list
-    time.sleep(2)
+    wait_board_polls(env)
     assert ref_meta(env, card) is None and len(prompts(log)) == 1  # a card on HOLD is not taken again
 
 
@@ -780,7 +800,7 @@ def test_launcher_restart_in_qa_waiting_resumes_with_a_new_task(chain):
     kill_launcher(env)
     assert wait_for(lambda: load_state(env.project.paths, SEAT).task["id"] != before["id"]
                     and state(env) == "qa_waiting", timeout=40)
-    time.sleep(2)
+    wait_card_polls(env, card)
     # nothing new since the answer: the fresh agent gets no prompt and the card no comment (questions T§4)
     assert len(prompts(log)) == 1 and not restart_prompts(log)
     added = env.fake.card_comments(card["id"])[comments:]
@@ -824,7 +844,7 @@ def test_changed_questions_pair_restarts_the_agent_in_qa_waiting(chain):
     assert starts(log)[-1]["argv"][-4:] == ["--model", "opus", "--effort", "high"]
     assert wait_for(lambda: state(env) == "qa_waiting" and load_state(env.project.paths, SEAT).task["model"] == "opus",
                     timeout=30)
-    time.sleep(2)
+    wait_card_polls(env, card)
     assert not restart_prompts(log) and not with_text(env, card, "with opus")  # nothing new: no prompt
     env.fake.user_comment(card["id"], "and now?")
     assert wait_for(lambda: with_text(env, card, "with opus"), timeout=30)
@@ -854,7 +874,7 @@ def test_pair_change_during_a_turn_waits_for_its_end(chain):
     assert wait_for(lambda: state(env) == "working" and prompts(log), timeout=40)
     rewrite_steps(log, [])
     set_questions_pair(env, "opus")
-    time.sleep(3)
+    wait_card_polls(env, card)
     assert len(starts(log)) == 1 and state(env) == "working"
     assert wait_for(lambda: len(starts(log)) == 2, timeout=40)
     events = [e["event"] for e in agent_events(log)]
@@ -920,7 +940,7 @@ def test_usage_limit_sets_resume_and_follow_ups_wait_for_the_resumption(chain):
     assert wait_for(lambda: state(env) == "limited", timeout=40)
     assert wait_for(resume_labels, timeout=10)
     env.fake.user_comment(card["id"], "and what about X?")
-    time.sleep(3)
+    time.sleep(3)  # a limited launcher does not poll the card: only time shows that the follow-up waits
     assert state(env) == "limited" and len(prompts(log)) == 1  # follow-ups wait for the resumption
     assert wait_for(lambda: with_text(env, card, "second answer"), timeout=40)
     assert prompts(log)[1] == messages.QA_FOLLOWUP.format(counts="1 comment", turn=tokens(log)[1])

@@ -106,7 +106,7 @@ def test_first_turn_marks_items_after_the_latest_answer_by_trello_dates(qa_env):
                               replace(second, date="2026-11-17T10:07:00.000Z")]
     inputs, context = qa.first_turn(project, fresh, comments)
     assert inputs == qa.Inputs([ident(4)], [second.id])
-    assert context == qa.Inputs([ident(1), ident(3)], [first.id])
+    assert context == qa.Inputs([ident(3)], [first.id])  # the newest context comment covers the older ones
     # never answered: everything is new
     inputs, context = qa.first_turn(project, fresh, [c for c in comments if c.id != ident(2)])
     assert inputs == qa.Inputs([ident(1), ident(3), ident(4)], [first.id, second.id])
@@ -336,6 +336,22 @@ def test_take_over_refuses_a_ref_it_does_not_own(qa_env):
     with pytest.raises(KankanError) as err:
         qa.take_over(project, lease, value, PAIR)
     assert err.value.status == Status.NOT_OWNER
+
+
+def test_take_over_refuses_a_seat_no_longer_held_before_touching_the_worktree(qa_env):
+    project, fake, lease, qa_list = qa_env
+    card = _top(project, fake, qa_list)
+    qa.claim(project, lease, card, PAIR)
+    update_state(project.paths, lease.seat, lambda state: setattr(state, "task", None))
+    worktree = project.paths.seat_worktree(lease.seat)
+    git(worktree, "commit", "-q", "--allow-empty", "-m", "stray")
+    stray = gitutil.rev(worktree, "HEAD")
+    stale = replace(lease, seat_oid="0" * 39 + "1")
+    with pytest.raises(KankanError) as err:
+        qa.take_over(project, stale, project.refs.read(card_ref(card.id)), PAIR)
+    assert err.value.status == Status.NOT_OWNER
+    assert gitutil.rev(worktree, "HEAD") == stray
+    assert load_state(project.paths, lease.seat).task is None
 
 
 # ---------------------------------------------------------------------- turns
