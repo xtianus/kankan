@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 
 from kankan import faults, gitutil, labels, messages, notify, qa, worktrees
 from kankan.agentcmds import write_signal
-from kankan.cards import CardMeta, Phase
+from kankan.cards import CardMeta
 from kankan.config import atomic_write_json, project_lock, read_json
 from kankan.errors import KankanError, Status
 from kankan.refstore import Update, Verify, card_ref, seat_ref
@@ -136,7 +136,7 @@ def _ended(task: dict) -> KankanError:
     return KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
 
 
-def _qa_task(ctx, command: str) -> dict:
+def qa_task(ctx, command: str) -> dict:
     """The seat's task, by the error precedence: ``no_work``, ``usage_error`` (not a Q&A task), ``not_owner``
     (ended, or the ref is not this seat's conversation)."""
     task = ctx.task
@@ -144,7 +144,7 @@ def _qa_task(ctx, command: str) -> dict:
         raise KankanError(Status.USAGE_ERROR, messages.QA_ONLY.format(command=command))
     if task.get("ended") or not qa.valid_conversation(task.get("conversation")):
         raise _ended(task)
-    if not qa._ours(ctx.project.refs.read(card_ref(task["card"])), ctx.seat, task["conversation"]):
+    if not qa.ours(ctx.project.refs.read(card_ref(task["card"])), ctx.seat, task["conversation"]):
         raise _ended(task)  # checked before the conversation lock, so it is not re-created
     return task
 
@@ -155,13 +155,13 @@ def _validate(ctx, task: dict, turn: str):
     project = ctx.project
     conversation = task["conversation"]
     value = project.refs.read(card_ref(task["card"]))
-    if not qa._ours(value, ctx.seat, conversation):
-        qa._drop_orphan(project, task["card"], conversation)
+    if not qa.ours(value, ctx.seat, conversation):
+        qa.drop_orphan(project, task["card"], conversation)
         raise _ended(task)
     current = load_state(project.paths, ctx.seat).task or {}
     if current.get("ended") or current.get("conversation") != conversation or current.get("card") != task["card"]:
         raise _ended(task)
-    qa._check_seat(project, ctx.lease)
+    qa.check_seat(project, ctx.lease)
     turn_data = qa.read_turn(project.paths, conversation) or {}
     if not turn or turn_data.get("token") != turn:
         raise KankanError(Status.NEEDS_ACTION, messages.QA_STALE_TURN.format(turn=turn),
@@ -191,7 +191,7 @@ def _post_chunks(project, lease, task: dict, pending: dict, ref_oid: str) -> Lis
         current = project.refs.read(ref)
         if current is None or current.oid != ref_oid:
             raise _ended(task)
-        qa._check_seat(project, lease)
+        qa.check_seat(project, lease)
         comment = project.trello.comment_once(task["card"], piece, op)
         pending["posted"].append(comment.id)
         _save_pending(project.paths, pending)
@@ -216,7 +216,7 @@ def _post(ctx, task: dict, text: str, turn: str, kind: str) -> Tuple[List[str], 
         # an older turn's operation that was never completed: completed first, never dropped (T§6 step 2)
         _complete_locked(project, ctx.lease, task, pending, turn_data)
         value = project.refs.read(card_ref(task["card"]))
-        if not qa._ours(value, ctx.seat, conversation):
+        if not qa.ours(value, ctx.seat, conversation):
             raise _ended(task)
         pending = None
     if pending is not None and (pending.get("kind"), pending.get("hash")) != (kind, digest):
@@ -235,20 +235,12 @@ def _post(ctx, task: dict, text: str, turn: str, kind: str) -> Tuple[List[str], 
 def post(ctx, text: str, turn: str, kind: str) -> List[str]:
     """Steps 1–3 of ``answer`` (``kind="answer"``) or ``handoff``: validate, record the pending operation, post
     the chunks not yet posted. Returns the comment IDs of every chunk."""
-    task = _qa_task(ctx, kind)
+    task = qa_task(ctx, kind)
     with qa.conversation_lock(ctx.project.paths, task["conversation"], LOCK_TIMEOUT):
         return _post(ctx, task, text, turn, kind)[0]
 
 
 # ---------------------------------------------------------------------- completion (T§6 step 4)
-
-def _handed_off(value, pending: dict) -> bool:
-    """The handoff transition of ``pending`` already happened (the ref may since be claimed for implementation)."""
-    return value is not None and value.meta.get("phase") in (Phase.PARKED.value, Phase.IMPL.value) \
-        and value.meta.get("cause", "handoff") == "handoff" \
-        and value.meta.get("conversation") == pending["conversation"] \
-        and value.meta.get("handoff") == pending["posted"]
-
 
 def _record_completed(project, pending: dict) -> None:
     """Record the operation in ``turn.json`` (a repeated command of this turn finds it), then delete
@@ -272,7 +264,7 @@ def _finish(project, lease, task: dict, pending: dict) -> None:
     with project_lock(project.paths):
         value = project.refs.read(ref)
         if pending["kind"] == "answer":
-            if not qa._ours(value, lease.seat, pending["conversation"]):
+            if not qa.ours(value, lease.seat, pending["conversation"]):
                 raise _ended(task)
             covered = qa.coverage(value.meta.get("covered"), qa.Inputs.from_dict(pending.get("inputs")),
                                   qa.Inputs.from_dict(pending["context"]) if pending.get("context") else None)
@@ -281,12 +273,12 @@ def _finish(project, lease, task: dict, pending: dict) -> None:
                 oid = project.refs.write_blob(CardMeta.from_dict(value.meta).evolve(covered=covered).to_dict())
                 if not project.refs.transaction([Verify(seat_ref(lease.seat), lease.seat_oid),
                                                  Update(ref, oid, value.oid)]):
-                    qa._check_seat(project, lease)
+                    qa.check_seat(project, lease)
                     raise _ended(task)
                 project.log("qa_answered", seat=lease.seat, card=task["card"], conversation=pending["conversation"],
                             turn=pending["turn"], covered=covered, old=value.oid, new=oid)
             faults.point("qa_after_covered")
-        elif not _handed_off(value, pending):
+        elif not qa.handed_off(value, pending["conversation"], pending["posted"]):
             qa.handoff_transition(project, lease, task, pending["posted"])
         if (qa.read_turn(project.paths, pending["conversation"]) or {}).get("token") == pending["turn"]:
             # only the current turn is signalled: an older turn is over, its signal would replace a newer one
@@ -305,10 +297,7 @@ def _commit_check(project, lease, task: dict, kind: str = "answer") -> None:
         return
     baseline = int(current.get("reflog") or 0)
     worktree = project.paths.seat_worktree(lease.seat)
-    # one line per entry (an entry may have an empty subject, e.g. the one of ``git worktree add``)
-    proc = gitutil.run(worktree, ["reflog", "show", "--format=>%gs", "HEAD"], check=False)
-    subjects = [line[1:] for line in proc.stdout.splitlines() if line.startswith(">")] \
-        if proc.returncode == 0 else []
+    subjects = worktrees.reflog_subjects(worktree)
     if len(subjects) <= baseline:
         return
     newer = subjects[:len(subjects) - baseline]  # newest first
@@ -333,7 +322,7 @@ def _commit_check(project, lease, task: dict, kind: str = "answer") -> None:
 # ---------------------------------------------------------------------- commands
 
 def _run(ctx, text: str, turn: str, kind: str) -> dict:
-    task = _qa_task(ctx, kind)
+    task = qa_task(ctx, kind)
     project = ctx.project
     with qa.conversation_lock(project.paths, task["conversation"], LOCK_TIMEOUT):
         ids, done = _post(ctx, task, text, turn, kind)
@@ -392,9 +381,9 @@ def _complete_locked(project, lease, task: dict, pending: dict, turn_data: dict)
         _drop_pending(project.paths, conversation)
         return None
     value = project.refs.read(card_ref(task["card"]))
-    if not (pending["kind"] == "handoff" and _handed_off(value, pending)):
-        if not qa._ours(value, lease.seat, conversation):
-            qa._drop_orphan(project, task["card"], conversation)
+    if not (pending["kind"] == "handoff" and qa.handed_off(value, pending["conversation"], pending["posted"])):
+        if not qa.ours(value, lease.seat, conversation):
+            qa.drop_orphan(project, task["card"], conversation)
             raise _ended(task)
         _post_chunks(project, lease, task, pending, value.oid)
     _finish(project, lease, task, pending)

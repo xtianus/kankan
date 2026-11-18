@@ -108,10 +108,16 @@ def commits_ahead(repo, branch: str, main: str) -> int:
     return int(gitutil.out(repo, ["rev-list", "--count", f"{main}..{branch}"]))
 
 
+def reflog_subjects(worktree) -> List[str]:
+    """The subjects of the worktree's own ``HEAD`` reflog, newest first (empty when it has none), e.g.
+    ``commit (amend): …``. An entry may have an empty subject (the one of ``git worktree add``)."""
+    proc = gitutil.run(worktree, ["reflog", "show", "--format=>%gs", "HEAD"], check=False)
+    return [line[1:] for line in proc.stdout.splitlines() if line.startswith(">")] if proc.returncode == 0 else []
+
+
 def reflog_length(worktree) -> int:
     """The number of entries in the worktree's own ``HEAD`` reflog (0 when it has none)."""
-    proc = gitutil.run(worktree, ["reflog", "show", "--format=%H", "HEAD"], check=False)
-    return len([line for line in proc.stdout.splitlines() if line]) if proc.returncode == 0 else 0
+    return len(reflog_subjects(worktree))
 
 
 def reset_detached(worktree, commit: str) -> Tuple[str, int]:

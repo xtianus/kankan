@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from kankan import attachments, auditlog, clock, deps, faults, gitutil, messages, notify, worktrees
-from kankan.cards import CardMeta, Phase, _parse_refs
+from kankan.cards import CardMeta, Phase, parse_refs
 from kankan.config import Paths, atomic_write_json, project_lock, read_json
 from kankan.errors import KankanError, Status
 from kankan.refstore import CARD_PREFIX, Create, Delete, RefValue, Update, Verify, card_ref, seat_ref
@@ -216,8 +216,9 @@ class Inputs:
         return cls(list(data.get("comments") or []), list(data.get("attachments") or []))
 
 
-# the marker of an answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``
-_ANSWER_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"q[ah]-[0-9a-f]{8,64}-")
+# the marker of an answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``;
+# groups: kind (``qa``/``qh``), conversation, turn, chunk index
+QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
 
 
 def candidates(project, card: Card, comments: List[Comment]) -> Inputs:
@@ -293,7 +294,7 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
     after), and the others are context; otherwise every candidate is an input."""
     cands = candidates(project, card, comments)
     me = notify.kankan_member_id(project)
-    answers = [c for c in comments if c.member_id == me and _ANSWER_MARKER.search(c.text)]
+    answers = [c for c in comments if c.member_id == me and QA_MARKER.search(c.text)]
     if not answers:
         return cands, Inputs()
     floor = datetime.min.replace(tzinfo=timezone.utc)
@@ -335,7 +336,7 @@ def eligible(project, snap: Snapshot, refs: Dict[str, RefValue]) -> Optional[Car
     cfg = project.cfg
     if not cfg.qa_list:
         return None
-    malformed = {ref[len(CARD_PREFIX):] for ref, value in _parse_refs(project).items()
+    malformed = {ref[len(CARD_PREFIX):] for ref, value in parse_refs(project).items()
                  if not isinstance(value, RefValue)}
     for card in sorted(snap.cards.values(), key=lambda c: c.pos):
         value = refs.get(card.id)
@@ -356,12 +357,21 @@ def active_ended(cfg, card: Optional[Card]) -> bool:
         or cfg.label_hold in card.label_ids
 
 
-def _ours(value: Optional[RefValue], seat: str, conversation: Optional[str]) -> bool:
+def ours(value: Optional[RefValue], seat: str, conversation: Optional[str]) -> bool:
     return value is not None and value.meta.get("phase") == Phase.QA.value and value.meta.get("owner") == seat \
         and conversation is not None and value.meta.get("conversation") == conversation
 
 
-def _check_seat(project, lease) -> None:
+def handed_off(value: Optional[RefValue], conversation: Optional[str], posted: Optional[list] = None) -> bool:
+    """The handoff transition of ``conversation`` happened: the ref is ``parked`` by a handoff carrying its summary
+    comments, or since claimed for implementation (``impl``). With ``posted``, the summary must be those comments."""
+    return value is not None and value.meta.get("phase") in (Phase.PARKED.value, Phase.IMPL.value) \
+        and value.meta.get("cause", "handoff") == "handoff" \
+        and conversation is not None and value.meta.get("conversation") == conversation \
+        and bool(value.meta.get("handoff")) and (posted is None or value.meta.get("handoff") == posted)
+
+
+def check_seat(project, lease) -> None:
     current = project.refs.read(seat_ref(lease.seat))
     if current is None or current.oid != lease.seat_oid:
         raise KankanError(Status.NOT_OWNER, messages.SEAT_NOT_HELD.format(seat=lease.seat))
@@ -422,7 +432,7 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
         ops = [Verify(seat_ref(lease.seat), lease.seat_oid),
                Update(ref, oid, current.oid) if current is not None else Create(ref, oid)]
         if not project.refs.transaction(ops):
-            _check_seat(project, lease)
+            check_seat(project, lease)
             project.log("qa_claim_skipped", card=card.id, reason="ref changed")
             return None
         older = current.meta.get("conversation") if current is not None else None
@@ -443,7 +453,7 @@ def take_over(project, lease, value: RefValue, pair) -> dict:
     meta = value.meta
     conversation = meta.get("conversation")
     current = project.refs.read(card_ref(meta["card"]))
-    if not _ours(current, lease.seat, conversation):
+    if not ours(current, lease.seat, conversation):
         raise KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=meta.get("short", meta["card"])))
     old = load_state(project.paths, lease.seat).task or {}
     same = old.get("kind") == "qa" and old.get("card") == meta["card"] and old.get("conversation") == conversation
@@ -457,7 +467,7 @@ def take_over(project, lease, value: RefValue, pair) -> dict:
 
 # ---------------------------------------------------------------------- turns (T§4–T§5)
 
-def _drop_orphan(project, card_id: str, conversation: str) -> None:
+def drop_orphan(project, card_id: str, conversation: str) -> None:
     """Delete a conversation directory re-created by a lock taken after the end (no ref names it)."""
     current = project.refs.read(card_ref(card_id))
     if current is None or current.meta.get("conversation") != conversation:
@@ -470,15 +480,15 @@ def start_turn(project, lease, task: dict, inputs: Inputs, context: Optional[Inp
     prompt only afterwards. Raises ``NOT_OWNER`` when the conversation ended or the task was replaced."""
     conversation = task["conversation"]
     ended = KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
-    if not _ours(project.refs.read(card_ref(task["card"])), lease.seat, conversation):
+    if not ours(project.refs.read(card_ref(task["card"])), lease.seat, conversation):
         raise ended  # checked before the lock too, so an ended conversation's directory is not re-created
     token = uuid.uuid4().hex[:16]
     with conversation_lock(project.paths, conversation, CONVERSATION_LOCK_TIMEOUT):
         value = project.refs.read(card_ref(task["card"]))
-        if not _ours(value, lease.seat, conversation):
-            _drop_orphan(project, task["card"], conversation)
+        if not ours(value, lease.seat, conversation):
+            drop_orphan(project, task["card"], conversation)
             raise ended
-        _check_seat(project, lease)
+        check_seat(project, lease)
         data = {"token": token, "inputs": inputs.to_dict(), "run": task["id"]}
         if context is None and not value.meta.get("covered"):
             # no answer yet: the first turn's context stays uncovered context until an answer covers it
@@ -520,14 +530,14 @@ def handoff_transition(project, lease, task: dict, comment_ids: List[str]) -> No
         if active_ended(cfg, card):
             raise ended
         value = project.refs.read(ref)
-        if not _ours(value, lease.seat, conversation):
+        if not ours(value, lease.seat, conversation):
             raise ended
         meta = CardMeta.from_dict(value.meta).evolve(
             phase=Phase.PARKED.value, owner=None, session=None, cause="handoff", target_list=cfg.backlog,
             pos="bottom", from_list=cfg.qa_list, handoff=list(comment_ids), covered=None)
         oid = project.refs.write_blob(meta.to_dict())
         if not project.refs.transaction([Verify(seat_ref(lease.seat), lease.seat_oid), Update(ref, oid, value.oid)]):
-            _check_seat(project, lease)
+            check_seat(project, lease)
             raise ended
         project.log("qa_handoff", seat=lease.seat, card=task["card"], conversation=conversation,
                     old=value.oid, new=oid, comments=list(comment_ids))
@@ -571,11 +581,11 @@ def end(project, lease, task: dict, *, handed_off: bool = False) -> bool:
     with project_lock(project.paths):
         if not handed_off:
             value = project.refs.read(ref)
-            if _ours(value, lease.seat, conversation):
+            if ours(value, lease.seat, conversation):
                 if project.refs.transaction([Verify(seat_ref(lease.seat), lease.seat_oid), Delete(ref, value.oid)]):
                     ended, value = True, None
                 else:
-                    _check_seat(project, lease)
+                    check_seat(project, lease)
                     value = project.refs.read(ref)
             if value is None:
                 _discard_card_files(project, task.get("short", ""), conversation)
@@ -587,7 +597,7 @@ def end(project, lease, task: dict, *, handed_off: bool = False) -> bool:
 
 def _owned(project, seat: str) -> List[RefValue]:
     """The well-formed ``qa`` refs owned by ``seat``."""
-    return [value for value in _parse_refs(project).values() if isinstance(value, RefValue)
+    return [value for value in parse_refs(project).values() if isinstance(value, RefValue)
             and value.meta.get("phase") == Phase.QA.value and value.meta.get("owner") == seat]
 
 

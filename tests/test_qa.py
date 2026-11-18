@@ -91,7 +91,7 @@ def test_first_turn_marks_items_after_the_latest_answer_by_trello_dates(qa_env):
     def comment(number, member, date, text="text"):
         return Comment(id=ident(number), member_id=member, username="u", date=date, text=text)
 
-    answer = "the answer\n\n`kankan:qa-0123456789abcdef-tok-1`"
+    answer = "the answer\n\n`kankan:qa-0123456789abcdef-0a1b2c3d-1`"
     comments = [
         comment(1, owner, "2026-11-17T10:00:00.000Z"),
         comment(2, me, "2026-11-17T10:05:00.000Z", answer),
@@ -365,7 +365,7 @@ def _retaken(project, fake, qa_list, lease, follow_up=True):
     """A card answered in an earlier conversation, claimed again; returns (task, old, new comment IDs, turn)."""
     card = fake.add_card(qa_list, "re-taken")
     old = fake.user_comment(card["id"], "old question")["id"]
-    fake.user_comment(card["id"], "old answer\n\n`kankan:qa-fedcba9876543210-tok-1`", member_id=fake.me["id"])
+    fake.user_comment(card["id"], "old answer\n\n`kankan:qa-fedcba9876543210-0a1b2c3d-1`", member_id=fake.me["id"])
     new = [fake.user_comment(card["id"], "new question")["id"]] if follow_up else []
     fresh = project.trello.card(card["id"])
     task = qa.claim(project, lease, fresh, PAIR)

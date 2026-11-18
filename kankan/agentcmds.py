@@ -9,18 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from kankan import attachments, cards, labels, messages, notify, qa, worktrees
+from kankan import attachments, cards, messages, notify, qa, worktrees
 from kankan.cards import CardMeta, Phase, target_list_for, transition
 from kankan.errors import KankanError, Status
 from kankan.project import Project
 from kankan.refstore import RefValue, card_ref
 from kankan.seats import AgentEnv, Lease, seat_type, verify_owner
 from kankan.seatstate import SeatState, load_state, update_state
-from kankan.trello import MARKER_PREFIX, Comment
+from kankan.trello import Comment
 
 QA_PHASES = (Phase.QA.value,)
-# the marker of a Q&A answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``
-_QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
 _MENTIONS = re.compile(r"\n\n@\S+(?: @\S+)*$")
 _CHUNK_PREFIX = re.compile(r"^[0-9]+/[0-9]+\n\n")
 
@@ -95,7 +93,7 @@ def _qa_ended(ctx: AgentContext) -> KankanError:
 def _qa_owns(ctx: AgentContext, value: Optional[RefValue]) -> bool:
     """The Q&A ownership rule: the task is not ``ended`` and the ref is this seat's ``qa`` ref of the task's
     conversation."""
-    return not ctx.task.get("ended") and qa._ours(value, ctx.seat, ctx.task.get("conversation"))
+    return not ctx.task.get("ended") and qa.ours(value, ctx.seat, ctx.task.get("conversation"))
 
 
 def _own_ref(ctx: AgentContext, phases) -> RefValue:
@@ -132,7 +130,7 @@ def _thread(project, comments: List[Comment], new: Optional[set] = None) -> List
     result = []
     for comment in comments:
         if comment.member_id == me:
-            role = "agent" if _QA_MARKER.search(comment.text) else "kankan"
+            role = "agent" if qa.QA_MARKER.search(comment.text) else "kankan"
         elif comment.member_id in members:
             role = "user"
         else:
@@ -150,7 +148,7 @@ def _summary(chunks: List[Comment]) -> str:
     mention of the last chunk."""
     bodies = []
     for comment in chunks:
-        body = _QA_MARKER.sub("", comment.text).rstrip()
+        body = qa.QA_MARKER.sub("", comment.text).rstrip()
         if len(chunks) > 1:
             body = _CHUNK_PREFIX.sub("", body, count=1)
         bodies.append(body)
@@ -168,7 +166,7 @@ def _handoff(project, meta: dict, comments: List[Comment]) -> Optional[str]:
     me = notify.kankan_member_id(project)
     marked = []
     for comment in comments:
-        found = _QA_MARKER.search(comment.text) if comment.member_id == me else None
+        found = qa.QA_MARKER.search(comment.text) if comment.member_id == me else None
         if found and found.group(1) == "qh":
             marked.append((comment, found))
     if not marked:
@@ -192,7 +190,7 @@ def _qa_still_ours(ctx: AgentContext) -> bool:
     """The ref is still this seat's conversation and the seat task (read again) is the same, not ``ended``."""
     current = load_state(ctx.project.paths, ctx.seat).task or {}
     return current.get("id") == ctx.task["id"] and not current.get("ended") \
-        and qa._ours(_card_ref(ctx), ctx.seat, ctx.task.get("conversation"))
+        and qa.ours(_card_ref(ctx), ctx.seat, ctx.task.get("conversation"))
 
 
 def _discard_ended_files(ctx: AgentContext, short: str) -> None:
@@ -206,7 +204,7 @@ def _discard_ended_files(ctx: AgentContext, short: str) -> None:
         with project_lock(project.paths, timeout=0):
             value = _card_ref(ctx)
             current = load_state(project.paths, ctx.seat).task or {}
-            if value is None or (qa._ours(value, ctx.seat, ctx.task.get("conversation"))
+            if value is None or (qa.ours(value, ctx.seat, ctx.task.get("conversation"))
                                  and current.get("id") == ctx.task["id"]):
                 attachments.discard(project.paths, short)
     except KankanError as err:  # the project lock is busy, or the ref unreadable: the files stay
@@ -448,9 +446,9 @@ def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, templa
         with qa.conversation_lock(project.paths, current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
             # under the lock no turn starts: the token checked here stays current until the signal is written
             if not _qa_still_ours(ctx):
-                qa._drop_orphan(project, current["card"], current["conversation"])
+                qa.drop_orphan(project, current["card"], current["conversation"])
                 raise _qa_ended(ctx)
-            qa._check_seat(project, ctx.lease)
+            qa.check_seat(project, ctx.lease)
             _qa_card(ctx)  # not_owner comes before needs_action (a stale turn)
             token = _qa_turn(ctx, turn)
             return _label_and_comment(ctx, text, label_id, cause, template, token)

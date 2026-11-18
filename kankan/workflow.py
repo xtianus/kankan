@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 from kankan import boardconfig, boardsettings, gitutil, labels, messages, modelcheck, qa, worktrees
-from kankan.cards import OWNED_PHASES, CardMeta, Phase, _parse_refs, converge, target_list_for, transition
+from kankan.cards import CardMeta, Phase, converge, parse_refs, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import CARD_PREFIX, RefValue
-from kankan.seats import Lease, seat_type
+from kankan.seats import Lease
 from kankan.seatstate import load_state, update_state
 from kankan.trello import Card, Snapshot
 
@@ -31,7 +31,7 @@ class Choice:
 
 def card_refs(project) -> Dict[str, RefValue]:
     """Valid card refs by card id (malformed ones are left to reconcile)."""
-    return {ref[len(CARD_PREFIX):]: value for ref, value in _parse_refs(project).items()
+    return {ref[len(CARD_PREFIX):]: value for ref, value in parse_refs(project).items()
             if isinstance(value, RefValue)}
 
 

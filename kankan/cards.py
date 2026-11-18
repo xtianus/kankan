@@ -186,7 +186,7 @@ def confirm_move(project, ref: str, value: RefValue) -> RefValue:
     return value
 
 
-def _parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
+def parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
     result = {}
     for ref, (oid, kind, body) in project.refs.list_raw(CARD_PREFIX).items():
         try:
@@ -219,7 +219,7 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
         cfg = project.cfg
         if snap is None:
             snap = project.trello.snapshot(cfg.board_id)
-        for ref, value in _parse_refs(project).items():
+        for ref, value in parse_refs(project).items():
             card_id = ref[len(CARD_PREFIX):]
             if isinstance(value, KankanError):
                 events.append(f"malformed:{card_id}")

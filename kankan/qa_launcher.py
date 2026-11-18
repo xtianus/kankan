@@ -83,7 +83,7 @@ class QaLauncher(Launcher):
         current = self.seat_task()
         value = self.project.refs.read(card_ref(task["card"]))
         if current is None or current.get("id") != task["id"] or current.get("ended") \
-                or not qa._ours(value, self.lease.seat, task.get("conversation")):
+                or not qa.ours(value, self.lease.seat, task.get("conversation")):
             return None
         return current
 
@@ -670,7 +670,7 @@ class QaLauncher(Launcher):
             return
         self.seen_attachments = attachments
         value = self.project.refs.read(card_ref(task["card"]))
-        if not qa._ours(value, self.lease.seat, task.get("conversation")):
+        if not qa.ours(value, self.lease.seat, task.get("conversation")):
             self.end_conversation("ref_changed", turn_running=self.state != "qa_waiting")
             return
         try:
@@ -689,9 +689,7 @@ class QaLauncher(Launcher):
         """This conversation's ``handoff`` transition happened (ref ``parked`` with its handoff, or since ``impl``)."""
         if not self.task:
             return False
-        value = self.project.refs.read(card_ref(self.task["card"]))
-        return value is not None and value.meta.get("phase") in ("parked", "impl") \
-            and value.meta.get("conversation") == self.task.get("conversation") and bool(value.meta.get("handoff"))
+        return qa.handed_off(self.project.refs.read(card_ref(self.task["card"])), self.task.get("conversation"))
 
     def end_conversation(self, reason: str, turn_running: bool = True) -> None:
         """End the conversation: the ref is deleted at once (a later command of the turn gets ``not_owner``); with

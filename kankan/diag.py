@@ -377,7 +377,7 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
 def _fix_attachment_dirs(project) -> List[Issue]:
     """Under the project lock: delete the attachment directories of cards without a ref. Deletes nothing when a
     ref is malformed or has no valid shortLink (its directory could be wrongly taken for an orphan)."""
-    current = cards._parse_refs(project)
+    current = cards.parse_refs(project)
     shorts = set()
     for value in current.values():
         short = None if isinstance(value, KankanError) else value.meta.get("short")
@@ -437,7 +437,7 @@ def _fix_conversation_dirs(project) -> List[Issue]:
     """Under the project lock: delete the conversation directories no card ref names. Deletes nothing when a
     ref is malformed (its conversation could be wrongly taken for an orphan)."""
     names = set()
-    for value in cards._parse_refs(project).values():
+    for value in cards.parse_refs(project).values():
         if isinstance(value, KankanError):
             project.log("qa_conversation_fix_skipped", reason="a card ref is malformed")
             return []

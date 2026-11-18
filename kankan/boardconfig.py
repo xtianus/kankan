@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from typing import Optional, Union
 
 from kankan import messages
-from kankan.adapters import WORK_ROLES, Adapter, ModelEffort, adapter_types, combinations, load_adapter
+from kankan.adapters import ROLES, WORK_ROLES, Adapter, ModelEffort, adapter_types, combinations, load_adapter
 from kankan.trello import SettingsRead
 
-ROLES = WORK_ROLES + ('questions',)  # the evaluated roles: a questions card is never an unknown setting
 SettingValue = Union[str, int, dict[str, ModelEffort]]
 
 

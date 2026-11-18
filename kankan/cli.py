@@ -271,7 +271,7 @@ def _qa_text(args) -> str:
 def _cmd_answer(args):
     from kankan import agentcmds, messages, qa_answer
     ctx = agentcmds.context()
-    qa_answer._qa_task(ctx, "answer")  # no_work, usage_error, not_owner come before the text arguments
+    qa_answer.qa_task(ctx, "answer")  # no_work, usage_error, not_owner come before the text arguments
     return qa_answer.answer(ctx, _qa_text(args), args.turn), messages.QA_ANSWER_DONE
 
 
@@ -279,7 +279,7 @@ def _cmd_answer(args):
 def _cmd_handoff(args):
     from kankan import agentcmds, messages, qa_answer
     ctx = agentcmds.context()
-    qa_answer._qa_task(ctx, "handoff")  # no_work, usage_error, not_owner come before the text arguments
+    qa_answer.qa_task(ctx, "handoff")  # no_work, usage_error, not_owner come before the text arguments
     return qa_answer.handoff(ctx, _qa_text(args), args.turn), messages.QA_HANDOFF_DONE
 
 
