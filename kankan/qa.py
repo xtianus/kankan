@@ -255,7 +255,7 @@ def to_deliver(cands: Inputs, covered: Optional[dict], delivered: Inputs) -> Opt
     return None
 
 
-def _newest(comment_ids: List[str]) -> Optional[str]:
+def newest(comment_ids: List[str]) -> Optional[str]:
     """The newest of ``comment_ids`` (Trello action IDs grow with time), None when empty."""
     return max(comment_ids, key=lambda c: (len(c), c)) if comment_ids else None
 
@@ -268,9 +268,8 @@ def coverage(previous: Optional[dict], inputs: Inputs, context: Optional[Inputs]
     comments = list(inputs.comments) + list(context.comments)
     if previous.get("comment"):
         comments.append(previous["comment"])
-    newest = _newest(comments)
     seen = set(previous.get("attachments") or []) | set(inputs.attachments) | set(context.attachments)
-    return {"comment": newest, "attachments": sorted(seen)}
+    return {"comment": newest(comments), "attachments": sorted(seen)}
 
 
 def effective_covered(ref_covered: Optional[dict], turn: Optional[dict]) -> Optional[dict]:
@@ -320,7 +319,7 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
         return when is None or when > latest_when
 
     inputs = Inputs([c for c in cands.comments if comment_new(c)], [a for a in cands.attachments if attachment_new(a)])
-    newest_old = _newest([c for c in cands.comments if c not in inputs.comments])
+    newest_old = newest([c for c in cands.comments if c not in inputs.comments])
     context = Inputs([newest_old] if newest_old else [], [a for a in cands.attachments if a not in inputs.attachments])
     return inputs, context
 
@@ -643,7 +642,7 @@ def _check_replaceable(project, old: str, new: str, recover: bool = False) -> No
     """Under the project lock: ``old`` neither runs nor leaves surviving processes (``NEEDS_ACTION`` otherwise);
     with ``recover``, the leftovers of a dead seat are terminated first."""
     from kankan import seats
-    state = seats._liveness(project, old)
+    state = seats.liveness(project, old)  # the project lock is reentrant
     if state == "dead" and recover and seats.recover_dead(project, old):
         state = "unavailable"
     if state in ("alive", "unavailable"):
@@ -761,13 +760,9 @@ def _complete_replacement(project, old: str, new: str) -> None:
         _check_replaceable(project, old, new)
         _carry_label_causes(project, old, new)
         worktree = project.paths.seat_worktree(old)
-        removed = False
-        if (worktree / ".git").exists():
-            if worktrees.dirty_files(worktree):
-                project.log("qa_replaced_worktree_kept", seat=old, worktree=str(worktree))
-            else:
-                gitutil.run(project.paths.repo, ["worktree", "remove", str(worktree)])
-                removed = True
+        removed = worktrees.remove_if_clean(project.paths.repo, worktree)
+        if not removed and (worktree / ".git").exists():
+            project.log("qa_replaced_worktree_kept", seat=old, worktree=str(worktree))
         if project.paths.seats_dir.exists():
             for path in project.paths.seats_dir.glob(f"{old}.*"):
                 path.unlink(missing_ok=True)

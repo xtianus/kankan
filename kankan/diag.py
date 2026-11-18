@@ -504,11 +504,7 @@ def seat_recover(project, seat: str, kill: bool) -> dict:
 
 
 def _remove_worktree(project, seat: str) -> bool:
-    worktree = project.paths.seat_worktree(seat)
-    if (worktree / ".git").exists() and not worktrees.dirty_files(worktree):
-        gitutil.run(project.paths.repo, ["worktree", "remove", str(worktree)])
-        return True
-    return False
+    return worktrees.remove_if_clean(project.paths.repo, project.paths.seat_worktree(seat))
 
 
 def _qa_seat_remove(project, seat: str) -> dict:

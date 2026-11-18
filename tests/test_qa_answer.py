@@ -70,6 +70,16 @@ def test_split_falls_back_to_a_hard_cut():
     assert COMMENT_MAX - 4 <= len(comment_text(pieces[0], OPS[0])) <= COMMENT_MAX
 
 
+def test_split_counts_utf16_units_as_trello_does():
+    # a character outside the BMP is two UTF-16 code units in Trello's length
+    text = "\U0001F600" * 20000
+    pieces = qa_answer.chunks(text, mention="", op_ids=OPS)
+    assert len(pieces) == 3
+    assert all(len(comment_text(piece, op).encode("utf-16-le")) // 2 <= COMMENT_MAX
+               for piece, op in zip(pieces, OPS))
+    assert "".join(_bodies(pieces)) == text
+
+
 def test_chunks_refuses_an_empty_text():
     with pytest.raises(KankanError) as err:
         qa_answer.chunks("  \n", mention="@bob", op_ids=OPS)

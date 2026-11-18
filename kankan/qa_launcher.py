@@ -334,7 +334,7 @@ class QaLauncher(Launcher):
                 self.task = None  # taken up again at the next tick
             return  # retried at the next tick
         self.thread = {c.id: c for c in comments}
-        self.cursor = _newest(self.thread) or None
+        self.cursor = qa.newest(list(self.thread))
         self.card = card
         self.seen_attachments = frozenset(a.id for a in card.attachment_items)
         if restart:
@@ -664,7 +664,7 @@ class QaLauncher(Launcher):
         self.card = card
         for comment in new:
             self.thread[comment.id] = comment
-        self.cursor = _newest(self.thread) or self.cursor
+        self.cursor = qa.newest(list(self.thread)) or self.cursor
         attachments = frozenset(a.id for a in card.attachment_items)
         if not (new or attachments != self.seen_attachments or self.recompute):
             return
@@ -677,6 +677,7 @@ class QaLauncher(Launcher):
             cands = qa.candidates(self.project, card, list(self.thread.values()))
         except KankanError as err:
             self.log("qa_poll_failed", status=err.status.value, error=err.message)
+            self.recompute = True  # the new items are already in the thread: recomputed at the next poll
             return
         self.recompute = False
         covered = qa.effective_covered(value.meta.get("covered"), qa.read_turn(self.project.paths,
@@ -746,10 +747,6 @@ def _safe_name(name: str) -> str:
     backticks become quotes, so a name can neither split nor garble the prompt."""
     printable = "".join(ch if ch.isprintable() else " " for ch in name or "")
     return " ".join(printable.split()).replace("`", "'")
-
-
-def _newest(thread: dict) -> Optional[str]:
-    return max(thread, key=lambda c: (len(c), c)) if thread else None
 
 
 def _end_reason(cfg, card) -> str:

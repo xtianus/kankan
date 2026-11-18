@@ -108,6 +108,14 @@ def commits_ahead(repo, branch: str, main: str) -> int:
     return int(gitutil.out(repo, ["rev-list", "--count", f"{main}..{branch}"]))
 
 
+def remove_if_clean(repo, worktree: Path) -> bool:
+    """Remove a seat worktree when it exists and has no uncommitted changes; True when it was removed."""
+    if (worktree / ".git").exists() and not dirty_files(worktree):
+        gitutil.run(repo, ["worktree", "remove", str(worktree)])
+        return True
+    return False
+
+
 def reflog_subjects(worktree) -> List[str]:
     """The subjects of the worktree's own ``HEAD`` reflog, newest first (empty when it has none), e.g.
     ``commit (amend): …``. An entry may have an empty subject (the one of ``git worktree add``)."""

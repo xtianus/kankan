@@ -356,7 +356,8 @@ class Launcher:
             self.mark_unavailable(survivors)
         prepared = self.prepared
         pair = ModelEffort(prepared['model'], prepared['effort']) if prepared else self.spawning_pair
-        if prepared and pair:
+        # a planned restart without a card (the Q&A seat between conversations) has no card to label
+        if prepared and pair and prepared.get('card') and prepared.get('ref_oid'):
             try:
                 card = self.project.trello.card(prepared['card'])
                 if card:

@@ -34,6 +34,23 @@ class _TooFewOpIds(Exception):
     """``chunks`` needs more op-ids than it was given."""
 
 
+def _units(text: str) -> int:
+    """A text's length as Trello counts it: UTF-16 code units (a character outside the BMP counts twice)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _fit(rest: str, budget: int) -> int:
+    """The number of leading characters of ``rest`` whose UTF-16 length is at most ``budget``."""
+    if _units(rest[:budget]) <= budget:
+        return min(budget, len(rest))
+    used = 0
+    for index, ch in enumerate(rest):
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > budget:
+            return index
+    return len(rest)
+
+
 def _cut(rest: str, limit: int) -> Tuple[int, int]:
     """Where to split ``rest`` so the head has at most ``limit`` characters: ``(end of head, separator length)``,
     at the last blank line, else the last newline, else a hard cut."""
@@ -46,14 +63,14 @@ def _cut(rest: str, limit: int) -> Tuple[int, int]:
 
 def chunks(text: str, *, mention: str, op_ids: List[str]) -> List[str]:
     """The comment texts of ``text`` (questions T§6): each ``trello.comment_text(chunk, op_ids[i])`` is at most
-    ``COMMENT_MAX`` characters. A text that fits is one comment without a prefix; a longer one gets ``i/m``
-    prefixes. Only the last chunk carries ``mention`` (after a blank line). Raises ``USAGE_ERROR`` for an empty
-    text and ``_TooFewOpIds`` when ``op_ids`` has fewer entries than the chunks."""
+    ``COMMENT_MAX`` characters as Trello counts them (UTF-16 code units). A text that fits is one comment without a
+    prefix; a longer one gets ``i/m`` prefixes. Only the last chunk carries ``mention`` (after a blank line). Raises
+    ``USAGE_ERROR`` for an empty text and ``_TooFewOpIds`` when ``op_ids`` has fewer entries than the chunks."""
     text = text.rstrip()
     if not text.strip():
         raise KankanError(Status.USAGE_ERROR, messages.QA_EMPTY)
     tail = f"\n\n{mention}" if mention else ""
-    if len(comment_text(text + tail, op_ids[0])) <= COMMENT_MAX:
+    if _units(comment_text(text + tail, op_ids[0])) <= COMMENT_MAX:
         return [text + tail]
     digits = len(str(len(op_ids)))
     reserve = f"{'9' * digits}/{'9' * digits}\n\n"  # room for the longest prefix ``i/m``
@@ -63,14 +80,15 @@ def chunks(text: str, *, mention: str, op_ids: List[str]) -> List[str]:
         if len(pieces) >= len(op_ids):
             raise _TooFewOpIds()
         op_id = op_ids[len(pieces)]
-        last_budget = COMMENT_MAX - len(comment_text(reserve + tail, op_id))
-        if len(rest) <= last_budget:
+        last_budget = COMMENT_MAX - _units(comment_text(reserve + tail, op_id))
+        size = _units(rest)
+        if size <= last_budget:
             pieces.append(rest)
             break
-        budget = COMMENT_MAX - len(comment_text(reserve, op_id))
+        budget = COMMENT_MAX - _units(comment_text(reserve, op_id))
         if budget <= 0 or last_budget <= 0:
             raise KankanError(Status.INTERNAL_ERROR, messages.QA_NO_ROOM)
-        end, skip = _cut(rest, budget if len(rest) > budget else last_budget)
+        end, skip = _cut(rest, _fit(rest, budget if size > budget else last_budget))
         pieces.append(rest[:end])
         rest = rest[end + skip:]
     count = len(pieces)
