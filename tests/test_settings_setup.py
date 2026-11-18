@@ -13,7 +13,7 @@ def test_build_and_resume_settings_by_name(kproject, fake_trello):
     cfg = kproject.reload_config()
     assert cfg.settings_list and cfg.settings_list not in cfg.workflow_lists()
     read = kproject.trello.settings_cards(cfg.settings_list)
-    assert [card.name for card in read.cards] == ['implementation', 'review']
+    assert [card.name for card in read.cards] == ['Implementation Agents', 'Review Agents']
     for card in read.cards:
         assert card.desc
         assert [c.name for c in card.checklists] == ['claude', 'codex']
@@ -37,7 +37,7 @@ def test_sync_never_selects_replacement_for_removed_tick(kproject, fake_trello):
     # Remove the selected pair; the previously accepted value remains effective.
     adapters['claude'].models = {'opus': {'efforts': ['high']}}
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
-    impl = next(c for c in kproject.trello.settings_cards(kproject.cfg.settings_list).cards if c.name == 'implementation')
+    impl = next(c for c in kproject.trello.settings_cards(kproject.cfg.settings_list).cards if c.name == 'Implementation Agents')
     claude = next(c for c in impl.checklists if c.name == 'claude')
     assert [i.name for i in claude.items] == ['opus · high']
     assert not any(i.state == 'complete' for i in claude.items)
@@ -61,7 +61,7 @@ def test_interrupted_items_resume_selected_seed(kproject, monkeypatch):
         with pytest.raises(RuntimeError):
             settings_setup.ensure(kproject, adapters, say=lambda text: None)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
-    impl = next(c for c in kproject.trello.settings_cards(kproject.reload_config().settings_list).cards if c.name == 'implementation')
+    impl = next(c for c in kproject.trello.settings_cards(kproject.reload_config().settings_list).cards if c.name == 'Implementation Agents')
     selected = [i.name for c in impl.checklists if c.name == 'claude' for i in c.items if i.state == 'complete']
     assert selected == ['sonnet · high']
 
@@ -75,7 +75,7 @@ def test_two_processes_build_one_set_of_cards(kproject):
         stdout, stderr = child.communicate(timeout=25)
         assert child.returncode == 0, stderr.decode()
     read = kproject.trello.settings_cards(kproject.reload_config().settings_list)
-    assert sorted(c.name for c in read.cards) == ['implementation', 'review']
+    assert sorted(c.name for c in read.cards) == ['Implementation Agents', 'Review Agents']
     assert all([c.name for c in card.checklists] == ['claude', 'codex'] for card in read.cards)
 
 
@@ -95,14 +95,14 @@ def test_questions_card_exists_only_with_a_qa_seat(kproject, fake_trello):
     adapters = boardsettings.adapters_for(kproject.paths)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
     cfg = kproject.reload_config()
-    assert [c.name for c in kproject.trello.settings_cards(cfg.settings_list).cards] == ['implementation', 'review']
+    assert [c.name for c in kproject.trello.settings_cards(cfg.settings_list).cards] == ['Implementation Agents', 'Review Agents']
     seats.ensure_created(kproject, 'claude-qa', 'claude')
     add_questions_seed()
     adapters = boardsettings.adapters_for(kproject.paths)
     reports = []
     settings_setup.ensure(kproject, adapters, say=reports.append)
     cards = {c.name: c for c in kproject.trello.settings_cards(cfg.settings_list).cards}
-    assert sorted(cards) == ['implementation', 'questions', 'review']
-    assert [c.name for c in cards['questions'].checklists] == ['claude', 'codex']
-    assert all(len([i for i in c.items if i.state == 'complete']) == 1 for c in cards['questions'].checklists)
-    assert any('questions' in report for report in reports)
+    assert sorted(cards) == ['Implementation Agents', 'Q&A Agents', 'Review Agents']
+    assert [c.name for c in cards['Q&A Agents'].checklists] == ['claude', 'codex']
+    assert all(len([i for i in c.items if i.state == 'complete']) == 1 for c in cards['Q&A Agents'].checklists)
+    assert any('Q&A Agents' in report for report in reports)

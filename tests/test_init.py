@@ -227,4 +227,15 @@ def test_init_asks_for_the_questions_seed_only_with_a_qa_seat(git_repo, env, mon
     run_init(git_repo, board)
     cfg = load_config(Paths.discover(git_repo))
     names = [c["name"] for c in fake.state["cards"].values() if c["idList"] == cfg.settings_list]
-    assert "questions" in names
+    assert "Q&A Agents" in names
+
+
+def test_init_creates_the_qa_list_right_after_blocked(git_repo, env):
+    fake, board = env
+    for name in ("Backlog", "Done", "Blocked", "Ideas"):
+        fake.add_list(board["id"], name)
+    run_init(git_repo, board)
+    lists = sorted((l for l in fake.state["lists"].values() if l["idBoard"] == board["id"] and not l["closed"]),
+                   key=lambda l: l["pos"])
+    names = [l["name"] for l in lists]
+    assert names[names.index("Blocked") + 1] == "Q&A" and names.index("Ideas") > names.index("Q&A")

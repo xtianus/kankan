@@ -17,6 +17,7 @@ from kankan.config import (Config, Paths, load_config, load_credentials, project
                            user_credentials_path, write_registry_block)
 from kankan.errors import KankanError, Status
 from kankan.properties import PropertiesFile
+from kankan.trello import pos_after
 from kankan.trello import TrelloClient
 
 DEFAULT_URL = "https://api.trello.com"
@@ -330,8 +331,10 @@ def ensure_qa_list(cfg: Config, client: TrelloClient, snap, prompt: Optional[Cal
     if matches and (prompt is None or _yes(prompt("A list named 'Q&A' exists on the board: adopt it? [Y/n] "))):
         cfg.qa_list = matches[0].id
         return "adopted"
-    cfg.qa_list = client.create_list(cfg.board_id, "Q&A", exclude={l.id for l in snap.lists.values()}).id
+    cfg.qa_list = client.create_list(cfg.board_id, "Q&A", pos=pos_after(snap.lists, cfg.blocked),
+                                     exclude={l.id for l in snap.lists.values()}).id
     return "recreated" if configured else "created"
+
 
 
 def ensure_labels(cfg: Config, client: TrelloClient, snap) -> None:

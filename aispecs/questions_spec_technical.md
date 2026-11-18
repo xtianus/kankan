@@ -91,6 +91,7 @@ The feature uses existing capabilities with four revisions of [`kanban_requireme
 - **C1:** the single-card read returns the attachments with ID, name, file name, URL, size, MIME type, uploader, upload flag and creation date (`attachment_fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,date`), for follow-up polling.
 - **F2:** the attachment list includes the creation date (`date`).
 - **C3:** a card can also be moved to the **bottom** of a list (`pos=bottom`), for `handoff`.
+- **L1:** `init` and `doctor` create the `Q&A` list at a numeric `pos` halfway between `Blocked` and the next open list (from the B3 read), or at `bottom` when `Blocked` is the last open list or missing from the read.
 
 M2 (comment reads) is also used for implementation tasks, to give them the card's thread. The B3 board read is unchanged. The Q&A seat adds, per `qa_poll_seconds`, one board read while idle, or at least two requests (C1 and M2) during a conversation, three in `qa_waiting` (with the `Q&A` list read of [§4](#4-launcher)).
 
@@ -146,4 +147,4 @@ How this feature changes [`boardsettings_spec_technical.md`](boardsettings_spec_
 
 **§3 Model and effort.** Add:
 
-> A third role, `questions`, with its setting card, seeds and probes, as `implementation` and `review`, active only when a `qa` seat is configured: `seeds`, `boardconfig` and the adapter validation accept the role, `init`/`doctor` ask its seeds and create its card only then, its probes run only on the Q&A seat; the `questions` card is always part of the evaluated settings, so it never becomes an unknown setting when the Q&A seat is removed; and its absence or invalidity never affects the evaluation of the other roles or the start of `work` seats. The Q&A seat pins the `questions` pair at claim and at every start; the planned restart for a changed pair happens only in `idle` or `qa_waiting`, never during a turn, and there is no fallback to another role's pair.
+> A third role, `questions`, with its setting card titled `Q&A Agents`, seeds and probes, as `implementation` and `review`, active only when a `qa` seat is configured: `seeds`, `boardconfig` and the adapter validation accept the role, `init`/`doctor` ask its seeds and create its card only then, its probes run only on the Q&A seat; the `Q&A Agents` card is always part of the evaluated settings, so it never becomes an unknown setting when the Q&A seat is removed; and its absence or invalidity never affects the evaluation of the other roles or the start of `work` seats. The Q&A seat pins the `questions` pair at claim and at every start; the planned restart for a changed pair happens only in `idle` or `qa_waiting`, never during a turn, and there is no fallback to another role's pair.

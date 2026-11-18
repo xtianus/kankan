@@ -62,7 +62,7 @@ def test_untrustworthy_times_never_mark_edit_handled(date, activity):
 
 def role_card(adapters, *, two=False):
     from kankan.trello import Checklist, CheckItem
-    c = card('implementation', '')
+    c = card('Implementation Agents', '')
     c.checklists = [Checklist('check', c.id, 'claude', 1, [CheckItem('item', 'sonnet·high', 'complete', 1)])]
     if two:
         c.checklists[0].items.append(CheckItem('other', 'opus · high', 'complete', 2))
@@ -131,7 +131,7 @@ def test_questions_card_is_no_unknown_setting_once_the_qa_seat_is_removed(kproje
     from kankan.trello import SettingsRead
     adapters = {'claude': load_adapter(kproject.paths, 'claude', read_only=True)}
     questions = role_card(adapters)
-    questions.name, questions.id = 'questions', 'questions-card'
+    questions.name, questions.id = 'Q&A Agents', 'questions-card'
     result = boardsettings.apply_read(kproject, SettingsRead([questions], NOW, True), adapters)
     assert not result.state.cards['questions-card'].get('invalid')
     assert not [a for a in result.actions if a.kind == 'add_error']
@@ -151,9 +151,24 @@ def test_invalid_questions_card_never_changes_the_work_roles():
     specs = schema(adapters, ('implementation', 'review', 'questions'))
     good = role_card(adapters)
     broken = role_card(adapters, two=True)
-    broken.name, broken.id = 'questions', 'questions-card'
+    broken.name, broken.id = 'Q&A Agents', 'questions-card'
     result = evaluate([good, broken], schema=specs)
     assert result.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
     assert result.state.settings['questions']['invalid'] and not result.state.settings['implementation']['invalid']
     missing = evaluate([good], schema=specs)
     assert missing.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
+
+
+def test_setting_cards_are_recognized_by_title_not_by_key():
+    from kankan.boardconfig import schema, title
+    adapters = {'claude': load_adapter(None, 'claude', read_only=True)}
+    specs = schema(adapters, ('implementation', 'review', 'questions'))
+    assert [title(k, s) for k, s in specs.items()] == ['Implementation Agents', 'Review Agents', 'Q&A Agents']
+    bare = role_card(adapters)
+    bare.name, bare.id = 'implementation', 'bare'
+    result = evaluate([role_card(adapters), bare], schema=specs)
+    assert result.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
+    assert result.state.cards['bare']['structural'] == ['unknown setting `implementation`']
+    assert not result.state.settings['implementation'].get('invalid')
+    duplicate = evaluate([role_card(adapters), replace(role_card(adapters), id='other')], schema=specs)
+    assert duplicate.state.cards['other']['structural'] == ['duplicate setting `Implementation Agents`']

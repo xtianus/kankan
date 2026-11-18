@@ -16,11 +16,11 @@ Q&A must be answered as soon as possible and must never delay, or be delayed by,
 
 ## 2. Q&A list and Q&A seat
 
-**`Q&A` list.** A common workflow list, like `Backlog`, created or adopted by `init` and restored by `doctor`. A card is a Q&A card because it is in this list: the user creates it there or drags it there. No label is needed. The list is a queue: the Q&A seat takes the top card, and the other cards wait until the current conversation ends. `HOLD` keeps a card from being taken, as in the `Backlog`; dependencies (card links) are ignored, a question never waits for another card.
+**`Q&A` list.** A common workflow list, like `Backlog`, created or adopted by `init` and restored by `doctor`. kankan creates it right after `Blocked` (when `Blocked` is the last list, at the end of the board); an adopted list stays where it is, and the user may move it. A card is a Q&A card because it is in this list: the user creates it there or drags it there. No label is needed. The list is a queue: the Q&A seat takes the top card, and the other cards wait until the current conversation ends. `HOLD` keeps a card from being taken, as in the `Backlog`; dependencies (card links) are ignored, a question never waits for another card.
 
 **Q&A seat.** At most one per project, running one agent of a type the user chooses: `kankan up claude=2 codex=1 qa=claude`, `kankan agent claude --qa`, `kankan autostart enable claude=2 qa=codex`. The seat is named `<type>-qa` (e.g. `claude-qa`), has its own worktree and no Trello lists of its own. It takes only `Q&A` cards; the implementation and review seats never take them. Starting a Q&A seat of another type while one exists replaces it: refused while the existing one is alive (stop it first), otherwise the old seat is removed and the new seat takes over its active conversation, if any, whatever the order of the queue, continuing it from its comment thread ([§3.7](#37-restarts)).
 
-**Model and effort.** As for implementation and review, the user chooses the Q&A agent's model and effort on the board: the `kankan` settings list gets a third card, **`questions`**, with one checklist per agent type; ticking another item changes the model and effort of the Q&A agent, which applies between turns ([§7](#7-changes-to-the-board-settings-specification)). The card exists once a Q&A seat has been configured.
+**Model and effort.** As for implementation and review, the user chooses the Q&A agent's model and effort on the board: the `kankan` settings list gets a third card, **`Q&A Agents`** (role `questions`), with one checklist per agent type; ticking another item changes the model and effort of the Q&A agent, which applies between turns ([§7](#7-changes-to-the-board-settings-specification)). The card exists once a Q&A seat has been configured.
 
 While no Q&A seat runs, Q&A cards wait; `kankan status` says so. The Q&A seat shares nothing with the other seats that could make either wait for the other beyond short, bounded steps ([§5](#5-interaction-with-other-work)).
 
@@ -127,7 +127,7 @@ How this feature changes the initial behaviour described in [`initial_spec_funct
 
 **§6.1 `kankan init <board-url>`.** Replace the text starting “3. finds or creates the lists `Backlog`, `Done`, `Blocked`; …” with:
 
-3. finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and the settings list `kankan`; if lists with those names exist, asks whether to adopt them (an adopted `kankan` list keeps its cards: those that are not settings get `Error`, [board settings §2](boardsettings_spec_functional.md#2-board-settings); an adopted `Q&A` list keeps its cards: they become Q&A cards);
+3. finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and the settings list `kankan`; if lists with those names exist, asks whether to adopt them (an adopted `kankan` list keeps its cards: those that are not settings get `Error`, [board settings §2](boardsettings_spec_functional.md#2-board-settings); an adopted `Q&A` list keeps its cards: they become Q&A cards; a created `Q&A` list is placed right after `Blocked`, [§2](#2-qa-list-and-qa-seat));
 
 **§7.1 Creation and removal.** Add:
 
@@ -223,11 +223,11 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 
 **§3 Model and effort.** Replace the text starting “**Cards.** Two cards, **`implementation`** and **`review`**, give …” with:
 
-> **Cards.** Two cards, **`implementation`** and **`review`**, give the model and effort for every task of that role (merge-request cards are implementation), and a third, **`questions`**, gives them for the Q&A seat once one is configured ([§2](#2-qa-list-and-qa-seat)). …the rest of the paragraph unchanged.
+> **Cards.** Two cards, **`Implementation Agents`** and **`Review Agents`**, give the model and effort for every task of the `implementation` and `review` roles (merge-request cards are implementation), and a third, **`Q&A Agents`**, gives them for the Q&A seat (role `questions`) once one is configured ([§2](#2-qa-list-and-qa-seat)). …the rest of the paragraph unchanged.
 
 **§3 Model and effort.** Add, after “**Seeds.**”:
 
-> The `questions` seeds are asked by `init` and `doctor` only once a Q&A seat is configured, and `doctor` then creates the `questions` card. A missing or invalid `questions` value never stops the implementation and review seats; `kankan agent --qa` and `up qa=<type>` refuse it with the same manual step as for the other roles.
+> The `questions` seeds are asked by `init` and `doctor` only once a Q&A seat is configured, and `doctor` then creates the `Q&A Agents` card. A missing or invalid `questions` value never stops the implementation and review seats; `kankan agent --qa` and `up qa=<type>` refuse it with the same manual step as for the other roles.
 
 **§3 Model and effort.** Add, after “**Applying the values.**”:
 

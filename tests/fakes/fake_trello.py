@@ -443,6 +443,8 @@ class FakeTrello:
                 lst = self.add_list(p["idBoard"], p["name"])
                 if p.get("pos") == "top":
                     lst["pos"] = 0.5
+                elif p.get("pos") not in (None, "bottom"):
+                    lst["pos"] = float(p["pos"])
                 return 200, lst
             lst = st["lists"].get(parts[1])
             if lst is None:

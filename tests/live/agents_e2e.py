@@ -24,6 +24,7 @@ from tests.live import e2e_support as es
 
 POLL = 10
 SETTLE_SECONDS = 300
+HEARTBEAT_SECONDS = 120  # how often the watch says which cards are not in Done yet
 SHUTDOWN_SECONDS = 60
 SESSION_PREFIX = f"ai-{es.PROJECT_NAME}-"
 SETTINGS_WAIT_SECONDS = 900
@@ -67,11 +68,13 @@ def run_sessions(tmux) -> List[str]:
 class Watch:
     """Print card changes and guide the user through the interactive steps."""
 
-    def __init__(self, client, cfg, cards: Dict[str, object]):
-        self.client, self.cfg, self.cards = client, cfg, cards
+    def __init__(self, client, cfg, cards: Dict[str, object], project=None):
+        self.client, self.cfg, self.cards, self.project = client, cfg, cards, project
         self.last: Dict[str, str] = {}
         self.ask_prompted = self.hold_prompted = self.hold_parked = self.attach_prompted = False
         self.qa_follow_prompted = self.qa_handoff_prompted = False
+        self.strays: Dict[str, str] = {}
+        self.next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
 
     def poll(self) -> Dict[str, object]:
         snap = self.client.snapshot(self.cfg.board_id)
@@ -89,7 +92,24 @@ class Watch:
                 say(f"{time.strftime('%H:%M:%S')}  {key:<6} {line}")
                 self.last[key] = line
         self.guide(state, names)
+        self.report_waiting(state, names)
         return state
+
+    def report_waiting(self, state, names) -> None:
+        """Warn once per card that leaves the workflow, and say every HEARTBEAT_SECONDS what the run waits for."""
+        # the seats, and so their lists, are registered by `kankan up`, after self.cfg was loaded
+        current = self.project.reload_config() if self.project is not None else self.cfg
+        strays = es.stray_cards(current, self.cards, state, names)
+        for key, where in strays.items():
+            if self.strays.get(key) != where:
+                alert(f"The {key} card is {where}: the run waits for every card in Done, so it will not finish. "
+                      f"Move it back to the workflow (or to Done), or stop the run with Ctrl-C")
+        self.strays = strays
+        if time.monotonic() >= self.next_heartbeat:
+            pending = es.not_done(self.cfg, self.cards, state, names)
+            if pending:
+                say(f"{time.strftime('%H:%M:%S')}  waiting for Done: {', '.join(pending)}")
+            self.next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
 
     def guide(self, state, names) -> None:
         cfg = self.cfg
@@ -149,9 +169,9 @@ def choose_settings(client, project, clone) -> tuple:
     adapters = {t: a for t, a in boardsettings.adapters_for(paths).items() if t in ("claude", "codex")}
     read = client.settings_cards(cfg.settings_list)
     targets = es.settings_targets(read, adapters)
-    review = next(c for c in read.cards if c.name == "review" and not c.closed)
+    review = next(c for c in read.cards if c.name == boardconfig.title("review") and not c.closed)
     before = {c.id for c in client.comments(review.id)}
-    alert(f"On the `review` card of the `kankan` list ({review.url}), in each checklist untick the ticked item and "
+    alert(f"On the `{review.name}` card of the `kankan` list ({review.url}), in each checklist untick the ticked item and "
           "tick:\n" + "\n".join(f"      {t}: {pair.name}" for t, pair in targets.items()))
     deadline = time.monotonic() + SETTINGS_WAIT_SECONDS
     while not es.settings_ready(client.settings_cards(cfg.settings_list), targets):
@@ -394,7 +414,7 @@ def _main(args, state) -> int:
             + "    (detach with Ctrl-b d)")
         say(f"kankan acts as @{cfg.kankan_username}; answer from your own account. Run directory: {run_dir}\n")
 
-        watch = Watch(client, cfg, cards)
+        watch = Watch(client, cfg, cards, project)
         deadline = time.monotonic() + args.timeout * 60
         while time.monotonic() < deadline:
             if watch.all_done(watch.poll()):

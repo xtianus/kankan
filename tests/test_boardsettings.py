@@ -82,7 +82,7 @@ def test_late_model_result_does_not_replace_new_selection(kproject, fake_trello)
         return kproject.trello.settings_cards(kproject.cfg.settings_list)
     result = boardsettings.apply_read(kproject, settled_read(), adapters)
     request = next(c for c in result.checks if c.role == 'implementation' and c.agent_type == 'claude')
-    raw = next(c for c in fake_trello.state['cards'].values() if c['name'] == 'implementation')
+    raw = next(c for c in fake_trello.state['cards'].values() if c['name'] == 'Implementation Agents')
     checklist = next(c for c in fake_trello.state['checklists'].values() if c['idCard'] == raw['id'] and c['name'] == 'claude')
     for item in checklist['checkItems']:
         item['state'] = 'complete' if item['name'] == 'opus · high' else 'incomplete'

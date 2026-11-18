@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections import deque
 from dataclasses import dataclass, field
-from typing import BinaryIO, Callable, Dict, List, Optional, Tuple
+from typing import BinaryIO, Callable, Dict, List, Optional, Tuple, Union
 
 from kankan import clock
 from kankan.errors import KankanError, Status
@@ -244,6 +244,20 @@ def _checkitem(data: dict) -> CheckItem:
 def _checklist(data: dict, card_id: str = "") -> Checklist:
     return Checklist(data["id"], data.get("idCard", card_id), data.get("name", ""), data.get("pos", 0),
                      sorted((_checkitem(item) for item in data.get("checkItems", [])), key=lambda item: item.pos))
+
+
+def _open_lists(lists: Dict[str, TList]) -> List[TList]:
+    return sorted((l for l in lists.values() if not l.closed), key=lambda l: l.pos)
+
+
+def pos_after(lists: Dict[str, TList], list_id: str) -> Union[str, float]:
+    """The ``pos`` right after ``list_id``: halfway to the next open list; ``bottom`` when it is the last open list or
+    not open in ``lists``."""
+    ordered = _open_lists(lists)
+    index = next((i for i, l in enumerate(ordered) if l.id == list_id), None)
+    if index is None or index == len(ordered) - 1:
+        return "bottom"
+    return (ordered[index].pos + ordered[index + 1].pos) / 2
 
 
 def _tlist(data: dict) -> TList:
@@ -624,8 +638,9 @@ class TrelloClient:
         return result
 
     # ------------------------------------------------------------------ writes
-    def create_list(self, board_id: str, name: str, pos: str = "bottom", exclude=()) -> TList:
-        """``exclude``: IDs of lists that existed before this call, never taken for the one it creates."""
+    def create_list(self, board_id: str, name: str, pos: Union[str, float] = "bottom", exclude=()) -> TList:
+        """``pos``: ``top``, ``bottom`` or a number; ``exclude``: IDs of lists that existed before this call, never
+        taken for the one it creates."""
         def find():
             board = self._ok("GET", f"/1/boards/{board_id}", {"lists": "open", "list_fields": "name,closed,pos", "fields": "id"})
             matches = [l for l in board.get("lists", []) if l["name"] == name and not l.get("closed") and l["id"] not in exclude]

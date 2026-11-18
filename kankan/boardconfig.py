@@ -27,6 +27,7 @@ class SettingSpec:
     minimum: Optional[int] = None
     maximum: Optional[int] = None
     adapters: dict[str, Adapter] = field(default_factory=dict)
+    title: str = ''  # the setting card's name on the board; the key when empty
 
 
 @dataclass
@@ -126,8 +127,17 @@ def roles(paths) -> tuple[str, ...]:
     return ROLES if qa else WORK_ROLES
 
 
+ROLE_TITLES = {'implementation': 'Implementation Agents', 'review': 'Review Agents', 'questions': 'Q&A Agents'}
+
+
 def schema(adapters: dict[str, Adapter], roles: tuple[str, ...]) -> dict[str, SettingSpec]:
-    return {role: SettingSpec('checklist', help=messages.SETTINGS_HELP, adapters=adapters) for role in roles}
+    return {role: SettingSpec('checklist', help=messages.SETTINGS_HELP, adapters=adapters, title=ROLE_TITLES[role])
+            for role in roles}
+
+
+def title(key: str, spec: Optional[SettingSpec] = None) -> str:
+    """The name of the setting card for ``key`` (boardsettings T§3)."""
+    return (spec.title if spec is not None else '') or ROLE_TITLES.get(key, key)
 
 
 def fingerprint(value) -> str:
@@ -245,14 +255,21 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
     if previous and date < previous:
         return result()
     state.last_date = date.isoformat()
-    groups, unsettled = {}, set()
+    # Setting cards are grouped by key (found through their title); any other card by its name, in ``unknown``.
+    keys = {title(key, spec): key for key, spec in schema.items()}
+    groups, unknown, unsettled, unsettled_names = {}, {}, set(), set()
     for card in cards.cards:
         if card.closed:
             continue
-        groups.setdefault(card.name, []).append(card)
+        key = keys.get(card.name)
+        (groups if key else unknown).setdefault(key or card.name, []).append(card)
         timestamp = activity(card.last_activity)
-        if timestamp is None or (date-timestamp).total_seconds() < 10 or card.id in state.construction or card.name in state.construction:
-            unsettled.add(card.name)
+        if timestamp is None or (date-timestamp).total_seconds() < 10 or card.id in state.construction or \
+                (key and key in state.construction):
+            if key:
+                unsettled.add(key)
+            else:
+                unsettled_names.add(card.name)
             old_key = state.cards.get(card.id, {}).get('key')
             if old_key:
                 unsettled.add(old_key)
@@ -308,7 +325,7 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
         if len(matches) != 1:
             record['invalid'] = True
             for card in matches:
-                card_error(card, key, [messages.SETTINGS_DUPLICATE.format(name=key)], fp, revision)
+                card_error(card, key, [messages.SETTINGS_DUPLICATE.format(name=title(key, spec))], fp, revision)
             continue
         card = matches[0]
         new, problems, reset = _validate(card, spec)
@@ -327,13 +344,13 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
         if not problems and isinstance(new, dict):
             state.cards.setdefault(card.id, {})['probes'] = {name: probe for name, probe in previous_probes.items() if name in new and probe.get('pair') == encode(new[name])}
         card_error(card, key, problems, fp, revision, feedback)
-    for key, matches in groups.items():
-        if key in schema or key in unsettled:
+    for name, matches in unknown.items():
+        if name in unsettled_names:
             continue
         for card in matches:
             record = state.cards.get(card.id, {})
             fp = fingerprint(_inputs(card))
-            card_error(card, key, [messages.SETTINGS_UNKNOWN.format(name=key)], fp,
+            card_error(card, name, [messages.SETTINGS_UNKNOWN.format(name=name)], fp,
                        record.get('revision', 0) + int(record.get('fingerprint') != fp))
     present = {c.id for c in cards.cards if not c.closed}
     for ident, record in state.cards.items():

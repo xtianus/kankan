@@ -148,11 +148,11 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 
 - checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
-- finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions) and the labels `HOLD`, `Question`, `Error`;
+- finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
 - installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out;
-- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `implementation` and `review` (and `questions` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
+- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
 
@@ -215,9 +215,11 @@ With only one agent type running, implemented cards wait in `Implemented`; `kank
 
 The model and the reasoning effort the agents use decide how fast and how expensive each task is. You choose them on the board, in the `kankan` list, which holds two or three cards:
 
-- **`implementation`**: the model and effort for implementing a card (merge requests included);
-- **`review`**: the model and effort for reviewing and integrating a card;
-- **`questions`**: the model and effort of the Q&A agent, once one is configured ([section 6.2](#62-questions-qa-cards)). The first `kankan up qa=<type>` or `kankan agent <type> --qa` registers the Q&A seat; without a `questions` seed for that type it then stops and asks you to run `kankan doctor`, which asks for the seed like the others and creates the `questions` card; run the start command again. The other agents never need it. A change applies between two answers: kankan never restarts the Q&A agent while it is answering, and the restarted agent continues the conversation from the comments.
+- **`Implementation Agents`**: the model and effort for implementing a card (merge requests included);
+- **`Review Agents`**: the model and effort for reviewing and integrating a card;
+- **`Q&A Agents`**: the model and effort of the Q&A agent, once one is configured ([section 6.2](#62-questions-qa-cards)). The first `kankan up qa=<type>` or `kankan agent <type> --qa` registers the Q&A seat; without a `questions` seed for that type it then stops and asks you to run `kankan doctor`, which asks for the seed like the others and creates the `Q&A Agents` card; run the start command again. The other agents never need it. A change applies between two answers: kankan never restarts the Q&A agent while it is answering, and the restarted agent continues the conversation from the comments.
+
+In `agents.json` (the seeds), `kankan status` and `kankan doctor` the three roles are called `implementation`, `review` and `questions`.
 
 Each card has one checklist per agent type (`claude`, `codex`) listing every **combination** of model and effort that agent accepts, for example `sonnet · high` or `opus · max` (not every model accepts every effort, so only valid pairs are listed). **Tick exactly one item in each checklist.** There is no default: no tick, two ticks or an unknown item is an error. Trello does not untick the old item for you, so switch by ticking the new item and unticking the old one.
 

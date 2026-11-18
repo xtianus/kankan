@@ -97,7 +97,7 @@ def test_discarded_read_cannot_claim_human_error(kproject, fake_trello):
     adapters = boardsettings.adapters_for(kproject.paths)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
     old_read = settled(kproject, fake_trello, offset=10)
-    impl = next(c for c in old_read.cards if c.name == 'implementation')
+    impl = next(c for c in old_read.cards if c.name == 'Implementation Agents')
     fake_trello.user_label(impl.id, kproject.cfg.label_error)
     current = boardsettings.apply_read(kproject, settled(kproject, fake_trello), adapters)
     request = next(c for c in current.checks if c.role == 'implementation' and c.agent_type == 'claude')
@@ -113,7 +113,7 @@ def test_human_error_added_before_dispatch_is_not_owned(kproject, fake_trello):
     adapters = boardsettings.adapters_for(kproject.paths)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
     first = settled(kproject, fake_trello)
-    impl = next(c for c in first.cards if c.name == 'implementation')
+    impl = next(c for c in first.cards if c.name == 'Implementation Agents')
     raw_check = next(c for c in fake_trello.state['checklists'].values() if c['idCard'] == impl.id and c['name'] == 'claude')
     for item in raw_check['checkItems']:
         item['state'] = 'incomplete'
@@ -222,7 +222,7 @@ def test_snapshot_normalizes_each_checklist_once(kproject):
     adapters = boardsettings.adapters_for(kproject.paths)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
     snap = kproject.trello.snapshot(kproject.cfg.board_id)
-    impl = next(c for c in snap.cards.values() if c.name == 'implementation')
+    impl = next(c for c in snap.cards.values() if c.name == 'Implementation Agents')
     assert [c.name for c in impl.checklists] == ['claude', 'codex']
 
 

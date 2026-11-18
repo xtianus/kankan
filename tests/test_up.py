@@ -293,7 +293,7 @@ def test_first_qa_start_without_a_questions_seed_registers_the_seat_so_doctor_as
     doctor.run(project.paths.repo, fix=True, online=True)
     assert "questions" in json_seeds()["claude"]["seed"]
     names = [c.name for c in project.trello.settings_cards(project.reload_config().settings_list).cards]
-    assert "questions" in names
+    assert "Q&A Agents" in names
     assert len(agents_cmd.up(project, {}, qa="claude")) == 1
     assert wait_for(lambda: qa_alive(project, "claude-qa"), timeout=30)
 

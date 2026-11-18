@@ -422,10 +422,11 @@ def test_attach_expected_file():
 
 def _settings_read(ticks):
     """A settings read with cards {role: {type: [(item, ticked)]}}."""
+    from kankan.boardconfig import title
     from kankan.trello import Card, CheckItem, Checklist, SettingsRead
     cards = []
     for n, (role, lists) in enumerate(ticks.items()):
-        card = Card(f"c{n}", f"s{n}", "b", role, "", "", "l", n, [], [], False, "")
+        card = Card(f"c{n}", f"s{n}", "b", title(role), "", "", "l", n, [], [], False, "")
         card.checklists = [Checklist(f"{role}-{t}", card.id, t, i,
                                      [CheckItem(f"{role}-{t}-{j}", name, "complete" if on else "incomplete", j)
                                       for j, (name, on) in enumerate(items)])
@@ -581,3 +582,19 @@ def test_verify_run_reports_a_left_conversation_directory(run):
     (project.paths.kankan_dir / "qa" / "abc123").mkdir(parents=True)
     problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs)
     assert any("conversation directories left: abc123" in p for p in problems), problems
+
+
+def _card_in(list_id):
+    from kankan.trello import Card
+    return Card("id-" + list_id, "s", "b", "n", "", "u", list_id, 1.0, [], [], False, "")
+
+
+def test_not_done_and_stray_cards():
+    from types import SimpleNamespace
+    cfg = SimpleNamespace(done="D", workflow_lists=lambda: {"B": "Backlog", "D": "Done", "Q": "Q&A"})
+    names = {"B": "Backlog", "D": "Done", "Q": "Q&A", "X": "archive"}
+    cards = {k: _card_in("B") for k in ("hello", "qa", "ask", "gone")}
+    state = {"hello": _card_in("D"), "qa": _card_in("X"), "ask": _card_in("Q")}
+    assert es.not_done(cfg, cards, state, names) == ["qa (archive)", "ask (Q&A)", "gone (archived or deleted)"]
+    assert es.stray_cards(cfg, cards, state, names) == {"qa": "in list 'archive', outside the workflow",
+                                                        "gone": "archived or deleted"}

@@ -31,7 +31,8 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
         boardsettings.drain_actions(project)
         specs = boardconfig.schema(adapters, boardconfig.roles(project.paths))
         for key, spec in specs.items():
-            cards = [card for card in read.cards if card.name == key]
+            name = boardconfig.title(key, spec)
+            cards = [card for card in read.cards if card.name == name]
             if len(cards) > 1:
                 continue  # Invalid user choices are not repaired by guessing.
             created = not cards
@@ -44,8 +45,8 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
                 recorded = state.settings.get(key, {}).get('value')
             try:
                 card = cards[0] if cards else project.trello._write_once(
-                    lambda: project.trello.create_card(project.cfg.settings_list, key, spec.help if spec.kind == 'checklist' else str(values)),
-                    lambda: next((c for c in project.trello.settings_cards(project.cfg.settings_list).cards if c.name == key), None))
+                    lambda: project.trello.create_card(project.cfg.settings_list, name, spec.help if spec.kind == 'checklist' else str(values)),
+                    lambda: next((c for c in project.trello.settings_cards(project.cfg.settings_list).cards if c.name == name), None))
                 with project_lock(project.paths):
                     state = boardconfig.load(project.paths)
                     state.construction[key] = {'card_id': card.id, 'creating': creating}
@@ -75,7 +76,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
                 if created:
                     source = 'last valid board value' if recorded else 'seeds from ' + ', '.join(dict.fromkeys(
                         adapter.seed_sources.get(key, 'agents.json') for adapter in adapters.values()))
-                    report = messages.SETTINGS_CREATED.format(role=key, values=boardconfig.display(values), source=source)
+                    report = messages.SETTINGS_CREATED.format(role=name, values=boardconfig.display(values), source=source)
                     reports.append(report)
                     say(report)
             except KankanError:

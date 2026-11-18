@@ -291,7 +291,8 @@ ROLES = ("implementation", "review")
 
 def ticked(read, role: str) -> Dict[str, List[str]]:
     """Ticked item names per agent checklist of the open setting card named ``role``."""
-    card = next((c for c in read.cards if c.name == role and not c.closed), None)
+    from kankan.boardconfig import title
+    card = next((c for c in read.cards if c.name == title(role) and not c.closed), None)
     if card is None:
         return {}
     return {cl.name: [i.name for i in cl.items if i.state == "complete"] for cl in card.checklists}
@@ -450,6 +451,35 @@ def cleanup_board(client: TrelloClient, board_id: str) -> List[str]:
         client.set_board_desc(board_id, strip_registry_block(snap.desc))
         actions.append("removed the registry block")
     return actions
+
+
+# ---------------------------------------------------------------- waiting for Done
+
+def not_done(cfg: Config, cards: Dict[str, Card], state: Dict[str, Card], list_names: Dict[str, str]) -> List[str]:
+    """``key (where)`` for every run card not yet in ``Done``; ``state`` holds the open cards by key."""
+    result = []
+    for key in cards:
+        now = state.get(key)
+        if now is None:
+            result.append(f"{key} (archived or deleted)")
+        elif now.list_id != cfg.done:
+            result.append(f"{key} ({list_names.get(now.list_id, '?')})")
+    return result
+
+
+def stray_cards(cfg: Config, cards: Dict[str, Card], state: Dict[str, Card],
+                list_names: Dict[str, str]) -> Dict[str, str]:
+    """Run cards no agent will ever bring to ``Done``: archived, deleted, or in a list outside the workflow
+    (key -> where it is)."""
+    workflow = cfg.workflow_lists()
+    result = {}
+    for key in cards:
+        now = state.get(key)
+        if now is None:
+            result[key] = "archived or deleted"
+        elif now.list_id not in workflow:
+            result[key] = f"in list {list_names.get(now.list_id, '?')!r}, outside the workflow"
+    return result
 
 
 # ---------------------------------------------------------------- final verification
