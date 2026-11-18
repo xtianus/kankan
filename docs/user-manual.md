@@ -1,6 +1,6 @@
 # kankan user manual
 
-kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours ([section 4.1](#41-working-alongside-the-agents)). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card.
+kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours ([section 4.1](#41-working-alongside-the-agents)). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card. You can also ask an agent questions about the code on `Q&A` cards and talk with it through their comments ([section 6.2](#62-questions-qa-cards)).
 
 ## 1. Requirements
 
@@ -148,15 +148,15 @@ kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.propert
 
 - checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
-- finds or creates the lists `Backlog`, `Done`, `Blocked` (asking before adopting existing ones) and the labels `HOLD`, `Question`, `Error`;
+- finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command** (run by `kankan verify`; may be empty);
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
 - installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out;
-- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `implementation` and `review`, and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
+- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `implementation` and `review` (and `questions` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
 
-You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`.
+You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`, except the `Q&A` list: without it only the Q&A agent stops (after its current turn), `kankan status` warns and `kankan doctor` restores it.
 
 ## 4. Starting agents
 
@@ -169,6 +169,8 @@ kankan stop claude-1              # the agent exits after its current task
 ```
 
 Each agent gets a **seat** (`claude-1`, `codex-2`…) with three lists on the board (`<seat> · In Progress`, `· Implemented`, `· Review`) and a worktree in `~/coding/.kankan/<project>/<seat>`. Seats are reused; at most 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
+
+The **Q&A agent** ([section 6.2](#62-questions-qa-cards)) is started by adding `qa=<type>` to `kankan up` or `kankan autostart enable` (for example `kankan up claude=2 codex=1 qa=claude`), or alone with `kankan agent <type> --qa`. It gets the seat `<type>-qa` (`claude-qa`, `codex-qa`), with its own worktree and no lists; there is at most one per project and it does not count towards `seat_cap`. It answers only the cards of the `Q&A` list, and the other agents never take them. Starting a Q&A agent of the other type replaces the existing Q&A seat: kankan refuses while that seat is alive (stop it first with `kankan stop <type>-qa`); otherwise it removes the old seat and the new agent continues the old one's conversation, if any. `kankan stop claude-qa` lets the agent finish its current turn; the conversation is kept and continues at the next start.
 
 The agent runs in the tmux session `ai-<project>-<seat>`; attach with `tmux attach -t ai-<project>-<seat>` to watch. Ctrl-C typed there reaches the agent (the launcher and supervisor ignore Ctrl-C, Ctrl-Z and Ctrl-\\). kankan never types while you are typing (it waits `write_quiet_seconds`, default 20 s) and never sends Esc or Ctrl-C. `airesumer.sh` finds these sessions and resumes agents after a usage limit.
 
@@ -189,6 +191,7 @@ For the old behaviour (agents integrate straight into `main`) answer `main` at `
 You may freely:
 
 - create cards in `Backlog` and reorder them (the top card is taken first);
+- create cards in `Q&A`, reorder them, and move, archive or delete the card under discussion to end its conversation ([section 6.2](#62-questions-qa-cards));
 - add and remove `HOLD`, add attachments (files, links, dependency cards), write comments;
 - change the model and effort by ticking items on the setting cards of the `kankan` list ([section 6.1](#61-model-and-effort));
 - unblock a card in `Blocked` with `kankan resolve <shortLink> --done`, or move it to `Backlog` to have it reimplemented.
@@ -210,10 +213,11 @@ With only one agent type running, implemented cards wait in `Implemented`; `kank
 
 ### 6.1 Model and effort
 
-The model and the reasoning effort the agents use decide how fast and how expensive each task is. You choose them on the board, in the `kankan` list, which holds two cards:
+The model and the reasoning effort the agents use decide how fast and how expensive each task is. You choose them on the board, in the `kankan` list, which holds two or three cards:
 
 - **`implementation`**: the model and effort for implementing a card (merge requests included);
-- **`review`**: the model and effort for reviewing and integrating a card.
+- **`review`**: the model and effort for reviewing and integrating a card;
+- **`questions`**: the model and effort of the Q&A agent, once one is configured ([section 6.2](#62-questions-qa-cards)). The first `kankan up qa=<type>` or `kankan agent <type> --qa` registers the Q&A seat; without a `questions` seed for that type it then stops and asks you to run `kankan doctor`, which asks for the seed like the others and creates the `questions` card; run the start command again. The other agents never need it. A change applies between two answers: kankan never restarts the Q&A agent while it is answering, and the restarted agent continues the conversation from the comments.
 
 Each card has one checklist per agent type (`claude`, `codex`) listing every **combination** of model and effort that agent accepts, for example `sonnet · high` or `opus · max` (not every model accepts every effort, so only valid pairs are listed). **Tick exactly one item in each checklist.** There is no default: no tick, two ticks or an unknown item is an error. Trello does not untick the old item for you, so switch by ticking the new item and unticking the old one.
 
@@ -247,6 +251,21 @@ Run `init` and `doctor` in a terminal the first time: from a script they cannot 
 
 `kankan init` and `kankan doctor` print the values they tick and where they come from, and `doctor` always prints the model and effort in use per role and agent type. `kankan status` shows the model and effort each running agent was started with, and the comment kankan writes when it takes a card names them.
 
+### 6.2 Questions: `Q&A` cards
+
+Ask the agents about the code without asking for a change: create a card in the `Q&A` list (or drag one there) with your question in the description. No label is needed. The Q&A agent ([section 4](#4-starting-agents)) takes the top card of `Q&A` that is not on `HOLD`, reads the code and answers with a comment that mentions you. The card stays in `Q&A`, without labels, and nothing is committed.
+
+- **One conversation at a time.** The card the agent took stays under discussion until you end it; the other cards in `Q&A` wait, whatever their order. Reorder them freely; a card dragged above the one under discussion waits too. While no Q&A agent runs, `Q&A` cards wait and `kankan status` says so.
+- **Follow-ups.** Continue the dialogue with a comment, an attachment (file or link), or both. What you add is forwarded to the agent within about 30 seconds after it finished its previous answer, all together, in the same agent conversation; kankan replies "forwarded to the agent". What you add while the agent is still answering is forwarded after that answer. You can also type in the agent's tmux session.
+- **Long answers** are split into numbered comments (`1/3`, `2/3`, …); only the last one mentions you.
+- **Errors.** When the agent cannot answer because something needs you (for example an attachment it cannot download), the card gets `Error` with a comment; so does an agent that stops without answering. Add a comment (or fix the attachment): the next follow-up removes the `Error` label and the conversation goes on.
+- **Asking for a change.** Write "now implement it" (or similar): the agent does not change the code itself. It posts a summary of what to implement, mentioning you, and moves the card to the **bottom** of `Backlog`, where you can still reorder it, put it on `HOLD` or move it elsewhere. From there it is a normal card: an agent implements it following the summary (which prevails over the description, since the description was a question) and the comments, another reviews and integrates it. When your request is ambiguous, the agent asks you to confirm first. If the summary is wrong, drag the card back into `Q&A` and continue the dialogue.
+- **Ending a conversation.** Move the card out of `Q&A` (to `Done` or any other list), archive it or delete it: kankan never moves it back, and the agent starts the next card in a fresh conversation. `HOLD` also ends the conversation, but the card stays in `Q&A`; remove `HOLD` and the card is taken again, the agent continuing from its comments. A card taken again later (after `HOLD`, or dragged back) gets the whole comment thread, with what you added since the last answer marked as new.
+- **Restarts.** If the Q&A agent or kankan restarts (crash, reboot, a changed model, a replaced Q&A seat, `kankan stop` and a new start), the agent takes up the card under discussion again and reads the dialogue from the comments; when its last answer already covered everything you wrote, it waits for your next comment instead of answering again. An answer interrupted by a crash or a failure is completed, never duplicated. A usage limit puts `Resume` on the card, and what you add meanwhile is forwarded on resumption.
+- **The Q&A agent never commits.** It works on a checkout of the agents' branch, reset for every card. If it commits anyway, its answer is still posted but the card gets `Error` with a comment saying so; the commit is discarded when the next card starts.
+
+Attachments of a `Q&A` card are downloaded as for any task and removed when the conversation ends, unless the card was handed over for implementation.
+
 ## 7. Talking to the agents
 
 | Label | Meaning | What you do |
@@ -256,7 +275,7 @@ Run `init` and `doctor` in a terminal the first time: from a script they cannot 
 | `Error` | the agent or kankan needs help | read the comment; fix, then remove the label |
 | `Resume YYYY-MM-DD hh:mm` | usage limit until then | nothing |
 
-Your comment is forwarded to the waiting agent once, and kankan replies "forwarded to the agent". If that reply does not appear, repeat the comment. Comments by any board member are forwarded, except kankan's own and those of people outside the board.
+Your comment is forwarded to the waiting agent once, and kankan replies "forwarded to the agent". If that reply does not appear, repeat the comment. Comments by any board member are forwarded, except kankan's own and those of people outside the board. On the `Q&A` card under discussion, every comment and attachment you add is forwarded, without waiting for a question ([section 6.2](#62-questions-qa-cards)).
 
 `HOLD` on a card that was already integrated cannot stop it: the card goes to `Done` with a comment telling how to revert it.
 
@@ -273,7 +292,7 @@ kankan resolve <shortLink> --done   # checks the merge, removes the worktree, se
 ## 9. Diagnostics
 
 ```bash
-kankan status             # seats (alive, free, dead, unavailable), launcher state, current task, waiting cards
+kankan status             # seats (alive, free, dead, unavailable), launcher state, current task, waiting cards, the Q&A agent
 kankan claims             # card refs: phase, holder, age, branch
 kankan doctor             # installation and project checks, fixes and manual steps (§15.5); --no-fix, --offline
 kankan reconcile          # report inconsistencies, including attachment directories of cards no longer in progress (§15.3)
@@ -282,6 +301,10 @@ kankan adapter check claude-1         # how kankan reads that agent's screen
 kankan adapter check saved-screen.txt --type codex
 ```
 
+`kankan status` shows the Q&A seat, its state, the card under discussion and the number of other cards waiting in `Q&A`, with a warning when the `Q&A` list is missing or when cards wait and no Q&A agent runs. In `kankan status --json` this is the `qa` object (`null` when neither a Q&A seat nor a `Q&A` list is configured): `seat` (its name or `null`), `liveness` and `launcher_state` (as for the other seats), `card` and `short` (the card under discussion, or `null`), `turn` (the current turn token, or `null`), `queue` (the number of other open cards in `Q&A`) and `warning` (a message, or `null`).
+
+`kankan reconcile` does not report a Q&A card in `Done` as missing a merge, unless it was handed over for implementation afterwards.
+
 Every agent command answers with `--json` an envelope `{"ok", "status", "message", "data"}` and an exit code (0 success, 10 no_work, 11 already_claimed, 12 ineligible, 13 main_moved, 14 needs_action, 15 on_hold, 20 network_error, 21 trello_error, 30 needs_reconciliation, 31 not_owner, 40 config_error, 41 usage_error, 50 internal_error). The audit log is `<git dir>/kankan/log.jsonl`.
 
 ## 10. Administration
@@ -289,7 +312,7 @@ Every agent command answers with `--json` an envelope `{"ok", "status", "message
 ```bash
 kankan release <card> --force        # park a card's ref; the card stays where it is
 kankan seat recover <seat> [--kill]  # a seat that is alive but stuck; --kill terminates its pane session first
-kankan seat remove <seat>            # only if free, holding no cards and with empty lists
+kankan seat remove <seat>            # only if free, holding no cards and with empty lists; for <type>-qa only if free (its conversation ends)
 kankan purge-remote [--remote origin]  # delete refs/agent-* pushed by mistake
 ```
 

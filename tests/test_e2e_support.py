@@ -34,12 +34,14 @@ def lists_named(fake, board_id, name):
 
 
 def test_scenario_flags():
-    assert [c.key for c in es.scenario(ask=False, hold=False, attach=False)] == ["hello", "word", "name"]
+    assert [c.key for c in es.scenario(ask=False, hold=False, attach=False, qa=False)] == ["hello", "word", "name"]
     full = es.scenario()
-    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold", "attach"]
+    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold", "attach", "qa"]
     assert {c.key: c.interactive for c in full} == {"hello": None, "word": None, "name": None, "ask": "ask",
-                                                     "hold": "hold", "attach": "attach"}
+                                                     "hold": "hold", "attach": "attach", "qa": "qa"}
     assert all("never push `main`" in c.desc for c in full)
+    qa = full[-1]
+    assert "check.sh" in qa.desc and "Commit" not in qa.desc
 
 
 def test_new_run_id():
@@ -88,7 +90,8 @@ def test_blocking_cards(board):
     backlog, done = fake.add_list(b["id"], "Backlog"), fake.add_list(b["id"], "Done")
     review = fake.add_list(b["id"], "claude-1 · Review")
     foreign = fake.add_list(b["id"], "Ideas")
-    expected = {fake.add_card(l["id"], "x")["id"] for l in (backlog, done, review)}
+    questions = fake.add_list(b["id"], "Q&A")
+    expected = {fake.add_card(l["id"], "x")["id"] for l in (backlog, done, review, questions)}
     fake.add_card(foreign["id"], "y")
     assert {c.id for c in es.blocking_cards(client(fake), b["id"])} == expected
     assert fake.state["boards"][b["id"]]["desc"] == desc_before
@@ -110,10 +113,11 @@ def test_create_cards_order_and_names(board, tmp_path, virtual_time):
     clone, _ = es.make_repos(tmp_path)
     cfg = es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     cards = es.create_cards(client(fake), cfg, "ke-1-abc", es.scenario())
-    assert list(cards) == ["hello", "word", "name", "ask", "hold", "attach"]
+    assert list(cards) == ["hello", "word", "name", "ask", "hold", "attach", "qa"]
     assert cards["hello"].name == "ke-1-abc Say hello" and "greetings.txt" in cards["hello"].desc
     order = sorted((c for c in fake.state["cards"].values() if c["idList"] == cfg.backlog), key=lambda c: c["pos"])
-    assert [c["id"] for c in order] == [c.id for c in cards.values()]
+    assert [c["id"] for c in order] == [c.id for key, c in cards.items() if key != "qa"]
+    assert cfg.qa_list and fake.card_list(cards["qa"].id) == cfg.qa_list
 
 
 def test_teardown_board(board):
@@ -527,3 +531,53 @@ def test_verify_run_attachment_dir_left(run):
     problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs,
                              attach_sha256="ab" * 32)
     assert any("attachment directory" in p for p in problems), problems
+
+
+# ---------------------------------------------------------------- Q&A dialogue (questions F§8)
+
+def _qa_comment(fake, card_id, kind, conversation, turn, index, text):
+    return fake._comment(card_id, f"{text}\n\n`kankan:{kind}-{conversation}-{turn}-{index}`", fake.me["id"])
+
+
+def test_qa_turns_counts_answered_turns_and_handoffs(fake_trello):
+    b = fake_trello.add_board("b")
+    card = fake_trello.add_card(fake_trello.add_list(b["id"], "Q&A")["id"], "q")
+    c = client(fake_trello)
+    assert es.qa_turns(c, card["id"], fake_trello.me["id"]) == {"qa": 0, "qh": 0}
+    _qa_comment(fake_trello, card["id"], "qa", "a" * 16, "b" * 16, 1, "1/2 first part")
+    _qa_comment(fake_trello, card["id"], "qa", "a" * 16, "b" * 16, 2, "2/2 second part")
+    _qa_comment(fake_trello, card["id"], "qa", "a" * 16, "c" * 16, 1, "another answer")
+    fake_trello.user_comment(card["id"], "`kankan:qa-" + "a" * 16 + "-" + "d" * 16 + "-1` typed by a person")
+    assert es.qa_turns(c, card["id"], fake_trello.me["id"]) == {"qa": 2, "qh": 0}
+    _qa_comment(fake_trello, card["id"], "qh", "a" * 16, "e" * 16, 1, "the summary")
+    assert es.qa_turns(c, card["id"], fake_trello.me["id"]) == {"qa": 2, "qh": 1}
+
+
+def test_qa_expected_file():
+    path, check, _ = es.EXPECTED_FILES["qa"]
+    assert path == "qa.txt"
+    assert check("blue sky\n", {"qa_line": "blue sky"})
+    assert not check("blue sky\nmore\n", {"qa_line": "blue sky"})
+    assert not check("\n", {"qa_line": ""})
+
+
+def test_qa_problems():
+    card = type("C", (), {"id": "q1", "name": "ke-1 Ask about check.sh"})()
+    good = [{"event": "task_assigned", "card": "q1", "seat": "claude-qa", "kind": "qa"},
+            {"event": "task_assigned", "card": "q1", "seat": "codex-1", "kind": "impl"},
+            {"event": "task_assigned", "card": "q1", "seat": "claude-1", "kind": "review"}]
+    turns = {"qa": 2, "qh": 1}
+    assert es.qa_problems(good, card, turns) == []
+    assert any("answers" in p for p in es.qa_problems(good, card, {"qa": 1, "qh": 1}))
+    assert any("handoff" in p for p in es.qa_problems(good, card, {"qa": 2, "qh": 0}))
+    assert any("never" in p for p in es.qa_problems(good[:1], card, turns))
+    wrong = good + [{"event": "task_assigned", "card": "q1", "seat": "claude-qa", "kind": "impl"}]
+    assert any("claude-qa" in p for p in es.qa_problems(wrong, card, turns))
+
+
+def test_verify_run_reports_a_left_conversation_directory(run):
+    project, fake, c, cards, origin, refs, _ = run
+    assert es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs, qa_line=None) == []
+    (project.paths.kankan_dir / "qa" / "abc123").mkdir(parents=True)
+    problems = es.verify_run(project, c, cards, origin, ask_ran=False, hold_ran=False, user_refs=refs)
+    assert any("conversation directories left: abc123" in p for p in problems), problems

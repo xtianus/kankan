@@ -23,6 +23,7 @@ class Phase(str, enum.Enum):
     REVIEW = "review"
     INTEGRATED = "integrated"
     PARKED = "parked"
+    QA = "qa"
 
 
 OWNED_PHASES = (Phase.IMPL.value, Phase.REVIEW.value)
@@ -46,6 +47,13 @@ class CardMeta:
     tested: Optional[str] = None
     cause: Optional[str] = None
     nonce: Optional[str] = None
+    # Q&A (questions T§3): the conversation key, the inputs covered by the latest answer
+    # ({"comment": id | None, "attachments": [ids]}), the handoff summary's comment IDs, and ``"bottom"``
+    # for a parked ref whose pending move goes to the bottom of its target list.
+    conversation: Optional[str] = None
+    covered: Optional[dict] = None
+    handoff: Optional[List[str]] = None
+    pos: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -88,8 +96,10 @@ def target_list_for(cfg, phase: str, seat: Optional[str], implementer: Optional[
         return cfg.seats[seat].review
     if phase == Phase.INTEGRATED.value:
         return cfg.done
+    if phase == Phase.QA.value:
+        return cfg.qa_list
     if phase == Phase.PARKED.value:
-        if cause == "yield":
+        if cause in ("yield", "handoff"):
             return cfg.backlog
         if cause == "block":
             return cfg.blocked
@@ -164,9 +174,11 @@ def _where_expected(card: Optional[Card], meta: dict) -> bool:
 
 def confirm_move(project, ref: str, value: RefValue) -> RefValue:
     """Record that the move to ``target_list`` happened: drop ``from_list`` so a later human move back to
-    the source list is never replayed by convergence. Conditional; on a race the old value is kept."""
+    the source list is never replayed by convergence, and ``pos``, which only concerns that move.
+    Conditional; on a race the old value is kept."""
     meta = dict(value.meta)
     meta.pop("from_list", None)
+    meta.pop("pos", None)
     meta.pop("nonce", None)
     oid = project.refs.write_blob(meta)
     if project.refs.update(ref, oid, value.oid):
@@ -186,10 +198,13 @@ def _parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
 
 def delete_integrated_ref(project, ref: str, value: RefValue) -> bool:
     """Delete the ref of a card that is in Done (conditional on ``value.oid``) and, when that succeeds, its
-    attachment directory (best effort: ``attachments.discard`` never raises)."""
+    attachment directory and its Q&A conversation directory, if any (best effort: neither discard raises)."""
     if not project.refs.delete(ref, value.oid):
         return False
     attachments.discard(project.paths, value.meta.get("short", ""))
+    if value.meta.get("conversation"):
+        from kankan import qa
+        qa.discard_conversation(project.paths, value.meta["conversation"])
     return True
 
 
@@ -197,7 +212,7 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
     """Complete Trello moves lagging behind the refs (§10.4); never revert a human move.
 
     Returns events ``"<kind>:<card id>"`` with kinds ``moved``, ``deleted``, ``human_moved``,
-    ``move_failed``, ``malformed``.
+    ``move_failed``, ``malformed``. Refs in phase ``qa`` are never moved nor reported (questions T§3).
     """
     events: List[str] = []
     with project_lock(project.paths):
@@ -209,55 +224,98 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
             if isinstance(value, KankanError):
                 events.append(f"malformed:{card_id}")
                 continue
-            meta = value.meta
-            phase = meta.get("phase")
-            if phase in OWNED_PHASES and meta.get("owner") != lease.seat:
+            if _skipped(lease, value.meta):
                 continue
             card = snap.cards.get(card_id)
             if card is None:
                 card = project.trello.card(card_id)
-            if card is None or card.closed:
-                if phase in OWNED_PHASES:
-                    events.append(f"human_moved:{card_id}")
-                continue
-            target = meta.get("target_list")
-            if phase == Phase.INTEGRATED.value and card.list_id == cfg.done:
-                _hold_after_integration(project, card, meta)
-                if delete_integrated_ref(project, ref, value):
-                    labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
-                    project.log("ref_closed", card=card_id)
-                    events.append(f"deleted:{card_id}")
-                continue
-            if target is None or card.list_id == target:
-                _reset_failures(project, lease, card_id)
-                if target is not None and meta.get("from_list") and phase != Phase.INTEGRATED.value:
-                    confirm_move(project, ref, value)
-                continue
-            if card.list_id != meta.get("from_list"):
-                events.append(f"human_moved:{card_id}")
-                continue
-            try:
-                project.trello.move_card(card_id, target)
-                events.append(f"moved:{card_id}")
-                _reset_failures(project, lease, card_id)
-                if phase != Phase.INTEGRATED.value:
-                    value = confirm_move(project, ref, value)
-                if phase == Phase.INTEGRATED.value:
-                    _hold_after_integration(project, card, meta)
-                if phase == Phase.INTEGRATED.value and delete_integrated_ref(project, ref, value):
-                    labels.clear_kankan_labels(project, card, snap.labels, lease.seat)
-                    events.append(f"deleted:{card_id}")
-            except KankanError as err:
-                events.append(f"move_failed:{card_id}")
-                project.log("converge_move_failed", card=card_id, error=err.message)
-                if _count_failure(project, lease, card_id) >= CONVERGENCE_FAILURE_LIMIT:
-                    try:
-                        labels.set_label(project, card_id, cfg.label_error, "convergence", lease.seat,
-                                         comment=f"kankan: cannot move this card to its expected list ({err.message}).",
-                                         op_id=f"convfail-{value.oid}")
-                    except KankanError as label_err:
-                        project.log("label_failed", card=card_id, error=label_err.message)
+            events += _converge_ref(project, lease, ref, value, card, snap.labels)
     return events
+
+
+def converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Optional[Card],
+                 board_labels: Optional[Dict] = None) -> Optional[str]:
+    """The convergence step of one ref (§10.4), ``card`` being its current card (None when deleted).
+
+    The caller holds the project lock. Returns the last event of the step, or None.
+    """
+    if _skipped(lease, value.meta):
+        return None
+    events = _converge_ref(project, lease, ref, value, card, board_labels)
+    return events[-1] if events else None
+
+
+def _skipped(lease: Lease, meta: dict) -> bool:
+    """Refs another seat's convergence leaves alone: others' held cards, and Q&A conversations."""
+    phase = meta.get("phase")
+    return phase == Phase.QA.value or (phase in OWNED_PHASES and meta.get("owner") != lease.seat)
+
+
+def _converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Optional[Card],
+                  board_labels: Optional[Dict]) -> List[str]:
+    cfg = project.cfg
+    card_id = ref[len(CARD_PREFIX):]
+    meta = value.meta
+    phase = meta.get("phase")
+    events: List[str] = []
+    if card is None or card.closed:
+        if phase in OWNED_PHASES:
+            events.append(f"human_moved:{card_id}")
+        return events
+    target = meta.get("target_list")
+    if phase == Phase.INTEGRATED.value and card.list_id == cfg.done:
+        _hold_after_integration(project, card, meta)
+        if delete_integrated_ref(project, ref, value):
+            labels.clear_kankan_labels(project, card, board_labels, lease.seat)
+            project.log("ref_closed", card=card_id)
+            events.append(f"deleted:{card_id}")
+        return events
+    if target is None or card.list_id == target:
+        _reset_failures(project, lease, card_id)
+        if target is not None and meta.get("from_list") and phase != Phase.INTEGRATED.value:
+            confirm_move(project, ref, value)
+        return events
+    if card.list_id != meta.get("from_list"):
+        events.append(f"human_moved:{card_id}")
+        return events
+    if phase == Phase.PARKED.value and meta.get("cause") == "handoff" and cfg.qa_list \
+            and card.list_id == cfg.qa_list and cfg.label_hold in card.label_ids:
+        _cancel_handoff_move(project, ref, value, card)
+        return events
+    try:
+        project.trello.move_card(card_id, target, pos="bottom" if meta.get("pos") == "bottom" else "top")
+        events.append(f"moved:{card_id}")
+        _reset_failures(project, lease, card_id)
+        if phase != Phase.INTEGRATED.value:
+            value = confirm_move(project, ref, value)
+        if phase == Phase.INTEGRATED.value:
+            _hold_after_integration(project, card, meta)
+        if phase == Phase.INTEGRATED.value and delete_integrated_ref(project, ref, value):
+            labels.clear_kankan_labels(project, card, board_labels, lease.seat)
+            events.append(f"deleted:{card_id}")
+    except KankanError as err:
+        events.append(f"move_failed:{card_id}")
+        project.log("converge_move_failed", card=card_id, error=err.message)
+        if _count_failure(project, lease, card_id) >= CONVERGENCE_FAILURE_LIMIT:
+            try:
+                labels.set_label(project, card_id, cfg.label_error, "convergence", lease.seat,
+                                 comment=f"kankan: cannot move this card to its expected list ({err.message}).",
+                                 op_id=f"convfail-{value.oid}")
+            except KankanError as label_err:
+                project.log("label_failed", card=card_id, error=label_err.message)
+    return events
+
+
+def _cancel_handoff_move(project, ref: str, value: RefValue, card: Card) -> None:
+    """``HOLD`` on a handed-off card still in ``Q&A`` before its move (questions T§3): the handoff is cancelled.
+    ``from_list`` and ``pos`` go and ``target_list`` becomes ``Q&A``, without a move: the card stays in ``Q&A`` and is
+    taken again as a new conversation once ``HOLD`` is removed."""
+    meta = dict(value.meta, target_list=card.list_id)
+    for key in ("from_list", "pos", "nonce"):
+        meta.pop(key, None)
+    oid = project.refs.write_blob(meta)
+    if project.refs.update(ref, oid, value.oid):
+        project.log("qa_handoff_cancelled", card=card.id, reason="hold", old=value.oid, new=oid)
 
 
 def _count_failure(project, lease: Lease, card_id: str) -> int:

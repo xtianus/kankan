@@ -35,7 +35,7 @@ def apply_read(project, read: SettingsRead, adapters: dict, *, write: bool = Tru
             for card in read.cards:
                 entry = state.cards.setdefault(card.id, {})
                 entry['observed_error'] = project.cfg.label_error in card.label_ids
-        result = boardconfig.evaluate(read, state, boardconfig.schema(adapters))
+        result = boardconfig.evaluate(read, state, boardconfig.schema(adapters, boardconfig.ROLES))
         if write:
             _save(project, result.state)
         return result
@@ -151,7 +151,7 @@ def record_check(project, request, result) -> None:
         adapters = adapters_for(project.paths)
         if request.agent_type not in adapters:
             return
-        effective = boardconfig._values(state, boardconfig.schema(adapters)).get(request.role, {}).get(request.agent_type)
+        effective = boardconfig._values(state, boardconfig.schema(adapters, boardconfig.ROLES)).get(request.role, {}).get(request.agent_type)
         version = modelcheck._version(adapters[request.agent_type])
         if role.get('revision', 0) != request.revision or effective != request.pair or (version and result.version != version):
             return

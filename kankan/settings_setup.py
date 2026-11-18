@@ -29,7 +29,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
         read = project.trello.settings_cards(project.cfg.settings_list)
         boardsettings.apply_read(project, read, adapters)
         boardsettings.drain_actions(project)
-        specs = boardconfig.schema(adapters)
+        specs = boardconfig.schema(adapters, boardconfig.roles(project.paths))
         for key, spec in specs.items():
             cards = [card for card in read.cards if card.name == key]
             if len(cards) > 1:

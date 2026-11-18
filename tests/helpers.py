@@ -37,3 +37,38 @@ def bind_project(repo, fake, monkeypatch=None, board=None, **cfg_overrides) -> P
     project = Project.open(repo)
     project.board = board
     return project
+
+
+def add_qa_list(project, fake, name="Q&A") -> str:
+    """Create the ``Q&A`` list on the fake board and register it as ``cfg.qa_list``."""
+    from kankan.config import load_config
+    ident = fake.add_list(project.cfg.board_id, name)["id"]
+    cfg = load_config(project.paths)
+    cfg.qa_list = ident
+    save_config(project.paths, cfg)
+    project.reload_config()
+    return ident
+
+
+def add_questions_seed(remove=False) -> None:
+    """Give (or, with ``remove``, take away) the ``questions`` seed of both test adapters in the user's overrides."""
+    import json
+    from pathlib import Path
+    target = Path.home() / ".config/kankan/agents.json"
+    data = json.loads(target.read_text())
+    for agent_type, model in (("claude", "sonnet"), ("codex", "gpt-6.1-sol")):
+        seeds = data[agent_type]["seed"]
+        if remove:
+            seeds.pop("questions", None)
+        else:
+            seeds["questions"] = {"model": model, "effort": "high"}
+    target.write_text(json.dumps(data))
+
+
+def put_card_ref(project, card_id: str, short: str, **meta):
+    """Create a card ref with the given blob fields (``phase`` required) and return its ``RefValue``."""
+    from kankan.refstore import card_ref
+    oid = project.refs.write_blob({"schema": 1, "card": card_id, "short": short, "created": "2026-11-17T00:00:00Z",
+                                   **meta})
+    project.refs.create(card_ref(card_id), oid)
+    return project.refs.read(card_ref(card_id))

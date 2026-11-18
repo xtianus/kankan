@@ -7,13 +7,13 @@ import time
 import pytest
 
 from kankan import auditlog, procutil, seats
-from kankan.config import load_config
+from kankan.config import load_config, save_config
 from kankan.errors import KankanError, Status
 from kankan.project import Project
 from kankan.refstore import Create, card_ref, seat_ref
 from kankan.seatstate import load_state, update_state
 from tests.fakes.fake_trello import FakeTrello
-from tests.helpers import bind_project
+from tests.helpers import add_qa_list, bind_project
 
 
 @pytest.fixture
@@ -285,3 +285,96 @@ def test_liveness_serialized_with_occupation(project, git_repo):
     assert seats.liveness(project, "claude-1") == "free"
     assert time.monotonic() - start >= 0.7
     holder.join()
+
+
+# ---------------------------------------------------------------- Q&A seat
+def test_seat_naming():
+    assert seats.is_qa("claude-qa") and not seats.is_qa("claude-1")
+    assert seats.qa_seat_name("codex") == "codex-qa"
+    assert seats.seat_type("codex-qa") == "codex"
+
+
+def test_ensure_created_registers_qa_seat_without_lists(project, fake):
+    before = len(fake.state["lists"])
+    seats.ensure_created(project, "claude-qa", "claude")
+    cfg = load_config(project.paths)
+    assert cfg.seats["claude-qa"].role == "qa" and cfg.seats["claude-qa"].in_progress == ""
+    assert len(fake.state["lists"]) == before
+    assert (project.paths.seat_worktree("claude-qa") / ".git").exists()
+    seats.ensure_created(project, "claude-qa", "claude")  # idempotent
+    assert list(load_config(project.paths).seats) == ["claude-qa"]
+
+
+def test_work_seat_choice_ignores_qa_seat(project):
+    seats.ensure_created(project, "claude-qa", "claude")
+    first = seats.acquire(project, "claude")
+    assert first.seat == "claude-1"
+    assert seats._candidates(project, "claude") == ["claude-1"]
+    seats.release(project, first)
+    assert seats.acquire(project, "claude").seat == "claude-1"
+
+
+def test_next_number_and_cap_exclude_qa_seat(project):
+    seats.ensure_created(project, "claude-qa", "claude")
+    cfg = load_config(project.paths)
+    cfg.seat_cap = 2
+    save_config(project.paths, cfg)
+    taken = [seats.acquire(project, "claude").seat for _ in range(2)]
+    assert taken == ["claude-1", "claude-2"]
+    with pytest.raises(KankanError) as exc:
+        seats.acquire(project, "claude")
+    assert exc.value.status == Status.CONFIG_ERROR and "cap" in exc.value.message
+
+
+def test_acquire_qa_registers_seat_and_worktree(project, fake):
+    add_qa_list(project, fake)
+    lists_before = len(fake.state["lists"])
+    lease = seats.acquire_qa(project, "claude", None)
+    assert lease.seat == "claude-qa" and lease.type == "claude"
+    seat_cfg = load_config(project.paths).seats["claude-qa"]
+    assert seat_cfg.role == "qa" and (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review) == ("", "", "")
+    assert len(fake.state["lists"]) == lists_before
+    assert (project.paths.seat_worktree("claude-qa") / ".git").exists()
+    assert project.refs.read(seat_ref("claude-qa")).oid == lease.seat_oid
+    assert seats.liveness(project, "claude-qa") == "alive"
+    seats.release(project, lease)
+    assert seats.acquire_qa(project, "claude", None).seat == "claude-qa"
+
+
+def test_acquire_qa_needs_open_qa_list(project, fake):
+    for _ in range(2):
+        with pytest.raises(KankanError) as exc:
+            seats.acquire_qa(project, "claude", None)
+        assert exc.value.status == Status.CONFIG_ERROR and "Q&A" in exc.value.message
+        ident = add_qa_list(project, fake)
+        fake.state["lists"][ident]["closed"] = True
+    assert "claude-qa" not in load_config(project.paths).seats
+
+
+def test_acquire_qa_refuses_another_types_seat(project, fake):
+    add_qa_list(project, fake)
+    seats.release(project, seats.acquire_qa(project, "claude", None))
+    with pytest.raises(KankanError) as exc:
+        seats.acquire_qa(project, "codex", None)
+    assert exc.value.status == Status.CONFIG_ERROR  # the supervisor treats it as FATAL_EXIT
+    assert "codex-qa" not in load_config(project.paths).seats
+    seats.acquire_qa(project, "claude", None)
+
+
+def test_acquire_by_name_of_qa_seat_goes_through_acquire_qa(project, fake):
+    with pytest.raises(KankanError) as exc:
+        seats.acquire(project, "claude", seat="claude-qa")
+    assert exc.value.status == Status.CONFIG_ERROR
+    add_qa_list(project, fake)
+    assert seats.acquire(project, "claude", seat="claude-qa").seat == "claude-qa"
+
+
+def test_live_counts_and_active_types_count_work_seats_only(project, fake):
+    from kankan import agents_cmd, workflow
+    add_qa_list(project, fake)
+    qa = seats.acquire_qa(project, "claude", None)
+    assert agents_cmd.live_counts(project) == {} and workflow.active_types(project) == set()
+    work = seats.acquire(project, "codex")
+    assert agents_cmd.live_counts(project) == {"codex": 1} and workflow.active_types(project) == {"codex"}
+    seats.release(project, work)
+    seats.release(project, qa)

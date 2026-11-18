@@ -33,6 +33,11 @@ def marker(op_id: str) -> str:
     return f"`{MARKER_PREFIX}{op_id}`"
 
 
+def comment_text(text: str, op_id: str) -> str:
+    """The exact text ``add_comment`` sends: ``text``, a blank line and the op-id marker."""
+    return f"{text}\n\n{marker(op_id)}"
+
+
 @dataclass
 class CheckItem:
     id: str
@@ -84,6 +89,7 @@ class Card:
     closed: bool
     last_activity: str
     checklists: list[Checklist] = field(default_factory=list)
+    attachment_items: List["Attachment"] = field(default_factory=list)  # filled only by ``card()``
 
 
 @dataclass
@@ -138,9 +144,12 @@ class Attachment:
     member_id: str
     is_upload: bool
     pos: float
+    date: str = ""
 
 
-ATTACHMENT_FIELDS = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos"
+ATTACHMENT_FIELDS = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos,date"
+CARD_ATTACHMENT_FIELDS = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,date"
+COMMENT_MAX = 16384  # Trello's limit on a comment's text
 
 
 class DownloadTooLarge(Exception):
@@ -250,7 +259,8 @@ def _attachment(data: dict) -> Attachment:
     return Attachment(id=data["id"], name=data.get("name") or "", file_name=data.get("fileName") or "",
                       url=data.get("url") or "", bytes=size if isinstance(size, int) and not isinstance(size, bool) else None,
                       mime_type=data.get("mimeType") or None, member_id=data.get("idMember") or "",
-                      is_upload=bool(data.get("isUpload", False)), pos=data.get("pos") or 0)
+                      is_upload=bool(data.get("isUpload", False)), pos=data.get("pos") or 0,
+                      date=data.get("date") or "")
 
 
 def _multipart(file_name: str, content: bytes, mime_type: str) -> Tuple[bytes, str]:
@@ -440,13 +450,15 @@ class TrelloClient:
 
     def card(self, id_or_short: str) -> Optional[Card]:
         status, payload = self._request("GET", f"/1/cards/{urllib.parse.quote(id_or_short)}", {
-            "attachments": "true", "attachment_fields": "url", "checklists": "all",
+            "attachments": "true", "attachment_fields": CARD_ATTACHMENT_FIELDS, "checklists": "all",
             "fields": "name,desc,idBoard,idList,pos,idLabels,url,shortLink,closed,dateLastActivity"})
         if status in (400, 404):
             return None
         if status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello GET card: HTTP {status}")
-        return _card(payload)
+        found = _card(payload)
+        found.attachment_items = [_attachment(a) for a in payload.get("attachments", [])]
+        return found
 
     def settings_cards(self, list_id: str) -> SettingsRead:
         status, meta = self._request("GET", f"/1/lists/{list_id}", {"fields": "closed"})
@@ -624,9 +636,9 @@ class TrelloClient:
     def archive_list(self, list_id: str) -> None:
         self._ok("PUT", f"/1/lists/{list_id}/closed", body={"value": True})
 
-    def move_card(self, card_id: str, list_id: str) -> Card:
-        """Move to the top of ``list_id`` and verify with a reread."""
-        self._ok("PUT", f"/1/cards/{card_id}", body={"idList": list_id, "pos": "top"})
+    def move_card(self, card_id: str, list_id: str, pos: str = "top") -> Card:
+        """Move to the top (or ``pos="bottom"``) of ``list_id`` and verify with a reread."""
+        self._ok("PUT", f"/1/cards/{card_id}", body={"idList": list_id, "pos": pos})
         card = self.card(card_id)
         if card is None or card.list_id != list_id:
             raise KankanError(Status.TRELLO_ERROR, f"card {card_id} not in the expected list after the move",
@@ -664,7 +676,7 @@ class TrelloClient:
 
     def add_comment(self, card_id: str, text: str, op_id: str, *, member_id: Optional[str] = None) -> Comment:
         """Comment ending with the op-id marker; after a timeout an existing marker means success."""
-        full = f"{text}\n\n{marker(op_id)}"
+        full = comment_text(text, op_id)
 
         def find():
             for comment in reversed(self.comments(card_id)):

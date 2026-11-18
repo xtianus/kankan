@@ -57,12 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("agent", "start an agent in tmux")
     p.add_argument("type", choices=["claude", "codex"])
     p.add_argument("--seat")
+    p.add_argument("--qa", action="store_true", help="start the Q&A agent (seat <type>-qa)")
     p.add_argument("--attach", action="store_true")
-    p = add("up", "ensure the given number of agents run, starting the missing ones")
-    p.add_argument("wanted", nargs="+", metavar="<type>=<n>")
+    p = add("up", "ensure the given number of agents (and the Q&A agent with qa=<type>) run, starting the missing ones")
+    p.add_argument("wanted", nargs="+", metavar="<type>=<n>|qa=<type>")
     p = add("autostart", "start agents at boot (systemd user service)")
     p.add_argument("action", choices=["enable", "disable"])
-    p.add_argument("wanted", nargs="*", metavar="<type>=<n>")
+    p.add_argument("wanted", nargs="*", metavar="<type>=<n>|qa=<type>")
     add("status", "seats, launcher states, tasks and waiting cards")
     p = add("doctor", "check the installation and this project, fix what is safe, list manual steps")
     p.add_argument("--no-fix", action="store_true", help="only report, change nothing")
@@ -105,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("question")
     p = add("fail", "report an error that needs the user (agent command)")
     p.add_argument("reason")
+    p.add_argument("--turn", help="Q&A task: the turn token from `kankan task --json`")
+    for name, help_text in (("answer", "post the answer to the Q&A card (agent command)"),
+                            ("handoff", "hand the Q&A card over for implementation (agent command)")):
+        p = add(name, help_text)
+        p.add_argument("text", nargs="?")
+        p.add_argument("--turn", required=True, help="the turn token from `kankan task --json`")
+        p.add_argument("--file", help="read the text from this UTF-8 file")
     p = add("block", "park the card in Blocked (agent command)")
     p.add_argument("reason")
     p = add("resolve", "resolve a blocked card by hand")
@@ -243,7 +251,36 @@ def _cmd_ask(args):
 @command("fail")
 def _cmd_fail(args):
     from kankan import agentcmds
-    return agentcmds.fail(agentcmds.context(), args.reason), "error reported; wait for the user"
+    return agentcmds.fail(agentcmds.context(), args.reason, args.turn), "error reported; wait for the user"
+
+
+def _qa_text(args) -> str:
+    """The text of ``answer``/``handoff``: the argument or the ``--file`` content (UTF-8), exactly one of them."""
+    from kankan import messages
+    if (args.text is None) == (args.file is None):
+        raise KankanError(Status.USAGE_ERROR, messages.QA_TEXT_ARGS)
+    if args.text is not None:
+        return args.text
+    try:
+        return Path(args.file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        raise KankanError(Status.USAGE_ERROR, messages.QA_TEXT_FILE.format(path=args.file, error=err))
+
+
+@command("answer")
+def _cmd_answer(args):
+    from kankan import agentcmds, messages, qa_answer
+    ctx = agentcmds.context()
+    qa_answer._qa_task(ctx, "answer")  # no_work, usage_error, not_owner come before the text arguments
+    return qa_answer.answer(ctx, _qa_text(args), args.turn), messages.QA_ANSWER_DONE
+
+
+@command("handoff")
+def _cmd_handoff(args):
+    from kankan import agentcmds, messages, qa_answer
+    ctx = agentcmds.context()
+    qa_answer._qa_task(ctx, "handoff")  # no_work, usage_error, not_owner come before the text arguments
+    return qa_answer.handoff(ctx, _qa_text(args), args.turn), messages.QA_HANDOFF_DONE
 
 
 @command("yield")
@@ -357,7 +394,7 @@ def _cmd_agent(args):
     project = _project()
     for warning in agents_cmd.warnings_for(project):
         print(f"warning: {warning}", file=sys.stderr)
-    name = agents_cmd.agent(project, args.type, args.seat, args.attach)
+    name = agents_cmd.agent(project, args.type, args.seat, args.attach, qa=args.qa)
     return {"session": name}, f"started tmux session {name}"
 
 
@@ -365,10 +402,10 @@ def _cmd_agent(args):
 def _cmd_up(args):
     from kankan import agents_cmd
     project = _project()
-    wanted = agents_cmd.parse_wanted(args.wanted)
+    wanted, qa = agents_cmd.parse_wanted(args.wanted)
     for warning in agents_cmd.warnings_for(project):
         print(f"warning: {warning}", file=sys.stderr)
-    started = agents_cmd.up(project, wanted)
+    started = agents_cmd.up(project, wanted, qa=qa)
     return {"started": started}, (f"started {len(started)} agent(s)" if started else "all requested agents are running")
 
 
@@ -379,7 +416,8 @@ def _cmd_autostart(args):
     if args.action == "disable":
         agents_cmd.autostart_disable(project)
         return {"unit": agents_cmd.unit_name(project)}, "autostart disabled"
-    warnings = agents_cmd.autostart_enable(project, agents_cmd.parse_wanted(args.wanted))
+    wanted, qa = agents_cmd.parse_wanted(args.wanted)
+    warnings = agents_cmd.autostart_enable(project, wanted, qa=qa)
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return {"unit": agents_cmd.unit_name(project), "warnings": warnings}, f"autostart enabled ({agents_cmd.unit_name(project)})"

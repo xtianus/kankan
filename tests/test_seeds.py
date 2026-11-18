@@ -11,6 +11,7 @@ import pytest
 from kankan.adapters import load_adapter
 from kankan.config import Paths, atomic_write_json
 from kankan.errors import KankanError, Status
+from tests.helpers import add_questions_seed
 
 
 def test_seed_keys_and_terminal_restore():
@@ -61,10 +62,10 @@ def test_noninteractive_missing_seeds_and_recorded_values(git_repo, isolated_hom
     pair = {'model': 'sonnet', 'effort': 'high'}
     atomic_write_json(paths.kankan_dir / 'board-settings.json', {'settings': {
         'implementation': {'value': {'claude': pair}}, 'review': {'value': {'claude': pair}}}})
-    seeds.preflight(paths, ['claude'])
+    seeds.preflight(paths, ['claude'], ('implementation', 'review'))
     atomic_write_json(target, {'claude': {'seed': {'review': {'model': 'absent', 'effort': 'low'}}}})
     with pytest.raises(KankanError):
-        seeds.preflight(paths, ['claude'])
+        seeds.preflight(paths, ['claude'], ('implementation', 'review'))
 
 
 def test_parallel_projects_keep_both_seed_writes(isolated_home):
@@ -77,3 +78,46 @@ def test_parallel_projects_keep_both_seed_writes(isolated_home):
     data = json.loads(target.read_text())
     assert data['project-one']['seed']['implementation']['model'] == 'm'
     assert data['project-two']['seed']['implementation']['model'] == 'm'
+
+
+def drop_seed(isolated_home, role):
+    target = isolated_home / '.config/kankan/agents.json'
+    data = json.loads(target.read_text())
+    data['claude']['seed'].pop(role)
+    target.write_text(json.dumps(data))
+
+
+def test_missing_questions_seed_only_matters_for_the_questions_role(git_repo, isolated_home):
+    from kankan import seeds
+    paths = Paths.discover(git_repo)
+    add_questions_seed()
+    drop_seed(isolated_home, 'questions')
+    seeds.preflight(paths, ['claude'], ('implementation', 'review'))
+    with pytest.raises(KankanError) as one:
+        seeds.preflight(paths, ['claude'], ('questions',))
+    drop_seed(isolated_home, 'review')
+    with pytest.raises(KankanError) as other:
+        seeds.preflight(paths, ['claude'], ('review',))
+    assert one.value.status == other.value.status == Status.NEEDS_ACTION
+    assert one.value.message == other.value.message.replace('review', 'questions')
+    assert 'questions' in one.value.message
+
+
+def test_ensure_asks_for_the_questions_seed_only_when_roles_include_it(git_repo, isolated_home):
+    from kankan import seeds
+    paths = Paths.discover(git_repo)
+    add_questions_seed()
+    drop_seed(isolated_home, 'questions')
+    seeds.ensure(paths, ['claude'], interactive=False, say=lambda text: None)
+    with pytest.raises(KankanError) as error:
+        seeds.ensure(paths, ['claude'], interactive=False, say=lambda text: None, roles=('implementation', 'review', 'questions'))
+    assert error.value.status == Status.NEEDS_ACTION and 'questions' in error.value.message
+
+
+def test_questions_seed_is_accepted_by_adapter_validation(isolated_home):
+    adapter = load_adapter(None, 'claude', read_only=True)
+    target = isolated_home / '.config/kankan/agents.json'
+    data = json.loads(target.read_text())
+    data['claude']['seed']['questions'] = {'model': 'sonnet', 'effort': 'high'}
+    target.write_text(json.dumps(data))
+    assert load_adapter(None, 'claude', read_only=True).seed['questions'] == {'model': 'sonnet', 'effort': 'high'}

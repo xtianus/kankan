@@ -158,6 +158,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
         _bind_registry(paths, cfg, client, board, takeover, say)
         snap = client.snapshot(cfg.board_id)
         _ensure_lists(cfg, cfg_old, client, snap, prompt)
+        ensure_qa_list(cfg, client, snap, prompt)
         ensure_labels(cfg, client, snap)
         cfg.kankan_member_id, cfg.kankan_username = me["id"], me["username"]
         warnings += account_warnings(client, cfg)
@@ -177,13 +178,13 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
                             f"worktree to one of your branches (its files fall behind when {cfg.integration_branch} "
                             "advances)")
         auditlog.append(paths, "init", board=cfg.board_id, registry=cfg.registry_id)
-    from kankan import boardsettings, model_catalog, seeds, settings_setup
+    from kankan import boardconfig, boardsettings, model_catalog, seeds, settings_setup
     from kankan.adapters import adapter_types
     from kankan.project import Project
     types = adapter_types(paths)
     for agent_type in types:
         model_catalog.refresh(paths, agent_type)
-    adapters = seeds.ensure(paths, types, interactive=True, say=say)
+    adapters = seeds.ensure(paths, types, interactive=True, say=say, roles=boardconfig.roles(paths))
     project = Project.open(paths.repo)
     if not project.cfg.settings_list:
         snapshot = client.snapshot(cfg.board_id)
@@ -309,6 +310,28 @@ def _ensure_lists(cfg: Config, cfg_old: Optional[Config], client: TrelloClient, 
             setattr(cfg, attr, matches[0].id)
         else:
             setattr(cfg, attr, client.create_list(cfg.board_id, name).id)
+
+
+def ensure_qa_list(cfg: Config, client: TrelloClient, snap, prompt: Optional[Callable[[str], str]] = None) -> Optional[str]:
+    """Find, adopt, restore or create the ``Q&A`` list; returns what was done, or None when it was open.
+
+    Unlike the other workflow lists, an archived or deleted ``Q&A`` list is never a ``config_error``: an
+    archived one is unarchived, a deleted one is replaced. Without ``prompt`` (``doctor``) an open list
+    named ``Q&A`` is adopted without asking.
+    """
+    configured = bool(cfg.qa_list)
+    current = snap.lists.get(cfg.qa_list) if configured else None
+    if current is not None and not current.closed:
+        return None
+    if current is not None:
+        client.unarchive_list(current.id)
+        return "unarchived"
+    matches = sorted((l for l in snap.lists.values() if l.name == "Q&A" and not l.closed), key=lambda l: l.pos)
+    if matches and (prompt is None or _yes(prompt("A list named 'Q&A' exists on the board: adopt it? [Y/n] "))):
+        cfg.qa_list = matches[0].id
+        return "adopted"
+    cfg.qa_list = client.create_list(cfg.board_id, "Q&A", exclude={l.id for l in snap.lists.values()}).id
+    return "recreated" if configured else "created"
 
 
 def ensure_labels(cfg: Config, client: TrelloClient, snap) -> None:

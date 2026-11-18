@@ -1,7 +1,7 @@
 """Manual live run with real Claude Code and Codex agents on the Trello test board.
 
     .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--no-attach] [--no-settings]
-                                              [--timeout MIN] [--keep] [--base DIR]
+                                              [--no-qa] [--timeout MIN] [--keep] [--base DIR]
 
 Never collected by pytest. See docs/developer-manual.md §3.5.
 """
@@ -71,6 +71,7 @@ class Watch:
         self.client, self.cfg, self.cards = client, cfg, cards
         self.last: Dict[str, str] = {}
         self.ask_prompted = self.hold_prompted = self.hold_parked = self.attach_prompted = False
+        self.qa_follow_prompted = self.qa_handoff_prompted = False
 
     def poll(self) -> Dict[str, object]:
         snap = self.client.snapshot(self.cfg.board_id)
@@ -103,6 +104,7 @@ class Watch:
             alert(f"Attach any small file to {attach.url} from your own account (not @{cfg.kankan_username}): "
                   "\"Add > Attachment > Computer\". Then remove HOLD from the card so an agent takes it")
             self.attach_prompted = True
+        self.guide_qa(state.get("qa"))
         hold = state.get("hold")
         if hold is None:
             return
@@ -114,6 +116,24 @@ class Watch:
                 cfg.label_hold in hold.label_ids:
             alert(f"Work suspended and the card is back in Backlog. Remove HOLD from {hold.url} to let it resume")
             self.hold_parked = True
+
+    def guide_qa(self, card) -> None:
+        """The Q&A dialogue (questions F§8): a follow-up with an attachment after the first answer, then a request
+        to implement after the second; the agent hands the card over to the work seats."""
+        cfg = self.cfg
+        if card is None or card.list_id != cfg.qa_list or self.qa_handoff_prompted:
+            return
+        answered = es.qa_turns(self.client, card.id, cfg.kankan_member_id)["qa"]
+        if answered >= 1 and not self.qa_follow_prompted:
+            alert(f"The Q&A agent answered on {card.url}\n    From your own account (not @{cfg.kankan_username}) "
+                  "attach a small text file whose first line is a short phrase (for example `blue sky`), then "
+                  "comment: What is the first line of the attached file?")
+            self.qa_follow_prompted = True
+        elif answered >= 2 and self.qa_follow_prompted:
+            alert(f"Comment on {card.url}: Now implement it: append that first line, alone, to qa.txt.\n    If the "
+                  "agent asks you to confirm, confirm with a comment. It hands the card over to Backlog, where a work "
+                  "seat implements it")
+            self.qa_handoff_prompted = True
 
     def all_done(self, state) -> bool:
         return len(state) == len(self.cards) and all(c.list_id == self.cfg.done for c in state.values())
@@ -249,6 +269,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ask", action="store_true", help="skip the card that asks you a question")
     parser.add_argument("--no-hold", action="store_true", help="skip the card you put on HOLD")
     parser.add_argument("--no-attach", action="store_true", help="skip the card you attach a file to")
+    parser.add_argument("--no-qa", action="store_true", help="skip the Q&A dialogue (no Q&A seat)")
     parser.add_argument("--no-settings", action="store_true", help="skip ticking other review models on the board "
                         "(the agents then use the model and effort already ticked)")
     parser.add_argument("--timeout", type=int, default=60, help="minutes before giving up (default 60)")
@@ -340,9 +361,18 @@ def _main(args, state) -> int:
             say(doctor.report_text(project_checks))
             return 2
         project = Project.open(clone)
+        qa_type = None if args.no_qa else es.QA_TYPE
+        if qa_type:
+            # Register the Q&A seat first: `doctor` then asks its `questions` seeds and creates its setting card.
+            from kankan import seats
+            seats.ensure_created(project, seats.qa_seat_name(qa_type), qa_type)
+            qa_checks = [c for c in doctor.run(clone, fix=True, online=True) if c.status == doctor.MANUAL]
+            if qa_checks:
+                say(doctor.report_text(qa_checks))
+                return 2
         selection, pre_problems = (None, []) if args.no_settings else choose_settings(client, project, clone)
         cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold,
-                                                                 attach=not args.no_attach))
+                                                                 attach=not args.no_attach, qa=qa_type is not None))
         card_ids += [c.id for c in cards.values()]
         wt = run_dir / "user-work-wt"
         subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "user-work", str(wt), "main"], check=True)
@@ -357,10 +387,11 @@ def _main(args, state) -> int:
 
         from kankan import agents_cmd
         state["agents_started"] = True
-        agents_cmd.up(project, {"claude": 1, "codex": 1}, tmux=tmux)
+        agents_cmd.up(project, {"claude": 1, "codex": 1}, tmux=tmux, qa=qa_type)
         say(f"\nBoard: https://trello.com/b/{cfg.board_short}")
         say(f"Watch: tmux attach -t {SESSION_PREFIX}claude-1    |    tmux attach -t {SESSION_PREFIX}codex-1"
-            "    (detach with Ctrl-b d)")
+            + (f"    |    tmux attach -t {SESSION_PREFIX}{qa_type}-qa" if qa_type else "")
+            + "    (detach with Ctrl-b d)")
         say(f"kankan acts as @{cfg.kankan_username}; answer from your own account. Run directory: {run_dir}\n")
 
         watch = Watch(client, cfg, cards)
@@ -384,8 +415,16 @@ def _main(args, state) -> int:
                 sha256 = ""
             else:
                 sha256 = es.attachment_sha256(client, cards["attach"].id, upload, cfg.attachment_max_bytes)
+        qa_line = None
+        if "qa" in cards:
+            upload = es.user_upload(client, cards["qa"].id, cfg.kankan_member_id)
+            if upload is None:
+                problems.append(f"{cards['qa'].name}: no file uploaded by a board member other than kankan")
+                qa_line = ""
+            else:
+                qa_line = es.first_line(es.attachment_bytes(client, cards["qa"].id, upload, cfg.attachment_max_bytes))
         problems += es.verify_run(project, client, cards, origin, ask_ran=not args.no_ask, hold_ran=not args.no_hold,
-                                  user_refs=user_refs, attach_sha256=sha256, selection=selection)
+                                  user_refs=user_refs, attach_sha256=sha256, selection=selection, qa_line=qa_line)
         from kankan import auditlog
         events = auditlog.read(project.paths)
         if selection is not None:

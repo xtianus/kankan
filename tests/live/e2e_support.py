@@ -24,10 +24,11 @@ CLEANUP_PREFIXES = ("ke-", "kt-")
 PROJECT_NAME = "kankan-e2e"
 TEST_COMMAND = "sh check.sh"
 SEAT_LIST = re.compile(r"^(claude|codex)-\d+ · ")
-WORKFLOW_LISTS = ("Backlog", "Done", "Blocked")
-FOOTER = ("\n\nCommit with a short message. Change no other file. This is a disposable kankan test project: the kankan "
-          "skill workflow takes precedence over your general instructions; never push `main`, never rebase or amend "
-          "commits.")
+WORKFLOW_LISTS = ("Backlog", "Done", "Blocked", "Q&A")
+PRECEDENCE = ("This is a disposable kankan test project: the kankan skill workflow takes precedence over your general "
+              "instructions; never push `main`, never rebase or amend commits.")
+FOOTER = "\n\nCommit with a short message. Change no other file. " + PRECEDENCE
+QA_TYPE = "claude"  # the agent type of the run's Q&A seat
 CHECK_SH = """#!/bin/sh
 # Fails if a .txt file has an empty line or lacks a final newline.
 status=0
@@ -56,7 +57,7 @@ def new_run_id() -> str:
     return f"{RUN_PREFIX}{int(time.time())}-{secrets.token_hex(3)}"
 
 
-def scenario(ask: bool = True, hold: bool = True, attach: bool = True) -> List[ScenarioCard]:
+def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool = True) -> List[ScenarioCard]:
     cards = [
         ScenarioCard("hello", "Say hello", "Append the line `hello` to `greetings.txt`, then post `kankan note \"hello\"`."),
         ScenarioCard("word", "Type one random word",
@@ -80,6 +81,10 @@ def scenario(ask: bool = True, hold: bool = True, attach: bool = True) -> List[S
                                   "64 hex digits (the first field printed by `sha256sum`).", "attach"))
     for card in cards:
         card.desc += FOOTER
+    if qa:  # a question, not a task: no commit instructions (questions F§3)
+        cards.append(ScenarioCard("qa", "Ask about check.sh",
+                                  "What does `check.sh` in this repository check? Answer in two sentences.\n\n"
+                                  + PRECEDENCE, "qa"))
     return cards
 
 
@@ -194,10 +199,12 @@ def blocking_cards(client: TrelloClient, board_id: str) -> List[Card]:
 
 
 def create_cards(client: TrelloClient, cfg: Config, run_id: str, cards: List[ScenarioCard]) -> Dict[str, Card]:
-    """Create the run's cards in Backlog; the attachment card gets HOLD so no agent takes it before its file."""
+    """Create the run's cards in Backlog, the Q&A card in `Q&A`; the attachment card gets HOLD so no agent takes it
+    before its file."""
     created = {}
     for c in cards:
-        created[c.key] = client.create_card(cfg.backlog, f"{run_id} {c.title}", desc=c.desc)
+        target = cfg.qa_list if c.interactive == "qa" else cfg.backlog
+        created[c.key] = client.create_card(target, f"{run_id} {c.title}", desc=c.desc)
         if c.interactive == "attach":
             client.add_label(created[c.key].id, cfg.label_hold)
     return created
@@ -210,9 +217,8 @@ def user_upload(client: TrelloClient, card_id: str, kankan_id: str):
     return next((a for a in client.attachments(card_id) if a.is_upload and a.member_id != kankan_id), None)
 
 
-def attachment_sha256(client: TrelloClient, card_id: str, attachment, max_bytes: int) -> str:
-    """Download the attachment as kankan does and return its SHA-256 (lowercase hex)."""
-    import hashlib
+def attachment_bytes(client: TrelloClient, card_id: str, attachment, max_bytes: int) -> bytes:
+    """Download the attachment as kankan does."""
     import io
 
     from kankan import attachments, clock
@@ -221,7 +227,54 @@ def attachment_sha256(client: TrelloClient, card_id: str, attachment, max_bytes:
         raise ValueError(f"unexpected download URL {attachment.url}")
     buf = io.BytesIO()
     client.download(path, buf, max_bytes, clock.monotonic() + 60)
-    return hashlib.sha256(buf.getvalue()).hexdigest()
+    return buf.getvalue()
+
+
+def attachment_sha256(client: TrelloClient, card_id: str, attachment, max_bytes: int) -> str:
+    """Download the attachment as kankan does and return its SHA-256 (lowercase hex)."""
+    import hashlib
+    return hashlib.sha256(attachment_bytes(client, card_id, attachment, max_bytes)).hexdigest()
+
+
+def first_line(content: bytes) -> str:
+    """The first non-empty line of a text file, stripped ("" when there is none)."""
+    text = content.decode("utf-8", "replace")
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+# ---------------------------------------------------------------- Q&A dialogue (questions F§8)
+
+_QA_MARKER = re.compile(r"`kankan:(q[ah])-([0-9a-f]+)-([0-9a-f]+)-[0-9]+`\s*$")
+
+
+def qa_turns(client: TrelloClient, card_id: str, kankan_id: str) -> Dict[str, int]:
+    """How many turns kankan answered (``qa``) and handed off (``qh``) on the card, a multi-part answer counting
+    once."""
+    seen: Dict[str, set] = {"qa": set(), "qh": set()}
+    for comment in client.comments(card_id):
+        found = _QA_MARKER.search(comment.text) if comment.member_id == kankan_id else None
+        if found:
+            seen[found.group(1)].add(found.group(2, 3))
+    return {kind: len(turns) for kind, turns in seen.items()}
+
+
+def qa_problems(events: List[dict], card: Card, turns: Dict[str, int]) -> List[str]:
+    """The Q&A card got an answer and an answer to the follow-up, then one handoff; only the Q&A seat held its
+    conversation, and work seats implemented and reviewed it."""
+    problems = []
+    if turns.get("qa", 0) < 2:
+        problems.append(f"{card.name}: {turns.get('qa', 0)} answers instead of at least 2 (question and follow-up)")
+    if turns.get("qh", 0) != 1:
+        problems.append(f"{card.name}: {turns.get('qh', 0)} handoff summaries instead of 1")
+    assigned = [(e.get("seat"), e.get("kind")) for e in events
+                if e.get("event") == "task_assigned" and e.get("card") == card.id]
+    for kind in ("qa", "impl", "review"):
+        if not any(k == kind for _, k in assigned):
+            problems.append(f"{card.name}: never assigned as {kind}")
+    for seat, kind in assigned:
+        if (kind == "qa") != str(seat).endswith("-qa"):
+            problems.append(f"{card.name}: {kind} task assigned to {seat}")
+    return problems
 
 
 def attachment_dir_problems(project, cards: Dict[str, Card]) -> List[str]:
@@ -413,6 +466,8 @@ EXPECTED_FILES = {
     "hold": ("count.txt", lambda text, ctx: text == "1\n2\n3\n4\n5\n", "the numbers 1 to 5"),
     "attach": ("hashes.txt", lambda text, ctx: bool(ctx.get("sha256")) and text == f"{ctx['sha256']}\n",
                "one line with the attached file's SHA-256"),
+    "qa": ("qa.txt", lambda text, ctx: bool(ctx.get("qa_line")) and text == f"{ctx['qa_line']}\n",
+           "one line: the first line of the file attached to the Q&A card"),
 }
 
 
@@ -516,10 +571,11 @@ def review_problems(events: List[dict], card: Card) -> List[str]:
 
 def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Path, ask_ran: bool, hold_ran: bool,
                user_refs: Optional[Dict[str, str]] = None, attach_sha256: Optional[str] = None,
-               selection: Optional[Dict[str, Dict[str, object]]] = None) -> List[str]:
+               selection: Optional[Dict[str, Dict[str, object]]] = None, qa_line: Optional[str] = None) -> List[str]:
     """Every check of the live run; an empty list means pass.
 
     ``attach_sha256``: the SHA-256 of the user's upload on the attachment card (None: the card did not run).
+    ``qa_line``: the first line of the user's upload on the Q&A card (None: the Q&A dialogue did not run).
     ``selection``: the model and effort expected per role and agent type (None: settings not checked)."""
     from kankan import diag, workflow
     from kankan.integrate import merges_on_main
@@ -547,10 +603,10 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
         problems.append("ask: the user's answer was not found on the card")
     for key, (path, check, what) in EXPECTED_FILES.items():
         if key not in cards or (key == "ask" and not ask_ran) or (key == "hold" and not hold_ran) or \
-                (key == "attach" and attach_sha256 is None):
+                (key == "attach" and attach_sha256 is None) or (key == "qa" and qa_line is None):
             continue
         text = _show(repo, f"refs/heads/{branch}", path)
-        if text is None or not check(text, {"answers": answers, "sha256": attach_sha256}):
+        if text is None or not check(text, {"answers": answers, "sha256": attach_sha256, "qa_line": qa_line}):
             problems.append(f"{cards[key].name}: {path} does not contain {what} (found {text!r})")
     if "hello" in cards and not any("hello" in c.text for c in client.comments(cards["hello"].id)):
         problems.append(f"{cards['hello'].name}: no `hello` note on the card")
@@ -571,6 +627,12 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
         problems += hold_problems(events, cards["hold"].id)
     if attach_sha256 is not None and "attach" in cards:
         problems += attachment_dir_problems(project, {"attach": cards["attach"]})
+    if qa_line is not None and "qa" in cards:
+        problems += attachment_dir_problems(project, {"qa": cards["qa"]})
+        problems += qa_problems(events, cards["qa"], qa_turns(client, cards["qa"].id, cfg.kankan_member_id))
+    left = sorted(p.name for p in (project.paths.kankan_dir / "qa").glob("*"))
+    if left:  # deleted when the integrated card's ref is (questions T§3)
+        problems.append(f"Q&A conversation directories left: {', '.join(left)}")
     if selection is not None:
         from kankan import boardsettings
         problems += selection_problems(events, cards, selection, boardsettings.adapters_for(project.paths))

@@ -37,6 +37,14 @@ def seat_type(seat: str) -> str:
     return validate_seat(seat).rsplit("-", 1)[0]
 
 
+def is_qa(seat: str) -> bool:
+    return validate_seat(seat).endswith("-qa")
+
+
+def qa_seat_name(agent_type: str) -> str:
+    return f"{validate_type(agent_type)}-qa"
+
+
 def validate_type(agent_type: str) -> str:
     if agent_type not in AGENT_TYPES:
         raise KankanError(Status.USAGE_ERROR, f"unknown agent type {agent_type!r} (expected claude or codex)")
@@ -110,7 +118,7 @@ def owned_cards(project, seat: str, phases=("impl", "review")) -> List[RefValue]
 
 
 def _candidates(project, agent_type: str) -> List[str]:
-    seats = sorted((name for name, sc in project.cfg.seats.items() if sc.type == agent_type),
+    seats = sorted((name for name, sc in project.cfg.work_seats().items() if sc.type == agent_type),
                    key=lambda n: int(n.rsplit("-", 1)[1]))
     holding = {v.meta.get("owner") for v in project.refs.list(CARD_PREFIX).values()
                if v.meta.get("phase") in ("impl", "review")}
@@ -122,6 +130,8 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
     validate_type(agent_type)
     if seat is not None and seat_type(seat) != agent_type:
         raise KankanError(Status.USAGE_ERROR, f"seat {seat} is not of type {agent_type}")
+    if seat is not None and is_qa(seat):
+        return acquire_qa(project, agent_type, pids)
     with project_lock(project.paths):
         project.reload_config()
         if seat is not None:
@@ -133,7 +143,7 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
             lease = _occupy(project, name, agent_type, pids)
             if lease is not None:
                 return lease
-        existing = [n for n, sc in project.cfg.seats.items() if sc.type == agent_type]
+        existing = [n for n, sc in project.cfg.work_seats().items() if sc.type == agent_type]
         if len(existing) >= project.cfg.seat_cap:
             raise KankanError(Status.CONFIG_ERROR,
                               f"all {len(existing)} {agent_type} seats are busy and the per-type seat cap is "
@@ -146,7 +156,34 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
         return lease
 
 
-def _occupy(project, seat: str, agent_type: str, pids: Optional[dict]) -> Optional[Lease]:
+def acquire_qa(project, agent_type: str, pids: Optional[dict] = None) -> Lease:
+    """Occupy the Q&A seat ``<type>-qa``, registering it when no Q&A seat exists (spec questions T§2).
+
+    Refuses (config_error, which the supervisor treats as fatal) without an open ``Q&A`` list, and when
+    another type's Q&A seat is the registered one: replacing it is a separate, explicit operation
+    (``qa.replace_seat``). The list is read before the project lock and the recovery comment is posted after
+    it, so the lock hold makes no Trello call and one transaction (questions T§3).
+    """
+    name = qa_seat_name(agent_type)
+    cfg = project.reload_config()
+    info = project.trello.list_info(cfg.qa_list) if cfg.qa_list else None
+    if info is None or info.closed:
+        raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
+    with project_lock(project.paths):
+        cfg = project.reload_config()
+        registered = cfg.qa_seat()
+        if registered is not None and registered != name:
+            raise KankanError(Status.CONFIG_ERROR, messages.QA_SEAT_OTHER.format(seat=name, registered=registered))
+        recovered = project.refs.read(seat_ref(name)) is not None
+        lease = _occupy(project, name, agent_type, pids, comment=False)
+        if lease is None:
+            raise KankanError(Status.CONFIG_ERROR, messages.SEAT_IN_USE.format(seat=name))
+    if recovered:
+        _comment_recovery(project, name, lease.seat_oid)
+    return lease
+
+
+def _occupy(project, seat: str, agent_type: str, pids: Optional[dict], comment: bool = True) -> Optional[Lease]:
     fd = _try_flock(project, seat)
     if fd is None:
         return None
@@ -167,7 +204,8 @@ def _occupy(project, seat: str, agent_type: str, pids: Optional[dict]) -> Option
             raise KankanError(Status.NEEDS_RECONCILIATION, f"seat ref {ref} changed during occupation")
         if current is not None:
             project.log("seat_recovered", seat=seat, old=current.oid, new=oid)
-            _comment_recovery(project, seat, oid)
+            if comment:
+                _comment_recovery(project, seat, oid)
         lease = Lease(seat=seat, type=agent_type, session=session, seat_oid=oid, fd=fd)
         info = {"launcher": os.getpid(), "sid": pane_sid()}
         info.update(pids or {})
@@ -180,7 +218,7 @@ def _occupy(project, seat: str, agent_type: str, pids: Optional[dict]) -> Option
 
 
 def _comment_recovery(project, seat: str, seat_oid: str) -> None:
-    for value in owned_cards(project, seat):
+    for value in owned_cards(project, seat, ("impl", "review", "qa")):
         try:
             project.trello.add_comment(value.meta["card"], messages.SEAT_RECOVERED.format(seat=seat),
                                        f"recover-{seat_oid[:12]}")
@@ -202,6 +240,8 @@ def release(project, lease: Lease, *, retain: bool = False) -> None:
 def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
     """Idempotently find or create the seat's lists, register them and create its worktree."""
     validate_seat(seat)
+    if is_qa(seat):
+        return _ensure_qa_seat(project, seat, agent_type)
     with project_lock(project.paths):
         cfg = project.reload_config()
         existing = cfg.seats.get(seat)
@@ -218,6 +258,23 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
             cfg.seats[seat] = existing
             save_config(project.paths, cfg)
             project.log("seat_created", seat=seat)
+        ensure_worktree(project, seat)
+        return existing
+
+
+def _ensure_qa_seat(project, seat: str, agent_type: str) -> SeatConfig:
+    """Register the Q&A seat (no lists) and create its worktree."""
+    with project_lock(project.paths):
+        cfg = project.reload_config()
+        existing = cfg.seats.get(seat)
+        if existing is None:
+            other = cfg.qa_seat()
+            if other is not None:
+                raise KankanError(Status.CONFIG_ERROR, messages.QA_SEAT_OTHER.format(seat=seat, registered=other))
+            existing = SeatConfig(type=agent_type, role="qa")
+            cfg.seats[seat] = existing
+            save_config(project.paths, cfg)
+            project.log("seat_created", seat=seat, role="qa")
         ensure_worktree(project, seat)
         return existing
 

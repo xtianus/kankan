@@ -530,6 +530,34 @@ def test_ref_deleted_during_download(env, monkeypatch):
     assert not attachments.card_dir(project.paths, card["shortLink"]).exists()
 
 
+def test_qa_ref_deleted_during_download(env, monkeypatch):
+    """A Q&A conversation ends (ref deleted) while ``task`` downloads: ``not_owner``, and the directory goes
+    (``Hold.GONE``)."""
+    from kankan import qa
+    from kankan.adapters import ModelEffort
+    from tests.helpers import add_qa_list
+    project, fake = env
+    qa_list = add_qa_list(project, fake)
+    lease = seats.acquire_qa(project, "claude", None)
+    card = fake.add_card(qa_list, "question")
+    fake.upload(card["id"], "a.txt", CONTENT)
+    task = qa.claim(project, lease, project.trello.card(card["id"]), ModelEffort("sonnet", "high"))
+    qa.start_turn(project, lease, task, qa.Inputs())
+    ctx = agent_ctx(project, lease, monkeypatch)
+    real = TrelloClient.download
+
+    def download(self, *args):
+        size = real(self, *args)
+        value = ctx.project.refs.read(card_ref(card["id"]))
+        assert ctx.project.refs.delete(card_ref(card["id"]), value.oid)
+        return size
+    monkeypatch.setattr(TrelloClient, "download", download)
+    with pytest.raises(KankanError) as err:
+        agentcmds.task(ctx)
+    assert err.value.status == Status.NOT_OWNER
+    assert not attachments.card_dir(project.paths, card["shortLink"]).exists()
+
+
 def test_ref_taken_by_another_seat_during_download(env, monkeypatch):
     """The card passes to another seat while this call downloads: INELIGIBLE, and the directory, whose copies
     the other seat's ``task`` may have returned, survives."""

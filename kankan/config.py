@@ -86,9 +86,10 @@ class Paths:
 @dataclass
 class SeatConfig:
     type: str
-    in_progress: str
-    implemented: str
-    review: str
+    in_progress: str = ""
+    implemented: str = ""
+    review: str = ""
+    role: str = "work"  # "work", or "qa" for the Q&A seat (it has no lists)
 
 
 @dataclass
@@ -128,6 +129,8 @@ class Config:
     settings_list: Optional[str] = None
     settings_poll_seconds: int = 30
     attachment_max_bytes: int = 26214400  # per downloaded card attachment (spec §13.3)
+    qa_list: Optional[str] = None  # the `Q&A` list; missing or archived is never a config_error
+    qa_poll_seconds: int = 30
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
@@ -147,6 +150,8 @@ class Config:
         cfg = cls(**data)
         if isinstance(cfg.settings_poll_seconds, bool) or not isinstance(cfg.settings_poll_seconds, int) or cfg.settings_poll_seconds <= 0:
             raise ValueError("settings_poll_seconds must be a positive integer")
+        if isinstance(cfg.qa_poll_seconds, bool) or not isinstance(cfg.qa_poll_seconds, int) or cfg.qa_poll_seconds <= 0:
+            raise ValueError("qa_poll_seconds must be a positive integer")
         limit = cfg.attachment_max_bytes
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError(f"attachment_max_bytes must be a positive integer, not {limit!r}")
@@ -155,18 +160,31 @@ class Config:
     def seat_lists(self) -> Dict[str, str]:
         """Map every seat list id to the seat name."""
         result = {}
-        for name, seat in self.seats.items():
+        for name, seat in self.work_seats().items():
             for list_id in (seat.in_progress, seat.implemented, seat.review):
                 result[list_id] = name
         return result
 
+    def work_seats(self) -> Dict[str, SeatConfig]:
+        return {name: seat for name, seat in self.seats.items() if seat.role != "qa"}
+
+    def qa_seat(self) -> Optional[str]:
+        """Name of the registered Q&A seat, if any (at most one is registered)."""
+        return next((name for name, seat in self.seats.items() if seat.role == "qa"), None)
+
     def workflow_lists(self) -> Dict[str, str]:
         result = {self.backlog: "Backlog", self.done: "Done", self.blocked: "Blocked"}
-        for name, seat in self.seats.items():
+        for name, seat in self.work_seats().items():
             result[seat.in_progress] = f"{name} · In Progress"
             result[seat.implemented] = f"{name} · Implemented"
             result[seat.review] = f"{name} · Review"
+        if self.qa_list:
+            result[self.qa_list] = "Q&A"
         return result
+
+    def required_lists(self) -> Dict[str, str]:
+        """The workflow lists whose absence is a ``config_error`` (every one except ``Q&A``)."""
+        return {list_id: name for list_id, name in self.workflow_lists().items() if list_id != self.qa_list}
 
 
 def load_config(paths: Paths) -> Config:
@@ -297,8 +315,14 @@ def check_registry(cfg: Config, desc: str) -> None:
 
 
 def check_lists(cfg: Config, lists: dict) -> None:
-    for list_id, name in cfg.workflow_lists().items():
+    for list_id, name in cfg.required_lists().items():
         lst = lists.get(list_id)
         if lst is None or lst.closed:
             raise KankanError(Status.CONFIG_ERROR, f"workflow list {name!r} ({list_id}) is archived or deleted",
                               {"list": list_id})
+
+
+def qa_list_open(cfg: Config, lists: dict) -> bool:
+    """Whether ``qa_list`` is configured and open on the board (``lists``: id -> TList)."""
+    lst = lists.get(cfg.qa_list) if cfg.qa_list else None
+    return lst is not None and not lst.closed

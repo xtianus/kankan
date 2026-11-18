@@ -14,6 +14,7 @@ from kankan.config import Paths, load_config, save_config, write_registry_block
 from kankan.errors import KankanError, Status
 from tests.conftest import git
 from tests.flow import commit
+from tests.helpers import add_questions_seed
 
 
 def by_name(checks):
@@ -424,3 +425,74 @@ def test_missing_seed_still_reports_recorded_effective_values(bound, fakebin):
     checks = by_name(doctor.run(bound.paths.repo, fix=False, online=False))
     assert checks['settings'].status == doctor.MANUAL
     assert 'opus/high' in checks['settings:implementation'].detail
+
+
+def _qa_check(bound, fix):
+    return by_name(doctor.run(bound.paths.repo, fix=fix, online=True))["qa-list"]
+
+
+def test_qa_list_missing_added_or_manual(bound, fake_trello, fakebin):
+    check = _qa_check(bound, fix=False)
+    assert check.status == doctor.MANUAL and not bound.reload_config().qa_list
+    check = _qa_check(bound, fix=True)
+    assert check.status == doctor.FIXED
+    cfg = bound.reload_config()
+    assert fake_trello.state["lists"][cfg.qa_list]["name"] == "Q&A"
+    assert _qa_check(bound, fix=True).status == doctor.OK
+
+
+def test_qa_list_adopts_existing_named_list(bound, fake_trello, fakebin):
+    existing = fake_trello.add_list(bound.cfg.board_id, "Q&A")
+    assert _qa_check(bound, fix=True).status == doctor.FIXED
+    assert bound.reload_config().qa_list == existing["id"]
+
+
+def test_qa_list_archived_unarchived_and_deleted_recreated(bound, fake_trello, fakebin):
+    from tests.helpers import add_qa_list
+    ident = add_qa_list(bound, fake_trello)
+    fake_trello.state["lists"][ident]["closed"] = True
+    assert _qa_check(bound, fix=False).status == doctor.MANUAL
+    assert fake_trello.state["lists"][ident]["closed"]
+    assert _qa_check(bound, fix=True).status == doctor.FIXED
+    assert not fake_trello.state["lists"][ident]["closed"]
+    del fake_trello.state["lists"][ident]
+    assert _qa_check(bound, fix=True).status == doctor.FIXED
+    new = bound.reload_config().qa_list
+    assert new != ident and fake_trello.state["lists"][new]["name"] == "Q&A"
+
+
+def test_lists_check_ignores_qa_list(bound, fake_trello, fakebin):
+    from tests.helpers import add_qa_list
+    ident = add_qa_list(bound, fake_trello)
+    fake_trello.state["lists"][ident]["closed"] = True
+    assert by_name(doctor.run(bound.paths.repo, fix=False, online=True))["lists"].status == doctor.OK
+    fake_trello.state["lists"][bound.cfg.blocked]["closed"] = True
+    check = by_name(doctor.run(bound.paths.repo, fix=False, online=True))["lists"]
+    assert check.status == doctor.MANUAL and "Blocked" in check.detail and "Q&A" not in check.detail
+
+
+def test_doctor_ignores_questions_without_a_qa_seat(bound, fake_trello, fakebin):
+    checks = by_name(doctor.run(bound.paths.repo, fix=True, online=True))
+    assert checks['settings:implementation'].status == doctor.OK
+    assert 'settings:questions' not in checks and 'settings' not in checks
+    names = [c.name for c in bound.trello.settings_cards(bound.reload_config().settings_list).cards]
+    assert names == ['implementation', 'review']
+
+
+def test_doctor_asks_the_questions_seed_with_a_qa_seat(bound, fake_trello, fakebin):
+    from kankan import seats
+    seats.ensure_created(bound, 'claude-qa', 'claude')
+    checks = by_name(doctor.run(bound.paths.repo, fix=True, online=True))
+    assert checks['settings'].status == doctor.MANUAL and 'questions' in checks['settings'].detail
+    assert checks['settings:implementation'].status == doctor.OK
+
+
+def test_doctor_creates_the_questions_card_with_a_qa_seat(bound, fake_trello, fakebin):
+    from kankan import seats
+    seats.ensure_created(bound, 'claude-qa', 'claude')
+    add_questions_seed()
+    checks = by_name(doctor.run(bound.paths.repo, fix=True, online=True))
+    assert checks['settings:questions'].status == doctor.OK
+    cards = {c.name: c for c in bound.trello.settings_cards(bound.reload_config().settings_list).cards}
+    assert sorted(cards) == ['implementation', 'questions', 'review']
+    assert sorted(c.name for c in cards['questions'].checklists) == ['claude', 'codex']

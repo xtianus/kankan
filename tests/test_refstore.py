@@ -132,3 +132,11 @@ def test_blob_refs_survive_gc_and_fsck(git_repo):
     assert result.returncode == 0, result.stderr
     assert store.read(ref).meta["n"] == 2
     assert git(git_repo, "rev-parse", "main") == new
+
+
+def test_seat_name_accepts_qa_only():
+    assert validate_seat("claude-qa") == "claude-qa"
+    for bad in ("claude-q", "claude-qa1", "claude-QA", "claude-qa;x", "-qa", "claude-"):
+        with pytest.raises(KankanError):
+            validate_seat(bad)
+    assert seat_ref("codex-qa") == "refs/agent-seats/codex-qa"

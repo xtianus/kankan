@@ -29,6 +29,11 @@ def conflicts(worktree) -> List[str]:
     return [path for path in out.split("\0") if path]
 
 
+def _refuse_qa(ctx, command: str) -> None:
+    from kankan.agentcmds import refuse_qa
+    refuse_qa(ctx, command)
+
+
 def _review_ref(ctx):
     from kankan.agentcmds import _own_ref
     if ctx.task["kind"] != "review":
@@ -45,6 +50,7 @@ def _resolve_hash(ctx, tested: str) -> str:
 
 def sync(ctx) -> dict:
     """Merge the current main into the review branch (§12.2 step 1)."""
+    _refuse_qa(ctx, "sync")
     value = _review_ref(ctx)
     branch, main = value.meta["branch"], ctx.project.cfg.integration_branch
     if worktrees.merge_in_progress(ctx.worktree):
@@ -107,6 +113,7 @@ def verify(ctx, tested: str) -> dict:
 
     Runs without the project lock; the result is recorded only if nothing changed meanwhile.
     """
+    _refuse_qa(ctx, "verify")
     _review_ref(ctx)
     tested = _resolve_hash(ctx, tested)
     command = ctx.project.cfg.test_command
@@ -192,6 +199,7 @@ def _push(ctx, merge: str) -> None:
 
 def integrate(ctx, tested: str) -> dict:
     """§12.2 step 4: atomic merge of the tested tip into main with a single ref transaction."""
+    _refuse_qa(ctx, "integrate")
     project = ctx.project
     cfg = project.cfg
     repo = project.paths.repo
@@ -438,7 +446,8 @@ def _copy(source: Path, target: Path) -> None:
 
 def block(ctx, reason: str) -> dict:
     """§12.4: with a merge in progress move it to blocked-<short>; then park the card in Blocked."""
-    from kankan.agentcmds import _own_ref, require_clean, signal as send_signal
+    from kankan.agentcmds import signal as send_signal
+    _refuse_qa(ctx, "block")
     project = ctx.project
     with _block_lock(project, ctx.seat):
         result = _block_locked(ctx, reason)

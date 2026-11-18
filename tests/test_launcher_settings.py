@@ -164,3 +164,33 @@ def test_shared_daemon_survives_restart_and_serves_other_seat(git_repo, fake_tre
             procutil.terminate_pids([(child, started)], grace=.2)
         if other:
             seats.release(project, other)
+
+
+def test_work_launcher_ignores_a_changed_questions_pair(kproject, monkeypatch):
+    from types import SimpleNamespace
+    from kankan import boardsettings, modelcheck, seats
+    from kankan.adapters import ModelEffort, load_adapter
+    from kankan.launcher import Launcher
+    seats.ensure_created(kproject, 'claude-qa', 'claude')
+    launcher = Launcher(kproject, load_adapter(kproject.paths, 'claude'), SimpleNamespace(), 'claude')
+    assert launcher.own_roles() == ('implementation', 'review')
+    launcher.state, launcher.running_pair = 'idle', ModelEffort('sonnet', 'high')
+    state = boardconfig.load(kproject.paths)
+    state.settings['questions'] = {'value': {'claude': {'model': 'opus', 'effort': 'high'}}, 'revision': 1}
+    atomic_write_json(kproject.paths.kankan_dir / 'board-settings.json', state.to_dict())
+    probes, versions = [], []
+    monkeypatch.setattr(boardsettings, 'poll', lambda project, adapters: [
+        boardconfig.CheckRequest('questions', 'claude', ModelEffort('opus', 'high'), 1)])
+    monkeypatch.setattr(modelcheck, 'start', lambda adapter, pair: probes.append(pair))
+    monkeypatch.setattr(modelcheck, 'start_version', lambda adapter: versions.append(adapter) or SimpleNamespace(poll=lambda: None, process=None))
+    launcher.version_known.add('claude')
+    launcher.version_due.update({'claude': 1e18, 'codex': 1e18})  # no periodic version poll in this test
+    launcher.settings_step()
+    assert ModelEffort('opus', 'high') not in probes and versions == []
+    assert launcher.assignment_version_pair is None and launcher.versions == {}
+    assert launcher.state == 'idle' and launcher.running_pair == ModelEffort('sonnet', 'high')
+    # Control: the same change for an own role does start a version check for the planned restart.
+    state.settings['implementation'] = {'value': {'claude': {'model': 'opus', 'effort': 'high'}}, 'revision': 1}
+    atomic_write_json(kproject.paths.kankan_dir / 'board-settings.json', state.to_dict())
+    launcher.settings_step()
+    assert launcher.assignment_version_pair is not None and len(versions) == 1

@@ -164,3 +164,67 @@ def test_init_warns_when_the_token_is_a_board_admin(git_repo, env):
     fake.state["boards"][board["id"]]["memberships"] = [{"idMember": fake.me["id"], "memberType": "admin"}]
     _, warnings = run_init(git_repo, board)
     assert any("an admin of this board" in w and "own Trello account" in w for w in warnings)
+
+
+def test_init_creates_qa_list_once(git_repo, env):
+    fake, board = env
+    cfg1, _ = run_init(git_repo, board)
+    assert cfg1.qa_list and fake.state["lists"][cfg1.qa_list]["name"] == "Q&A"
+    cfg2, _ = run_init(git_repo, board)
+    assert cfg2.qa_list == cfg1.qa_list
+    assert len([l for l in fake.state["lists"].values() if l["name"] == "Q&A"]) == 1
+
+
+def test_init_adopts_existing_qa_list_with_its_cards(git_repo, env):
+    fake, board = env
+    qa = fake.add_list(board["id"], "Q&A")
+    card = fake.add_card(qa["id"], "question")
+    asked = []
+    def prompt(question):
+        asked.append(question)
+        return ""
+    cfg, _ = run_init(git_repo, board, prompt=prompt)
+    assert cfg.qa_list == qa["id"] and fake.state["cards"][card["id"]]["idList"] == qa["id"]
+    assert any("'Q&A'" in q and "adopt" in q for q in asked)
+
+
+def test_init_declined_qa_list_creates_another(git_repo, env):
+    fake, board = env
+    qa = fake.add_list(board["id"], "Q&A")
+    cfg, _ = run_init(git_repo, board, prompt=answers("n"))
+    assert cfg.qa_list != qa["id"] and fake.state["lists"][cfg.qa_list]["name"] == "Q&A"
+
+
+def test_init_archived_qa_list_is_not_a_config_error(git_repo, env):
+    fake, board = env
+    cfg, _ = run_init(git_repo, board)
+    fake.state["lists"][cfg.qa_list]["closed"] = True
+    again, _ = run_init(git_repo, board)
+    assert again.qa_list == cfg.qa_list and not fake.state["lists"][cfg.qa_list]["closed"]
+
+
+def test_init_archived_workflow_list_is_still_a_config_error(git_repo, env):
+    fake, board = env
+    cfg, _ = run_init(git_repo, board)
+    fake.state["lists"][cfg.blocked]["closed"] = True
+    with pytest.raises(KankanError) as exc:
+        run_init(git_repo, board)
+    assert exc.value.status == Status.CONFIG_ERROR
+
+
+def test_init_asks_for_the_questions_seed_only_with_a_qa_seat(git_repo, env, monkeypatch):
+    from tests.helpers import add_questions_seed
+    fake, board = env
+    run_init(git_repo, board)
+    # No qa seat: the missing `questions` seed is never asked for.
+    run_init(git_repo, board)
+    project = Project.open(git_repo)
+    seats.ensure_created(project, "claude-qa", "claude")
+    with pytest.raises(KankanError) as error:
+        run_init(git_repo, board)
+    assert error.value.status == Status.NEEDS_ACTION and "questions" in error.value.message
+    add_questions_seed()
+    run_init(git_repo, board)
+    cfg = load_config(Paths.discover(git_repo))
+    names = [c["name"] for c in fake.state["cards"].values() if c["idList"] == cfg.settings_list]
+    assert "questions" in names

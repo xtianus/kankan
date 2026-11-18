@@ -150,3 +150,116 @@ def test_done_card_keeps_hold(setup):
         fake.user_label(card.id, label)
     clear_kankan_labels(project, project.trello.card(card.id))
     assert fake.state["cards"][card.id]["idLabels"] == [project.cfg.label_hold]
+
+
+# ---------------------------------------------------------------------- Q&A (questions T§3)
+from kankan import qa  # noqa: E402
+from tests.helpers import add_qa_list, put_card_ref  # noqa: E402
+
+CONV = "0123456789abcdef"
+
+
+@pytest.fixture
+def qa_setup(setup):
+    project, fake, lease, card = setup
+    qa_list = add_qa_list(project, fake)
+    fake.user_move(card.id, qa_list)
+    return project, fake, lease, project.trello.card(card.id), qa_list
+
+
+def test_target_list_for_qa_and_handoff(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    assert cards.Phase.QA.value == "qa"
+    assert target_list_for(project.cfg, "qa", "claude-qa", None) == qa_list
+    assert target_list_for(project.cfg, "parked", None, None, cause="handoff") == project.cfg.backlog
+
+
+def test_card_meta_carries_qa_fields():
+    meta = CardMeta.from_dict({"phase": "qa", "card": "a" * 24, "short": "abcdefgh", "conversation": CONV,
+                               "covered": {"comment": "c1", "attachments": ["a1"]}, "handoff": ["h1"],
+                               "pos": "bottom"})
+    data = meta.evolve(owner="codex-qa").to_dict()
+    assert data["conversation"] == CONV and data["covered"] == {"comment": "c1", "attachments": ["a1"]}
+    assert data["handoff"] == ["h1"] and data["pos"] == "bottom"
+
+
+@pytest.mark.parametrize("where", ["done", "archived", "deleted", "qa"])
+def test_converge_never_moves_or_reports_qa_ref(qa_setup, where):
+    project, fake, lease, card, qa_list = qa_setup
+    value = put_card_ref(project, card.id, card.short, phase="qa", owner="claude-qa", target_list=qa_list,
+                         from_list=project.cfg.backlog, conversation=CONV)
+    if where == "done":
+        fake.user_move(card.id, project.cfg.done)
+    elif where == "archived":
+        fake.user_archive(card.id)
+    elif where == "deleted":
+        fake.user_delete(card.id)
+    else:
+        fake.user_move(card.id, project.cfg.backlog)  # its from_list: still never moved
+    assert converge(project, lease) == []
+    assert project.refs.read(card_ref(card.id)).oid == value.oid
+    if where in ("done", "qa"):
+        assert fake.card_list(card.id) == (project.cfg.done if where == "done" else project.cfg.backlog)
+
+
+def _handoff_ref(project, card, qa_list):
+    return put_card_ref(project, card.id, card.short, phase="parked", cause="handoff",
+                        target_list=project.cfg.backlog, from_list=qa_list, pos="bottom", handoff=["h1", "h2"],
+                        conversation=CONV)
+
+
+def test_converge_moves_parked_handoff_to_bottom_and_confirms(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    other = fake.add_card(project.cfg.backlog, "already there")
+    _handoff_ref(project, card, qa_list)
+    assert converge(project, lease) == [f"moved:{card.id}"]
+    assert fake.card_list(card.id) == project.cfg.backlog
+    assert fake.state["cards"][card.id]["pos"] > fake.state["cards"][other["id"]]["pos"]
+    meta = project.refs.read(card_ref(card.id)).meta
+    assert "from_list" not in meta and "pos" not in meta
+    assert meta["handoff"] == ["h1", "h2"] and meta["conversation"] == CONV and meta["cause"] == "handoff"
+    fake.user_move(card.id, qa_list)
+    assert converge(project, lease) == [f"human_moved:{card.id}"]  # a later user move is never replayed
+    assert fake.card_list(card.id) == qa_list
+
+
+def test_converge_does_not_move_handoff_card_the_user_moved(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    value = _handoff_ref(project, card, qa_list)
+    fake.user_move(card.id, project.cfg.done)
+    assert converge(project, lease) == [f"human_moved:{card.id}"]
+    assert fake.card_list(card.id) == project.cfg.done
+    assert project.refs.read(card_ref(card.id)).oid == value.oid
+
+
+def test_converge_ref_single_step(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    value = _handoff_ref(project, card, qa_list)
+    ref = card_ref(card.id)
+    assert cards.converge_ref(project, lease, ref, value, project.trello.card(card.id)) == f"moved:{card.id}"
+    assert fake.card_list(card.id) == project.cfg.backlog
+    value = project.refs.read(ref)
+    assert cards.converge_ref(project, lease, ref, value, project.trello.card(card.id)) is None
+    qa_value = put_card_ref(project, "f" * 24, "zzzzzzzz", phase="qa", owner="claude-qa", target_list=qa_list,
+                            conversation=CONV)
+    assert cards.converge_ref(project, lease, card_ref("f" * 24), qa_value, None) is None
+
+
+def test_delete_integrated_ref_discards_conversation_dir(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    fake.user_move(card.id, project.cfg.done)
+    value = put_card_ref(project, card.id, card.short, phase="integrated", target_list=project.cfg.done,
+                         merge="a" * 40, conversation=CONV, handoff=["h1"])
+    directory = qa.conversation_dir(project.paths, CONV)
+    directory.mkdir(parents=True)
+    (directory / "turn.json").write_text("{}")
+    assert cards.delete_integrated_ref(project, card_ref(card.id), value)
+    assert not directory.exists()
+
+
+def test_recovery_comment_covers_qa_refs(qa_setup):
+    project, fake, lease, card, qa_list = qa_setup
+    put_card_ref(project, card.id, card.short, phase="qa", owner="claude-qa", target_list=qa_list,
+                 conversation=CONV)
+    seats._comment_recovery(project, "claude-qa", "c" * 40)
+    assert any("claude-qa" in text for text in fake.card_comments(card.id))

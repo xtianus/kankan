@@ -20,6 +20,9 @@ INSTRUCTIONS = {
                "`kankan note`, then `kankan sync`, run the tests, `kankan verify --tested <hash>`, "
                "`kankan integrate --tested <hash>` and finally `kankan done`."),
     "hold_wip": "The card is on HOLD: commit your work in progress (WIP commit) and run `kankan yield --json`.",
+    "qa": ("Answer the newest unanswered user input with `kankan answer --turn <turn>`; never commit or change files; "
+           "hand a request to change the code over with `kankan handoff --turn <turn>` (ask for confirmation first "
+           "when it is ambiguous)."),
 }
 
 SUSPEND_REQUEST = ("kankan: the card of your current task must be suspended. Commit your work in progress "
@@ -70,7 +73,7 @@ ADMIN_RELEASED = "kankan: an administrator released this card (`kankan release -
 ADMIN_SEAT_RECOVERED = "kankan: an administrator recovered seat {seat} (`kankan seat recover`); the seat keeps this card."
 
 # Board settings and model selection.
-SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set seeds for both roles in ~/.config/kankan/agents.json.'
+SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set the {type} {role} seed in ~/.config/kankan/agents.json.'
 SEEDS_INVALID = 'Invalid {type} {role} seed; choose one of the adapter model/effort combinations.'
 SEEDS_QUESTION = 'Choose the {type} {role} model and effort (one key):'
 SEEDS_STALE = 'The saved {type} {role} seed {model} · {effort} is no longer in the agent\'s model list: choose another.'
@@ -85,6 +88,30 @@ SETTINGS_HELP = 'Tick exactly one model · effort per agent checklist. Changes a
 SETTINGS_CREATED = '{role}: {values} ({source}; change seeds in agents.json, or tick other items on the card)'
 SETTINGS_MISSING_LIST = 'The settings list is missing or archived; last valid settings stay in force. Run `kankan doctor`.'
 
+SEAT_IN_USE = 'seat {seat} is in use or unavailable'
+SEAT_NOT_HELD = 'seat {seat} is no longer held by this session'
+INTEGRATION_BRANCH_MISSING = 'integration branch {branch} not found'
+UP_ARG = 'expected <type>=<n> with type claude or codex, got {item!r}'
+UP_NOTHING = 'nothing to start: give e.g. claude=2 codex=1 qa=claude'
+UP_NOT_STARTED = 'the {what} agent started in tmux session {session} did not occupy a seat within {seconds} s; attach to it to see why'
+QA_INVALID_CONVERSATION = 'invalid conversation ID {conversation!r}'
+QA_NO_ROOM = 'the mention or the marker leaves no room for the text'
+QA_LIST_MISSING = 'The Q&A list is missing or archived; the Q&A seat does not run. Run `kankan doctor`.'
+QA_LIST_UNAVAILABLE = 'The Q&A list is missing or archived: run `kankan doctor` (or `kankan init`) to restore it.'
+QA_SEAT_OTHER = 'cannot start {seat}: the Q&A seat {registered} is registered (`kankan seat remove {registered}` frees it).'
+QA_REPLACE_RUNNING = 'cannot replace the Q&A seat {old} by {new}: {old} is {state}; stop it first (`kankan stop {old}`, or `kankan seat recover {old} --kill` when it is stuck)'
+QA_REPLACE_RACE = 'the Q&A seat {old} changed during its replacement; run the command again'
+QA_OWNER_UNREGISTERED = 'seat {owner} holds this Q&A conversation but is not registered (an unfinished Q&A seat replacement): start the Q&A seat (`kankan agent <type> --qa` or `kankan up qa=<type>`) to take the conversation over'
+UNKNOWN_SEAT = 'unknown seat {seat}'
+SEAT_HOLDS_CARDS = 'it holds cards: {cards}'
+SEAT_REMOVE_BLOCKED = 'cannot remove {seat}: {blockers}'
+QA_SEAT_REMOVE_RUNNING = 'cannot remove {seat}: the seat is {state}; stop it first (`kankan stop {seat}`)'
+QA_CARDS_WAIT = 'Q&A cards wait: no Q&A seat is running; start one with `kankan agent <type> --qa` or `kankan up qa=<type>`.'
+QA_SEAT_ARG = '--qa starts seat {seat}, not {given}'
+QA_ARG = 'expected qa=<type> with type claude or codex, given once, got {item!r}'
+STATUS_QA = 'Q&A seat: {seat} ({liveness}, {state}); active card: {card}; queue: {queue}'
+STATUS_QA_NONE = 'Q&A seat: none; queue: {queue}'
+
 SETTINGS_PROBE_FAILED = '{type} `{pair}` was rejected: {message}'
 
 CLAIM_SELECTION = ' {role} with {type} `{model}/{effort}`.'
@@ -94,3 +121,37 @@ MODEL_START_UNAVAILABLE = 'Cannot start agent: {reason}'
 STATUS_SETTINGS = 'Settings:'
 STATUS_SETTING = '  {role}: {values}{error}'
 STATUS_RUNNING = ' (running {model}/{effort})'
+QA_ENDED = 'the Q&A conversation on card {short} has ended (the card left Q&A, was archived or deleted, got HOLD, or another seat took it over)'
+QA_STALE_TURN = 'turn {turn} is not the current turn of this conversation (a newer turn started): run `kankan task --json` again and answer with its turn'
+QA_DIRTY = 'the checkout has uncommitted changes; the Q&A agent never changes files: remove them, then answer again: {files}'
+QA_HEAD_MOVED = 'the checkout is not at the commit it was reset to: restore it with `git checkout --detach {base}`, then answer again'
+QA_PENDING_OTHER = 'another {kind} of this turn is still being posted: repeat that command to finish it'
+QA_ALREADY_POSTED = 'this turn already has a different {kind}: wait for the next turn'
+QA_EMPTY = 'the text is empty'
+QA_LOCK_TIMEOUT = 'timed out waiting for the conversation lock ({path}): another command of this conversation is running'
+QA_COMMITTED = 'kankan: {seat} made a commit in its checkout during this Q&A conversation, against its rule (the Q&A agent never commits); the answer was posted, but the checkout needs a look.'
+QA_COMMITTED_HANDOFF = 'kankan: {seat} made a commit in its checkout during this Q&A conversation, against its rule (the Q&A agent never commits); the handoff summary was posted and the card handed over, but the Q&A checkout needs a look (the commit is not part of the handoff).'
+QA_REFUSED = '`kankan {command}` is not used in a Q&A task: reply with `kankan answer --turn <turn>`, hand a code change over with `kankan handoff --turn <turn>`, or report what the user must fix with `kankan fail`'
+QA_ONLY = '`kankan {command}` is for Q&A tasks only'
+QA_ANSWER_DONE = 'answer posted; wait for the user'
+QA_HANDOFF_DONE = 'card handed over for implementation'
+QA_TEXT_ARGS = 'give the text either as an argument or with --file <path>, not both'
+QA_TEXT_FILE = 'cannot read {path}: {error}'
+
+# Q&A launcher prompts (questions T§4–T§5): the comment texts are never pasted, the agent reads them with `task`.
+QA_PROMPT = ("Run the current kankan task (kankan skill): a question on a Q&A card, turn `{turn}`. Read it with "
+             "`kankan task --json` and reply with `kankan answer --turn {turn}`.")
+QA_FOLLOWUP = ("New on the Q&A card: {counts} — turn `{turn}`: run `kankan task --json` and reply with "
+               "`kankan answer --turn {turn}`.")
+QA_RESTART = ("Run the current kankan task (kankan skill): this Q&A conversation continues after a restart, turn "
+              "`{turn}`. Read the whole thread with `kankan task --json`, then continue: reply with "
+              "`kankan answer --turn {turn}`.")
+QA_RESTART_FOLLOWUP = ("Run the current kankan task (kankan skill): this Q&A conversation continues after a restart. "
+                       "New on the Q&A card: {counts} — turn `{turn}`: read the whole thread with "
+                       "`kankan task --json`, then reply with `kankan answer --turn {turn}`.")
+QA_COUNT_COMMENTS = ("{n} comment", "{n} comments")
+QA_COUNT_ATTACHMENTS = ("{n} attachment ({names})", "{n} attachments ({names})")
+QA_SUSPEND = ("kankan: this Q&A conversation has ended (the card left Q&A, was archived or deleted, or got HOLD). "
+              "Post nothing more and run `kankan yield --json`.")
+QA_NO_SIGNAL = ("kankan: agent stopped without a signal (no answer/handoff/fail/yield); it needs a look. "
+                "A new comment wakes it up.")

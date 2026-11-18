@@ -392,3 +392,77 @@ def test_settings_missing_or_bad_server_date(fake_trello):
     assert client.settings_cards(lst['id']).response_date is None
     fake_trello.response_date = None
     assert client.snapshot(board['id']).response_date is None
+
+
+# ---------------------------------------------------------------------- Q&A capabilities
+
+
+ATTACHMENT_FIELD_NAMES = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,date"
+
+
+def test_card_read_returns_attachment_fields(fake, board, virtual_time):
+    card = board[2]
+    upload = fake.upload(card["id"], "notes.txt", b"hello", "text/plain")
+    trello = client(fake)
+    read = trello.card(card["id"])
+    assert read.attachments == ["https://trello.com/c/Zz12Zz12/9-dep", upload["url"]]
+    link, got = read.attachment_items
+    assert got.id == upload["id"] and got.name == "notes.txt" and got.file_name == "notes.txt"
+    assert got.url == upload["url"] and got.bytes == 5 and got.mime_type == "text/plain"
+    assert got.member_id == fake.owner["id"] and got.is_upload is True and got.date == upload["date"] != ""
+    assert not link.is_upload and link.url == "https://trello.com/c/Zz12Zz12/9-dep"
+    assert trello.snapshot(board[0]["id"]).cards[card["id"]].attachment_items == []
+
+
+def test_attachments_include_date(fake, board, virtual_time):
+    card = board[2]
+    upload = fake.upload(card["id"], "notes.txt", b"hello")
+    found = client(fake).attachments(card["id"])
+    assert all(a.date for a in found)
+    assert found[-1].date == upload["date"]
+    assert trello_mod.ATTACHMENT_FIELDS.endswith(",date")
+    assert trello_mod._attachment({"id": "x"}).date == ""
+
+
+def test_move_card_bottom(fake, board, virtual_time):
+    b, backlog, card = board
+    done = fake.add_list(b["id"], "Done")
+    first = fake.add_card(done["id"], "a")
+    second = fake.add_card(done["id"], "b")
+    before = fake.request_count
+    moved = client(fake).move_card(card["id"], done["id"], "bottom")
+    assert moved.list_id == done["id"]
+    assert fake.request_count == before + 2  # the move and the verification read
+    assert fake.requests[-1][0] == "GET" and fake.requests[-1][1] == f"/1/cards/{card['id']}"
+    cards = sorted((c for c in fake.state["cards"].values() if c["idList"] == done["id"]), key=lambda c: c["pos"])
+    assert [c["id"] for c in cards] == [first["id"], second["id"], card["id"]]
+
+
+def test_move_card_default_top_unchanged(fake, board, virtual_time):
+    b, backlog, card = board
+    done = fake.add_list(b["id"], "Done")
+    first = fake.add_card(done["id"], "a")
+    client(fake).move_card(card["id"], done["id"])
+    cards = sorted((c for c in fake.state["cards"].values() if c["idList"] == done["id"]), key=lambda c: c["pos"])
+    assert [c["id"] for c in cards] == [card["id"], first["id"]]
+
+
+def test_comment_text_matches_posted_text(fake, board, virtual_time):
+    card = board[2]
+    text = "1/2 hello"
+    posted = client(fake).add_comment(card["id"], text, "op-1")
+    assert posted.text == trello_mod.comment_text(text, "op-1") == f"{text}\n\n{trello_mod.marker('op-1')}"
+    assert fake.card_comments(card["id"])[-1] == trello_mod.comment_text(text, "op-1")
+
+
+def test_fake_rejects_long_comment(fake, board, virtual_time):
+    card = board[2]
+    trello = client(fake)
+    assert trello_mod.COMMENT_MAX == 16384
+    op = "op-long"
+    fits = "x" * (trello_mod.COMMENT_MAX - len(trello_mod.comment_text("", op)))
+    trello.add_comment(card["id"], fits, op)
+    assert len(fake.card_comments(card["id"])[-1]) == 16384
+    with pytest.raises(KankanError) as exc:
+        trello.add_comment(card["id"], fits + "x", "op-long2")
+    assert exc.value.status == Status.TRELLO_ERROR

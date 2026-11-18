@@ -65,3 +65,91 @@ def test_status_reports_settings_without_writes(kproject, fake_trello):
     assert data['settings_warning']
     after = {str(p): p.read_bytes() for p in kproject.paths.kankan_dir.rglob('*') if p.is_file()}
     assert before == after
+
+
+def test_status_sorts_qa_seat_and_warns_only_when_relevant(kproject, fake_trello):
+    from kankan import messages
+    from tests.helpers import add_qa_list
+    held = [seats.acquire(kproject, "claude"), seats.acquire(kproject, "claude")]
+    assert diag.status(kproject)["qa"] is None  # no Q&A seat, no qa_list
+    seats.ensure_created(kproject, "claude-qa", "claude")
+    data = diag.status(kproject)
+    assert [row["seat"] for row in data["seats"]] == ["claude-1", "claude-2", "claude-qa"]
+    assert data["qa"]["warning"] == messages.QA_LIST_MISSING
+    assert messages.QA_LIST_MISSING in diag.status_text(data)
+    ident = add_qa_list(kproject, fake_trello)
+    assert diag.status(kproject)["qa"]["warning"] is None
+    fake_trello.state["lists"][ident]["closed"] = True
+    assert diag.status(kproject)["qa"]["warning"] == messages.QA_LIST_MISSING
+
+
+def test_status_warns_for_configured_missing_qa_list_without_seat(kproject, fake_trello):
+    from kankan import messages
+    from tests.helpers import add_qa_list
+    ident = add_qa_list(kproject, fake_trello)
+    assert diag.status(kproject)["qa"]["warning"] is None
+    fake_trello.state["lists"][ident]["closed"] = True
+    assert diag.status(kproject)["qa"]["warning"] == messages.QA_LIST_MISSING
+
+
+def test_status_shows_the_qa_seat_its_active_card_and_the_queue(kproject, fake_trello, capsys, monkeypatch):
+    from kankan import messages, qa
+    from kankan.adapters import ModelEffort
+    from tests.helpers import add_qa_list
+    project, fake = kproject, fake_trello
+    qa_list = add_qa_list(project, fake)
+    lease = seats.acquire_qa(project, "claude", None)
+    active = fake.add_card(qa_list, "Active question")
+    task = qa.claim(project, lease, project.trello.card(active["id"]), ModelEffort("sonnet", "high"))
+    turn = qa.start_turn(project, lease, task, qa.Inputs([], []))
+    fake.add_card(qa_list, "Second question")
+    fake.add_card(qa_list, "Third question")
+    data = diag.status(project)
+    assert data["qa"] == {"seat": "claude-qa", "liveness": "alive", "launcher_state": "stopped", "card": active["id"],
+                          "short": active["shortLink"], "turn": turn, "queue": 2, "warning": None}
+    text = diag.status_text(data)
+    assert messages.STATUS_QA.format(seat="claude-qa", liveness="alive", state="stopped", card=active["shortLink"],
+                                     queue=2) in text
+    monkeypatch.chdir(project.paths.repo)
+    code, out = run(capsys, "status", "--json")
+    assert json.loads(out)["data"]["qa"]["card"] == active["id"]
+    # the seat stops: its conversation is kept, and the cards of Q&A wait
+    seats.release(project, lease)
+    data = diag.status(project)
+    assert data["qa"]["liveness"] == "free" and data["qa"]["card"] == active["id"]
+    assert data["qa"]["warning"] == messages.QA_CARDS_WAIT
+    assert messages.QA_CARDS_WAIT in diag.status_text(data)
+    # the Q&A list archived: the missing-list warning prevails
+    fake.state["lists"][qa_list]["closed"] = True
+    assert diag.status(project)["qa"]["warning"] == messages.QA_LIST_MISSING
+
+
+def test_status_without_a_qa_seat_warns_that_qa_cards_wait(kproject, fake_trello):
+    from kankan import messages
+    from tests.helpers import add_qa_list
+    project, fake = kproject, fake_trello
+    assert diag.status(project)["qa"] is None  # the feature is not configured
+    qa_list = add_qa_list(project, fake)
+    data = diag.status(project)
+    assert data["qa"]["seat"] is None and data["qa"]["queue"] == 0 and data["qa"]["warning"] is None
+    fake.add_card(qa_list, "question")
+    data = diag.status(project)
+    assert data["qa"]["queue"] == 1 and data["qa"]["warning"] == messages.QA_CARDS_WAIT
+    assert messages.STATUS_QA_NONE.format(queue=1) in diag.status_text(data)
+
+
+def test_status_with_only_a_qa_seat_alive_keeps_the_work_reasons(kproject, fake_trello):
+    from tests.flow import implement
+    from tests.helpers import add_qa_list
+    project, fake = kproject, fake_trello
+    add_qa_list(project, fake)
+    claude = seats.acquire(project, "claude")
+    card = implement(project, fake, claude)
+    assert {row["card"]: row["reason"] for row in diag.status(project)["waiting"]}[card["id"]] == "no_reviewer_type"
+    seats.release(project, claude)
+    qa_lease = seats.acquire_qa(project, "codex", None)  # a codex Q&A seat is no codex reviewer
+    try:
+        reasons = {row["card"]: row["reason"] for row in diag.status(project)["waiting"]}
+    finally:
+        seats.release(project, qa_lease)
+    assert reasons[card["id"]] == "no_reviewer_type"

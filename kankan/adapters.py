@@ -22,6 +22,10 @@ _URL = re.compile(r"https?://\S*")
 _FLAGS = re.I | re.M
 
 
+WORK_ROLES = ("implementation", "review")
+ROLES = WORK_ROLES + ("questions",)
+
+
 @dataclass(frozen=True)
 class ModelEffort:
     model: str
@@ -184,11 +188,11 @@ def load_adapter(paths, agent_type: str, *, read_only: bool = False) -> Adapter:
         if from_catalog:
             # The account or CLI can drop a seeded pair: it then counts as a missing seed, never a config error.
             for role, value in list(adapter.seed.items()):
-                if role in ("implementation", "review") and isinstance(value, dict) and set(value) == {"model", "effort"} \
+                if role in ROLES and isinstance(value, dict) and set(value) == {"model", "effort"} \
                         and all(isinstance(v, str) for v in value.values()) and ModelEffort(**value) not in pairs:
                     adapter.stale_seeds[role] = adapter.seed.pop(role)
         for role, value in adapter.seed.items():
-            if role not in ("implementation", "review") or not isinstance(value, dict) or ModelEffort(**value) not in pairs:
+            if role not in ROLES or not isinstance(value, dict) or ModelEffort(**value) not in pairs:
                 raise ValueError(f"invalid seed for {role}; allowed: {', '.join(p.name for p in pairs)}")
         _template(adapter.model_args, {"model"}, ["model"])
         _template(adapter.effort_args, {"effort"}, ["effort"])

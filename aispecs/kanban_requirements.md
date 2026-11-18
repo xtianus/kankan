@@ -45,7 +45,7 @@ Requirement levels:
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
 | L1 | MUST | Create a list with a given name on a board. Used by `init` (Backlog, Done, Blocked), by automatic seat creation (three lists per seat) and by `init` and `doctor` for the `kankan` settings list ([board settings §2](boardsettings_spec_functional.md#2-board-settings)). Existing lists with the same name are found through the B3 read and adopted (after confirmation in `init`). After a failed creation the lists are read again to find one that the call itself created; when the user declined to adopt an existing list, the lists that existed before the call are never taken for it. | `POST /1/lists` (`name`, `idBoard`, `pos`) |
-| L2 | MUST | Archive or unarchive a list. Used by `seat remove` and by test cleanup. | `PUT /1/lists/{id}/closed` |
+| L2 | MUST | Archive or unarchive a list. Used by `seat remove` and by test cleanup; `init` and `doctor` unarchive an archived `Q&A` list. | `PUT /1/lists/{id}/closed` |
 | L3 | MUST | Detect that a configured list was archived or deleted. | `GET /1/lists/{id}` (`closed`, or 404) |
 | L4 | MUST | Unlimited, or at least several dozen, lists per board, and lists created by humans that kankan ignores. | — |
 | L5 | MUST | Ordered cards within a list, readable as a position value. kankan treats the top card of Backlog as highest priority. | card `pos` field |
@@ -55,9 +55,9 @@ Requirement levels:
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| C1 | MUST | Read one card by ID with list, labels, attachments, title, description, URL, archived state and last activity. Used for the reread after a claim and for verification after every move. | `GET /1/cards/{id}?attachments=true` |
+| C1 | MUST | Read one card by ID with list, labels, attachments, title, description, URL, archived state and last activity. The attachments carry ID, name, file name, URL, size, MIME type, the member who added them, the upload flag and the creation date (`date`); the Q&A seat uses them to detect follow-up attachments. Used for the reread after a claim and for verification after every move. | `GET /1/cards/{id}?attachments=true&attachment_fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,date` |
 | C2 | MUST | Resolve a card from a short, URL-safe, globally unique code that is stable across board moves. kankan puts this code in branch names. | `shortLink`; `GET /1/cards/{shortLink}` |
-| C3 | MUST | Move a card to another list of the same board and place it at the top. kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top`) then `GET /1/cards/{id}` |
+| C3 | MUST | Move a card to another list of the same board and place it at the top, or at the bottom (the Q&A `handoff` moves the card to the bottom of `Backlog`). kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top` or `pos=bottom`) then `GET /1/cards/{id}` |
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
 | C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; `init` and `doctor` create the setting cards of the `kankan` list ([board settings §2](boardsettings_spec_functional.md#2-board-settings)). Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
@@ -78,8 +78,8 @@ Requirement levels:
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| M1 | MUST | Add a plain-text or Markdown comment to a card. | `POST /1/cards/{id}/actions/comments` |
-| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp), with pagination. Used to forward the user's answers to a waiting agent and to find kankan's own comment (by its `kankan:<op-id>` marker) after a comment post timed out. | `GET /1/cards/{id}/actions?filter=commentCard&since=<action id>&before=<action id>&limit=50` |
+| M1 | MUST | Add a plain-text or Markdown comment to a card. A comment has a maximum length (Trello: 16 384 characters, longer texts are rejected with HTTP 400); kankan splits longer texts into several comments. | `POST /1/cards/{id}/actions/comments` |
+| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp), with pagination. Used to forward the user's answers to a waiting agent, to find kankan's own comment (by its `kankan:<op-id>` marker) after a comment post timed out, and by `kankan task` to give the agent of a Q&A or implementation task the card's whole comment thread (and the handoff summary). | `GET /1/cards/{id}/actions?filter=commentCard&since=<action id>&before=<action id>&limit=50` |
 | M3 | MUST | Mentioning a user in a comment (e.g. `@username`) sends that user a notification (app, push or email). This is how kankan alerts the user about Question, Error and Blocked. | Trello `@mention` behaviour |
 | M4 | SHOULD | React to a comment or reply to it, to acknowledge that a comment was forwarded. Workaround: post a new comment. | `POST /1/actions/{id}/reactions` |
 | M5 | MUST | Identify the authenticated user (ID and username). | `GET /1/members/me` |
@@ -101,7 +101,7 @@ Files and links the user attaches to a card are task inputs for the agent ([spec
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
 | F1 | SHOULD | A user can attach files and links to a card from the UI. Without it, the user puts text in the description or links it there. | Trello "Add > Attachment" (computer upload or link); live test suite only: `POST /1/cards/{id}/attachments` (multipart `file`, or `url` + `name`) |
-| F2 | SHOULD | List a card's attachments with ID, name, file name (stable when the attachment is renamed), URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link. kankan passes to the agent only attachments added by board members other than its own account. | `GET /1/cards/{id}/attachments?fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos`, plus [B6](#3-boards) for membership |
+| F2 | SHOULD | List a card's attachments with ID, name, file name (stable when the attachment is renamed), URL, size, MIME type, the member who added it, and whether it is an uploaded file or a link, and its creation date. kankan passes to the agent only attachments added by board members other than its own account. | `GET /1/cards/{id}/attachments?fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos,date`, plus [B6](#3-boards) for membership |
 | F3 | SHOULD | Download the content of an uploaded file with the API credential, from a URL on the API host, without sending the credential to another host. Without it, the agent sees only the attachments' names and URLs. | `GET /1/cards/{id}/attachments/{idAttachment}/download/{fileName}` on the API host with the `Authorization` header. The path is taken from the attachment's `url` after validation; a redirect to another origin is followed without the credential, https only, and no later hop carries the credential, even back on the API host. |
 
 ## 10. Authentication bootstrap

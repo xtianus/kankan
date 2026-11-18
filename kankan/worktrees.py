@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from kankan import clock, gitutil
 from kankan.errors import KankanError, Status
@@ -106,3 +106,19 @@ def main_checked_out(repo, main: str) -> List[Path]:
 
 def commits_ahead(repo, branch: str, main: str) -> int:
     return int(gitutil.out(repo, ["rev-list", "--count", f"{main}..{branch}"]))
+
+
+def reflog_length(worktree) -> int:
+    """The number of entries in the worktree's own ``HEAD`` reflog (0 when it has none)."""
+    proc = gitutil.run(worktree, ["reflog", "show", "--format=%H", "HEAD"], check=False)
+    return len([line for line in proc.stdout.splitlines() if line]) if proc.returncode == 0 else 0
+
+
+def reset_detached(worktree, commit: str) -> Tuple[str, int]:
+    """Discard everything in a worktree that holds no user work (the Q&A seat's, questions T§2): reset tracked
+    files, remove untracked and ignored files, and detach ``HEAD`` at ``commit``. Returns the commit and the
+    length of the ``HEAD`` reflog afterwards."""
+    gitutil.run(worktree, ["reset", "-q", "--hard"])
+    gitutil.run(worktree, ["clean", "-q", "-ffdx"])  # -ff: also nested repositories
+    gitutil.run(worktree, ["checkout", "-q", "--detach", commit])
+    return gitutil.out(worktree, ["rev-parse", "HEAD"]), reflog_length(worktree)

@@ -128,3 +128,88 @@ def test_waiting_reasons_hold(board):
     fake.user_label(held["id"], project.cfg.label_hold)
     snap = project.trello.snapshot(project.cfg.board_id)
     assert workflow.waiting_reasons(project, snap, {}, types=set()) == {held["id"]: "hold"}
+
+
+# ---------------------------------------------------------------------- Q&A (questions T§2, T§3, T§7)
+from kankan import qa  # noqa: E402
+from kankan.config import project_lock  # noqa: E402
+from tests.helpers import add_qa_list, put_card_ref  # noqa: E402
+
+CONV = "0123456789abcdef"
+
+
+def test_choose_ignores_qa_refs_and_qa_cards(board):
+    project, fake = board
+    qa_list = add_qa_list(project, fake)
+    lease = seats.acquire(project, "claude")
+    project.reload_config()
+    add(fake, project, "question", qa_list, pos=1)
+    moved = add(fake, project, "qa ref in Backlog", pos=1)
+    put_card_ref(project, moved["id"], moved["shortLink"], phase="qa", owner=lease.seat, target_list=qa_list,
+                 conversation=CONV)
+    free = add(fake, project, "free", pos=5)
+    snap = project.trello.snapshot(project.cfg.board_id)
+    choice = workflow.choose(project, lease, snap, workflow.card_refs(project))
+    assert choice.card.id == free["id"] and choice.kind == "impl"
+    assert workflow.choose(project, lease, snap, workflow.card_refs(project), skip={free["id"]}) is None
+
+
+def test_waiting_reasons_qa_cards(board):
+    project, fake = board
+    qa_list = add_qa_list(project, fake)
+    held = add(fake, project, "held", qa_list, pos=1)
+    fake.user_label(held["id"], project.cfg.label_hold)
+    implemented = add(fake, project, "implementing", qa_list, pos=2)
+    put_card_ref(project, implemented["id"], implemented["shortLink"], phase="implemented",
+                 implementer="claude-1", implementer_type="claude", target_list=project.cfg.backlog)
+    plain = add(fake, project, "plain", qa_list, pos=3)
+    active = add(fake, project, "active", qa_list, pos=4)
+    put_card_ref(project, active["id"], active["shortLink"], phase="qa", owner="claude-qa", target_list=qa_list,
+                 conversation=CONV)
+    snap = project.trello.snapshot(project.cfg.board_id)
+    refs = workflow.card_refs(project)
+    assert workflow.waiting_reasons(project, snap, refs, types=set()) == {
+        held["id"]: "hold", implemented["id"]: "ineligible_phase", plain["id"]: "no_qa_seat",
+        active["id"]: "no_qa_seat"}
+    seats.acquire_qa(project, "claude", None)
+    project.reload_config()
+    assert workflow.waiting_reasons(project, snap, refs, types=set()) == {
+        held["id"]: "hold", implemented["id"]: "ineligible_phase"}
+
+
+def _handoff_card(project, fake):
+    qa_list = add_qa_list(project, fake)
+    card = add(fake, project, "handed off")
+    put_card_ref(project, card["id"], card["shortLink"], phase="parked", cause="handoff",
+                 target_list=project.cfg.backlog, handoff=["h1", "h2"], conversation=CONV)
+    with project_lock(project.paths):
+        qa.record_add(project.paths, card["id"])
+    return qa_list, card
+
+
+def test_claim_impl_from_handoff_copies_handoff_and_conversation(board):
+    project, fake = board
+    _, card = _handoff_card(project, fake)
+    lease = seats.acquire(project, "claude")
+    task = workflow.tick(project, lease)
+    assert task["card"] == card["id"] and task["kind"] == "impl"
+    meta = project.refs.read(card_ref(card["id"])).meta
+    assert meta["phase"] == "impl" and meta["handoff"] == ["h1", "h2"] and meta["conversation"] == CONV
+    assert "cause" not in meta and "pos" not in meta
+    assert card["id"] not in qa.recorded(project.paths)
+
+
+def test_every_impl_claim_removes_qa_record_entry(board):
+    project, fake = board
+    card = add(fake, project, "plain")
+    other = "e" * 24
+    with project_lock(project.paths):
+        qa.record_add(project.paths, card["id"])
+        qa.record_add(project.paths, other)
+    lease = seats.acquire(project, "claude")
+    project.reload_config()
+    snap = project.trello.snapshot(project.cfg.board_id)
+    choice = workflow.choose(project, lease, snap, workflow.card_refs(project))
+    claimed = workflow.claim_impl(project, lease, choice)
+    assert claimed is not None and "handoff" not in claimed.meta.to_dict()
+    assert qa.recorded(project.paths) == {other}

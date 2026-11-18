@@ -130,6 +130,185 @@ def test_sanitized_name_collision_refused(tmp_path, fake_trello, monkeypatch, en
 
 
 def test_parse_wanted():
-    assert agents_cmd.parse_wanted(["claude=2", "codex=1"]) == {"claude": 2, "codex": 1}
+    assert agents_cmd.parse_wanted(["claude=2", "codex=1"]) == ({"claude": 2, "codex": 1}, None)
+    assert agents_cmd.parse_wanted(["claude=2", "qa=codex"]) == ({"claude": 2}, "codex")
+    assert agents_cmd.parse_wanted(["qa=claude"]) == ({}, "claude")
+    for bad in (["gpt=1"], ["qa=gpt"], ["qa=claude", "qa=codex"], []):
+        with pytest.raises(KankanError):
+            agents_cmd.parse_wanted(bad)
+
+
+def test_up_counts_work_seats_only(project, fake_trello, env):
+    from tests.helpers import add_qa_list
+    add_qa_list(project, fake_trello)
+    qa = seats.acquire_qa(project, "claude", None)
+    try:
+        assert len(agents_cmd.up(project, {"claude": 2})) == 2
+        assert alive(project, "claude") == 2
+        assert agents_cmd.up(project, {"claude": 2}) == []
+    finally:
+        seats.release(project, qa)
+
+
+# ---------------------------------------------------------------------- the Q&A seat (questions F§2, F§8.13)
+
+QA_FAST = dict(poll_seconds=1, write_quiet_seconds=0, idle_ready_minutes=0.05, qa_poll_seconds=1)
+
+
+@pytest.fixture
+def qa_project(git_repo, fake_trello, monkeypatch, env, tmp_path):
+    from tests.helpers import add_qa_list, add_questions_seed
+    project = bind_project(git_repo, fake_trello, monkeypatch, **QA_FAST)
+    add_questions_seed()
+    project.qa_list = add_qa_list(project, fake_trello)
+    project.scenario = tmp_path / "scenario.json"
+    return project
+
+
+def scenario(project, tmp_path, steps, name):
+    """The scenario of the next agent started (every agent reads the shared scenario file when it starts)."""
+    import json
+    log = tmp_path / f"{name}.log"
+    project.scenario.write_text(json.dumps({"log": str(log), "steps": steps}))
+    return log
+
+
+def qa_alive(project, seat):
+    return seats.liveness(project, seat) == "alive"
+
+
+def answer_step(text):
+    return {"do": [["kankan", "answer", "--turn", "{turn}", "--file", "{file}"]], "text": text}
+
+
+def comments_with(fake, card, needle):
+    return [text for text in fake.card_comments(card["id"]) if needle in text]
+
+
+def test_agent_qa_starts_the_qa_seat(qa_project, env):
+    name = agents_cmd.agent(qa_project, "claude", qa=True)
+    assert name.startswith("ai-proj-claude-starting-")
+    assert wait_for(lambda: qa_alive(qa_project, "claude-qa"), timeout=30)
+    assert qa_project.reload_config().qa_seat() == "claude-qa"
+    assert wait_for(lambda: "ai-proj-claude-qa" in env.sessions(), timeout=15)
+    assert alive(qa_project, "claude") == 0  # no work seat
+
+
+def test_up_with_qa_is_idempotent(qa_project, env):
+    started = agents_cmd.up(qa_project, {"claude": 2, "codex": 1}, qa="codex")
+    assert len(started) == 4
+    assert alive(qa_project, "claude") == 2 and alive(qa_project, "codex") == 1
+    assert qa_alive(qa_project, "codex-qa")
+    assert agents_cmd.up(qa_project, {"claude": 2, "codex": 1}, qa="codex") == []
+
+
+def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project, fake_trello, env, tmp_path):
+    from kankan import messages
+    from kankan.refstore import card_ref, seat_ref
+    from tests.launcher_helpers import agent_inputs
+    project, fake = qa_project, fake_trello
+    card = fake.add_card(project.qa_list, "how", desc="how does it work?")
+    scenario(project, tmp_path, [answer_step("first answer")], "claude")
+    agents_cmd.up(project, {}, qa="claude")
+    assert wait_for(lambda: comments_with(fake, card, "first answer")
+                    and launcher_state(project, "claude-qa") == "qa_waiting", timeout=40)
+    conversation = project.refs.read(card_ref(card["id"])).meta["conversation"]
+    # with a live Q&A seat of another type, the replacement is refused
+    with pytest.raises(KankanError) as exc:
+        agents_cmd.up(project, {}, qa="codex")
+    assert exc.value.status == Status.NEEDS_ACTION
+    info = proc_info(project, "claude-qa")
+    os.kill(info["supervisor"]["pid"], signal.SIGKILL)
+    os.kill(info["launcher"]["pid"], signal.SIGKILL)
+    assert wait_for(lambda: not pid_alive(info["agent"]["pid"]), timeout=10)
+    assert seats.liveness(project, "claude-qa") == "dead"
+    top = fake.add_card(project.qa_list, "another question", pos=0)
+    fake.user_comment(card["id"], "and what about X?")  # something new: the taken-up conversation gets a prompt
+    log = scenario(project, tmp_path, [answer_step("continued by codex")], "codex")
+    assert len(agents_cmd.up(project, {}, qa="codex")) == 1
+    assert wait_for(lambda: comments_with(fake, card, "continued by codex"), timeout=40)
+    value = project.refs.read(card_ref(card["id"]))
+    assert value.meta["owner"] == "codex-qa" and value.meta["conversation"] == conversation
+    assert project.refs.read(card_ref(top["id"])) is None
+    restart = messages.QA_RESTART.split("{")[0]
+    assert any(line.startswith(restart) for line in agent_inputs(log))
+    cfg = project.reload_config()
+    assert cfg.qa_seat() == "codex-qa" and "claude-qa" not in cfg.seats
+    assert project.refs.read(seat_ref("claude-qa")) is None
+    assert agents_cmd.up(project, {}, qa="codex") == []
+
+
+def test_autostart_unit_with_qa(project, tmp_path, monkeypatch, isolated_home):
+    stub = tmp_path / "stubbin"
+    stub.mkdir()
+    for name, body in (("systemctl", "true"), ("loginctl", "echo Linger=yes")):
+        (stub / name).write_text(f"#!/bin/sh\n{body}\n")
+        (stub / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
+    agents_cmd.autostart_enable(project, {"claude": 2}, qa="codex")
+    unit = isolated_home / ".config" / "systemd" / "user" / "kankan-up@proj.service"
+    assert "-m kankan up claude=2 qa=codex\n" in unit.read_text()
+
+
+def _drop_seeds(agent_type, roles):
+    import json
+    from pathlib import Path
+    target = Path.home() / ".config/kankan/agents.json"
+    data = json.loads(target.read_text())
+    for role in roles:
+        data[agent_type]["seed"].pop(role, None)
+    target.write_text(json.dumps(data))
+
+
+def test_preflight_checks_only_the_questions_seed_for_the_qa_type(qa_project, env):
+    _drop_seeds("codex", ("implementation", "review"))
+    agents_cmd.agent(qa_project, "codex", qa=True)  # the work seeds of codex are not needed
+    assert wait_for(lambda: qa_alive(qa_project, "codex-qa"), timeout=30)
+    _drop_seeds("claude", ("questions",))
+    with pytest.raises(KankanError) as exc:
+        agents_cmd.up(qa_project, {}, qa="claude")
+    # the replacement comes before the seed check (the live codex-qa refuses it); the missing seed is
+    # covered by test_first_qa_start_without_a_questions_seed_registers_the_seat_so_doctor_asks
+    assert exc.value.status == Status.NEEDS_ACTION and "codex-qa is alive" in exc.value.message
+    assert agents_cmd.up(qa_project, {"claude": 1}) != []  # a missing questions seed never blocks work seats
+
+
+def test_first_qa_start_without_a_questions_seed_registers_the_seat_so_doctor_asks(qa_project, env, monkeypatch):
+    """questions F§7: `up qa=<type>` without a `questions` seed refuses with the usual manual step; the Q&A seat is
+    registered, so `kankan doctor` asks for the seed and creates the `questions` card; then `up qa=<type>` starts."""
+    import sys
+    from kankan import diag, doctor, seeds
+    project = qa_project
+    _drop_seeds("claude", ("questions",))
+    with pytest.raises(KankanError) as exc:
+        agents_cmd.up(project, {}, qa="claude")
+    assert exc.value.status == Status.NEEDS_ACTION
+    assert "claude questions seed" in exc.value.message and "both roles" not in exc.value.message
+    assert project.reload_config().qa_seat() == "claude-qa"
+    status = diag.status(project)["qa"]
+    assert status["seat"] == "claude-qa" and status["liveness"] == "free" and status["card"] is None
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(seeds, "read_key", lambda: "1")
+    doctor.run(project.paths.repo, fix=True, online=True)
+    assert "questions" in json_seeds()["claude"]["seed"]
+    names = [c.name for c in project.trello.settings_cards(project.reload_config().settings_list).cards]
+    assert "questions" in names
+    assert len(agents_cmd.up(project, {}, qa="claude")) == 1
+    assert wait_for(lambda: qa_alive(project, "claude-qa"), timeout=30)
+
+
+def test_a_registered_qa_seat_that_never_started_is_removed(qa_project, env):
+    from kankan import diag
+    _drop_seeds("claude", ("questions",))
     with pytest.raises(KankanError):
-        agents_cmd.parse_wanted(["gpt=1"])
+        agents_cmd.agent(qa_project, "claude", qa=True)
+    assert qa_project.reload_config().qa_seat() == "claude-qa"
+    diag.seat_remove(qa_project, "claude-qa")
+    assert qa_project.reload_config().qa_seat() is None
+
+
+def json_seeds():
+    import json
+    from pathlib import Path
+    return json.loads((Path.home() / ".config/kankan/agents.json").read_text())

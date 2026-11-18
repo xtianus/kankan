@@ -68,3 +68,14 @@ def pid_alive(pid):
             return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
     except FileNotFoundError:
         return False
+
+
+def start_qa_agent(tmux, project, agent_type="claude", scenario=None, tmp_path=None):
+    """Start the Q&A seat ``<type>-qa`` under ``kankan supervisor``; return (session name, agent log path)."""
+    return start_agent(tmux, project, agent_type=agent_type, seat=f"{agent_type}-qa", scenario=scenario,
+                       tmp_path=tmp_path)
+
+
+def agent_inputs(log: Path):
+    """The lines the fake agent received, in order."""
+    return [e["line"] for e in agent_events(log) if e["event"] == "input"]

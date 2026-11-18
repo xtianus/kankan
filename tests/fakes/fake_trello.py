@@ -54,6 +54,7 @@ class FakeTrello:
         self.download_redirects = {}  # attachment id -> Location
         self.omit_length = set()  # attachment ids served without Content-Length
         self.timeout_delay = 0.6
+        self.response_delay = 1.0  # the "delay" fault: the request is served normally after this many seconds
         self.response_date = "auto"
         self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}  # the token owner
         self.owner = {"id": self.new_id(), "username": "boardowner", "fullName": "Board Owner"}  # the human
@@ -135,7 +136,7 @@ class FakeTrello:
         with self.lock:
             attachment = {"id": self.new_id(), "name": name if name is not None else url, "fileName": None, "url": url,
                           "bytes": None, "mimeType": "", "idMember": member_id or self.owner["id"], "isUpload": False,
-                          "pos": self._next_attachment_pos(card_id)}
+                          "date": self._now(), "pos": self._next_attachment_pos(card_id)}
             self.state["cards"][card_id]["attachments"].append(attachment)
             return attachment
 
@@ -149,7 +150,7 @@ class FakeTrello:
                                         f"{quote(file_name, safe='')}",
                           "bytes": len(content) if bytes_reported == "actual" else bytes_reported,
                           "mimeType": mime_type, "idMember": member_id or self.owner["id"], "isUpload": True,
-                          "pos": self._next_attachment_pos(card_id)}
+                          "date": self._now(), "pos": self._next_attachment_pos(card_id)}
             self.state["cards"][card_id]["attachments"].append(attachment)
             self.contents[att_id] = (content, mime_type)
             return attachment
@@ -274,6 +275,9 @@ class FakeTrello:
                     redirect = next((r[2] for r in fake.redirects if r[0] == method and r[1].search(parsed.path)), None)
                 if redirect is not None:
                     return self._redirect(redirect)
+                if fault == "delay":  # a slow Trello: served normally, late (the fake's lock is not held)
+                    time.sleep(fake.response_delay)
+                    fault = None
                 if fault == "timeout":
                     time.sleep(fake.timeout_delay)
                     self.close_connection = True
@@ -371,10 +375,12 @@ class FakeTrello:
                     return candidate
         return obj
 
-    def _card_out(self, card: dict, attachments: bool, checklists: bool = True) -> dict:
+    def _card_out(self, card: dict, attachments: bool, checklists: bool = True, attachment_fields: str = "") -> dict:
         out = {k: v for k, v in card.items() if k != "attachments"}
         if attachments:
-            out["attachments"] = [dict(a) for a in card["attachments"]]
+            fields = [f for f in attachment_fields.split(",") if f]
+            out["attachments"] = [{k: v for k, v in a.items() if not fields or k == "id" or k in fields}
+                                  for a in card["attachments"]]
         if checklists:
             out["checklists"] = [copy.deepcopy(c) for c in self.state["checklists"].values() if c["idCard"] == card["id"]]
         return out
@@ -483,13 +489,15 @@ class FakeTrello:
             if card is None:
                 return 404, "The requested resource was not found."
             if len(parts) == 2 and method == "GET":
-                return 200, self._card_out(card, p.get("attachments") == "true")
+                return 200, self._card_out(card, p.get("attachments") == "true", attachment_fields=p.get("attachment_fields", ""))
             if len(parts) == 2 and method == "PUT":
                 if "idList" in p:
                     card["idList"] = p["idList"]
+                    others = [c["pos"] for c in st["cards"].values() if c["idList"] == p["idList"] and c is not card]
                     if p.get("pos") == "top":
-                        others = [c["pos"] for c in st["cards"].values() if c["idList"] == p["idList"] and c is not card]
                         card["pos"] = min(others or [1024]) / 2
+                    elif p.get("pos") == "bottom":
+                        card["pos"] = max(others or [0]) + 1024
                 if "closed" in p:
                     card["closed"] = str(p["closed"]).lower() == "true"
                 card["dateLastActivity"] = self._now()
@@ -528,6 +536,8 @@ class FakeTrello:
                     card["idLabels"].remove(parts[3])
                     return 200, card["idLabels"]
             if parts[2:] == ["actions", "comments"] and method == "POST":
+                if len(p["text"]) > 16384:
+                    return 400, "invalid value for text"
                 return 200, self._comment(card["id"], p["text"], self.me["id"])
             if parts[2:] == ["actions"] and method == "GET" and "createCard" in p.get("filter", ""):
                 creator = self.members[card["idMemberCreator"]]

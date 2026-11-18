@@ -7,13 +7,11 @@ import tty
 from pathlib import Path
 
 from kankan import messages
-from kankan.adapters import ModelEffort, _read, combinations, load_adapter
+from kankan.adapters import WORK_ROLES, ModelEffort, _read, combinations, load_adapter
 from kankan.config import atomic_write_json, file_lock, read_json
 from kankan.errors import KankanError, Status
 
 KEYS = '123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-ROLES = ('implementation', 'review')
-
 
 def read_key(stream=None) -> str:
     stream = stream or sys.stdin
@@ -29,9 +27,9 @@ def read_key(stream=None) -> str:
         termios.tcsetattr(fd, termios.TCSANOW, attributes)
 
 
-def validate(adapters: dict, *, require_all: bool) -> None:
+def validate(adapters: dict, roles, *, require_all: bool) -> None:
     for agent_type, adapter in adapters.items():
-        for role in ROLES:
+        for role in roles:
             value = adapter.seed.get(role)
             if value is None:
                 if require_all:
@@ -58,11 +56,11 @@ def save(paths, agent_type: str, role: str, pair: dict, stale=None, target=None)
     return target
 
 
-def ensure(paths, types: list[str], *, interactive: bool, say) -> dict:
+def ensure(paths, types: list[str], *, interactive: bool, say, roles=WORK_ROLES) -> dict:
     adapters = {agent_type: load_adapter(paths, agent_type, read_only=True) for agent_type in types}
-    validate(adapters, require_all=False)
+    validate(adapters, roles, require_all=False)
     for agent_type, adapter in list(adapters.items()):
-        for role in ROLES:
+        for role in roles:
             if role in adapter.seed:
                 continue
             if not interactive or not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -92,16 +90,16 @@ def ensure(paths, types: list[str], *, interactive: bool, say) -> dict:
     return adapters
 
 
-def preflight(paths, types) -> None:
+def preflight(paths, types, roles) -> None:
     adapters = {agent_type: load_adapter(paths, agent_type, read_only=True) for agent_type in types}
-    validate(adapters, require_all=False)
+    validate(adapters, roles, require_all=False)
     try:
         state = read_json(paths.kankan_dir / 'board-settings.json', {}) if paths else {}
         recorded = state.get('settings', {})
     except (ValueError, TypeError, AttributeError):
         recorded = {}
     for agent_type, adapter in adapters.items():
-        for role in ROLES:
+        for role in roles:
             value = recorded.get(role, {}).get('value', {}).get(agent_type)
             if not value and role not in adapter.seed:
                 raise KankanError(Status.NEEDS_ACTION, messages.SEEDS_MISSING.format(type=agent_type, role=role))

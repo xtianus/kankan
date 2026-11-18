@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from kankan import attachments, cards, labels, messages, worktrees
+from kankan import attachments, cards, labels, messages, notify, qa, worktrees
 from kankan.cards import CardMeta, Phase, target_list_for, transition
 from kankan.errors import KankanError, Status
 from kankan.project import Project
 from kankan.refstore import RefValue, card_ref
 from kankan.seats import AgentEnv, Lease, seat_type, verify_owner
 from kankan.seatstate import SeatState, load_state, update_state
+from kankan.trello import MARKER_PREFIX, Comment
+
+QA_PHASES = (Phase.QA.value,)
+# the marker of a Q&A answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``
+_QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
+_MENTIONS = re.compile(r"\n\n@\S+(?: @\S+)*$")
+_CHUNK_PREFIX = re.compile(r"^[0-9]+/[0-9]+\n\n")
 
 
 @dataclass
@@ -68,8 +76,36 @@ def _owns(ctx: AgentContext, value: Optional[RefValue], phases) -> bool:
     return value is not None and value.meta.get("owner") == ctx.seat and value.meta.get("phase") in phases
 
 
+def _phases(ctx: AgentContext):
+    """The phases a command of the current task may hold: ``qa`` for a Q&A task, else impl/review."""
+    return QA_PHASES if ctx.task.get("kind") == "qa" else cards.OWNED_PHASES
+
+
+def refuse_qa(ctx: AgentContext, command: str) -> None:
+    """``usage_error`` for a work command in a Q&A task (questions F§4.2); ``no_work`` without a task."""
+    if ctx.task.get("kind") == "qa":
+        raise KankanError(Status.USAGE_ERROR, messages.QA_REFUSED.format(command=command))
+
+
+def _qa_ended(ctx: AgentContext) -> KankanError:
+    current = ctx.task
+    return KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=current.get("short") or current["card"]))
+
+
+def _qa_owns(ctx: AgentContext, value: Optional[RefValue]) -> bool:
+    """The Q&A ownership rule: the task is not ``ended`` and the ref is this seat's ``qa`` ref of the task's
+    conversation."""
+    return not ctx.task.get("ended") and qa._ours(value, ctx.seat, ctx.task.get("conversation"))
+
+
 def _own_ref(ctx: AgentContext, phases) -> RefValue:
+    """The task's card ref when this seat holds it in ``phases``. With ``QA_PHASES`` (a Q&A task) every failure,
+    an ended task included, is ``not_owner`` (questions F§4.2); otherwise ``ineligible``."""
     value = _card_ref(ctx)
+    if phases == QA_PHASES:
+        if not _qa_owns(ctx, value):
+            raise _qa_ended(ctx)
+        return value
     if not _owns(ctx, value, phases):
         raise KankanError(Status.INELIGIBLE, messages.NOT_HELD, {"phase": value.meta.get("phase") if value else None})
     return value
@@ -83,17 +119,146 @@ def _hold(ctx: AgentContext, phases) -> attachments.Hold:
         return attachments.Hold.OTHER
     if value is None:
         return attachments.Hold.GONE
-    return attachments.Hold.HELD if _owns(ctx, value, phases) else attachments.Hold.OTHER
+    held = _qa_owns(ctx, value) if phases == QA_PHASES else _owns(ctx, value, phases)
+    return attachments.Hold.HELD if held else attachments.Hold.OTHER
+
+
+def _thread(project, comments: List[Comment], new: Optional[set] = None) -> List[dict]:
+    """The ``comments`` field of ``task``, oldest first: ``role`` is ``agent`` for kankan's Q&A answers and
+    handoff summaries, ``kankan`` for its other comments, ``user`` for board members; comments by people outside
+    the board are omitted. With ``new`` (a Q&A task) each entry gets ``new``."""
+    me = notify.kankan_member_id(project)
+    members = notify.input_members(project)
+    result = []
+    for comment in comments:
+        if comment.member_id == me:
+            role = "agent" if _QA_MARKER.search(comment.text) else "kankan"
+        elif comment.member_id in members:
+            role = "user"
+        else:
+            continue
+        entry = {"id": comment.id, "author": comment.username, "date": comment.date, "text": comment.text,
+                 "role": role}
+        if new is not None:
+            entry["new"] = comment.id in new
+        result.append(entry)
+    return result
+
+
+def _summary(chunks: List[Comment]) -> str:
+    """The text of a handoff summary from its chunk comments: without the markers, the ``i/m`` prefixes and the
+    mention of the last chunk."""
+    bodies = []
+    for comment in chunks:
+        body = _QA_MARKER.sub("", comment.text).rstrip()
+        if len(chunks) > 1:
+            body = _CHUNK_PREFIX.sub("", body, count=1)
+        bodies.append(body)
+    bodies[-1] = _MENTIONS.sub("", bodies[-1])
+    return "\n\n".join(bodies)
+
+
+def _handoff(project, meta: dict, comments: List[Comment]) -> Optional[str]:
+    """The handoff summary of an implementation task (questions T§5, T§7): the comments listed in the ref's
+    ``handoff`` field; otherwise the latest summary kankan posted (every chunk of it); otherwise None."""
+    by_id = {comment.id: comment for comment in comments}
+    listed = [by_id[ident] for ident in meta.get("handoff") or [] if ident in by_id]
+    if listed:
+        return _summary(listed)
+    me = notify.kankan_member_id(project)
+    marked = []
+    for comment in comments:
+        found = _QA_MARKER.search(comment.text) if comment.member_id == me else None
+        if found and found.group(1) == "qh":
+            marked.append((comment, found))
+    if not marked:
+        return None
+    latest = max(marked, key=lambda item: (len(item[0].id), item[0].id))[1]
+    group = sorted(((int(found.group(4)), comment) for comment, found in marked
+                    if found.group(2, 3) == latest.group(2, 3)), key=lambda item: item[0])
+    return _summary([comment for _, comment in group])
+
+
+def _qa_card(ctx: AgentContext):
+    """One card read (C1) for a Q&A command: ``not_owner`` when the conversation is over (the card left ``Q&A``,
+    was archived or deleted, or got ``HOLD``), even before the launcher's poll has deleted the ref."""
+    card = ctx.project.trello.card(ctx.task["card"])
+    if qa.active_ended(ctx.project.cfg, card):
+        raise _qa_ended(ctx)
+    return card
+
+
+def _qa_still_ours(ctx: AgentContext) -> bool:
+    """The ref is still this seat's conversation and the seat task (read again) is the same, not ``ended``."""
+    current = load_state(ctx.project.paths, ctx.seat).task or {}
+    return current.get("id") == ctx.task["id"] and not current.get("ended") \
+        and qa._ours(_card_ref(ctx), ctx.seat, ctx.task.get("conversation"))
+
+
+def _discard_ended_files(ctx: AgentContext, short: str) -> None:
+    """The attachment directory of a ``task`` whose conversation ended meanwhile, only while no newer task can use
+    it: under the project lock (tried without waiting, since claims hold it), the card's ref is gone, or is still
+    this task's conversation and the seat task is still this one. A newer conversation or task, also of this seat,
+    keeps its files; anything left over is removed by the next end or ``reconcile --fix``."""
+    from kankan.config import project_lock
+    project = ctx.project
+    try:
+        with project_lock(project.paths, timeout=0):
+            value = _card_ref(ctx)
+            current = load_state(project.paths, ctx.seat).task or {}
+            if value is None or (qa._ours(value, ctx.seat, ctx.task.get("conversation"))
+                                 and current.get("id") == ctx.task["id"]):
+                attachments.discard(project.paths, short)
+    except KankanError as err:  # the project lock is busy, or the ref unreadable: the files stay
+        project.log("qa_task_files_kept", card=ctx.task["card"], error=err.message)
+
+
+def _qa_task_data(ctx: AgentContext) -> dict:
+    """``task`` of a Q&A task (questions F§4.1, T§5): ``new`` comes from ``turn.json``, so repeated calls in a turn
+    agree. A conversation that ended, before, during or after the attachment download and the thread read, gives
+    ``not_owner``; the card read last then also deletes the downloaded files (as ``Hold.GONE`` does) unless a newer
+    task or conversation may use them (``_discard_ended_files``)."""
+    current = ctx.task
+    project = ctx.project
+    _own_ref(ctx, QA_PHASES)
+    card = _qa_card(ctx)
+    turn = qa.read_turn(project.paths, current["conversation"]) or {}
+    delivered = qa.Inputs.from_dict(turn.get("inputs"))
+    try:
+        inputs = attachments.for_task(project, card, still_held=lambda: _hold(ctx, QA_PHASES))
+    except KankanError as err:
+        if err.status is Status.INELIGIBLE:
+            raise _qa_ended(ctx) from err
+        raise
+    for entry in inputs:
+        entry["new"] = entry["id"] in delivered.attachments
+    comments = _thread(project, project.trello.comments(card.id), set(delivered.comments))
+    latest = project.trello.card(current["card"])
+    if qa.active_ended(project.cfg, latest) or not _qa_still_ours(ctx):
+        _discard_ended_files(ctx, card.short)
+        raise _qa_ended(ctx)
+    return {
+        "task_id": current["id"], "kind": "qa",
+        "card": {"title": card.name, "desc": card.desc, "url": card.url, "shortLink": card.short},
+        "turn": turn.get("token") or current.get("turn"), "attachments": inputs, "comments": comments,
+        "worktree": str(ctx.worktree), "integration": current.get("base"), "instructions": messages.INSTRUCTIONS["qa"],
+    }
 
 
 def task(ctx: AgentContext) -> dict:
     current = ctx.task
+    if current.get("kind") == "qa":
+        return _qa_task_data(ctx)
     phases = {"impl": (Phase.IMPL.value,), "review": (Phase.REVIEW.value,)}.get(current["kind"], cards.OWNED_PHASES)
     value = _own_ref(ctx, phases)
     card = ctx.project.trello.card(current["card"])
     if card is None or card.closed:
         raise KankanError(Status.INELIGIBLE, "the card was deleted or archived")
     inputs = attachments.for_task(ctx.project, card, still_held=lambda: _hold(ctx, phases))
+    extra = {}
+    if current["kind"] == "impl":
+        thread = ctx.project.trello.comments(card.id)
+        extra = {"comments": _thread(ctx.project, thread), "handoff": _handoff(ctx.project, value.meta, thread)}
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
         "title": card.name, "url": card.url, "desc": card.desc, "phase": value.meta.get("phase"),
@@ -101,25 +266,32 @@ def task(ctx: AgentContext) -> dict:
         "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),
         "hold": ctx.project.cfg.label_hold in card.label_ids,
-        "instructions": messages.INSTRUCTIONS.get(current["kind"], ""), "attachments": inputs,
+        "instructions": messages.INSTRUCTIONS.get(current["kind"], ""), "attachments": inputs, **extra,
     }
 
 
 def note(ctx: AgentContext, text: str) -> dict:
     current = ctx.task
-    _own_ref(ctx, cards.OWNED_PHASES)
+    _own_ref(ctx, _phases(ctx))
+    if current.get("kind") == "qa":
+        _qa_card(ctx)
     op_id = "note-" + hashlib.sha1(f"{current['id']}\0{text}".encode()).hexdigest()[:16]
     ctx.project.trello.add_comment(current["card"], f"{ctx.seat}: {text}", op_id)
     return {"card": current["card"]}
 
 
 def signal(ctx: AgentContext, kind: str, payload: Optional[dict] = None) -> None:
-    task_id = ctx.task["id"]
+    write_signal(ctx.project, ctx.seat, ctx.task["id"], kind, payload)
 
+
+def write_signal(project, seat: str, task_id: str, kind: str, payload: Optional[dict] = None) -> None:
+    """Record the agent's signal for the launcher in the seat state. Q&A signals carry ``turn`` in ``payload``
+    (questions T§5), so the launcher drops a signal of an older turn."""
     def write(state):
         state.signal = {"task_id": task_id, "kind": kind, "payload": payload or {}}
-    update_state(ctx.project.paths, ctx.seat, write)
-    ctx.project.log("signal", seat=ctx.seat, task=task_id, kind=kind)
+    update_state(project.paths, seat, write)
+    turn = {"turn": payload["turn"]} if payload and payload.get("turn") else {}
+    project.log("signal", seat=seat, task=task_id, kind=kind, **turn)
 
 
 def require_clean(worktree) -> None:
@@ -137,6 +309,7 @@ def _converge_quietly(ctx: AgentContext) -> None:
 
 
 def done(ctx: AgentContext) -> dict:
+    refuse_qa(ctx, "done")
     current = ctx.task
     if current["kind"] == "review":
         from kankan import integrate
@@ -214,9 +387,23 @@ def kankan_yield(project, lease: Lease, card, value: RefValue, cause: str = "yie
         seat=lease.seat, branch=value.meta.get("branch")))
 
 
+def _qa_yield(ctx: AgentContext) -> dict:
+    """``yield`` in a Q&A task: end the conversation, the card stays in ``Q&A`` (questions F§4.2). On a task
+    already marked ``ended`` it only signals; a ref gone or another conversation's otherwise is ``not_owner``."""
+    current = ctx.task
+    payload = {"turn": current["turn"]} if current.get("turn") else None
+    if not current.get("ended"):
+        _own_ref(ctx, QA_PHASES)
+        qa.end(ctx.project, ctx.lease, current)
+    signal(ctx, "yield", payload)
+    return {"card": current["card"], "phase": None}
+
+
 def yield_(ctx: AgentContext) -> dict:
     """Agent ``yield``: commit WIP first; idempotent after the transition happened."""
     current = ctx.task
+    if current.get("kind") == "qa":
+        return _qa_yield(ctx)
     value = _card_ref(ctx)
     meta = value.meta if value else {}
     if not _owns(ctx, value, cards.OWNED_PHASES):
@@ -239,31 +426,67 @@ def yield_(ctx: AgentContext) -> dict:
     return {"card": current["card"], "phase": "parked" if cause != "yield" or meta.get("phase") == "impl" else "implemented"}
 
 
-def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, template: str) -> dict:
+def _qa_turn(ctx: AgentContext, turn: Optional[str]) -> str:
+    """The current turn token of a Q&A task (``turn.json``, else the seat task's); ``needs_action`` when
+    ``turn`` is given and is not it."""
+    current = ctx.task
+    token = (qa.read_turn(ctx.project.paths, current["conversation"]) or {}).get("token") or current.get("turn") or ""
+    if turn is not None and turn != token:
+        raise KankanError(Status.NEEDS_ACTION, messages.QA_STALE_TURN.format(turn=turn),
+                          {"turn": turn, "current": token})
+    return token
+
+
+def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, template: str,
+                 turn: Optional[str] = None) -> dict:
+    """``ask`` or ``fail``. In a Q&A task (``fail`` only) the op-id and the signal carry the turn token and the
+    comment cursor stays: the failed turn's inputs are delivered again with the follow-up (questions T§5)."""
+    project = ctx.project
+    current = ctx.task
+    if current.get("kind") == "qa":
+        _own_ref(ctx, QA_PHASES)  # before the conversation lock, so an ended conversation's directory stays gone
+        with qa.conversation_lock(project.paths, current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
+            # under the lock no turn starts: the token checked here stays current until the signal is written
+            if not _qa_still_ours(ctx):
+                qa._drop_orphan(project, current["card"], current["conversation"])
+                raise _qa_ended(ctx)
+            qa._check_seat(project, ctx.lease)
+            _qa_card(ctx)  # not_owner comes before needs_action (a stale turn)
+            token = _qa_turn(ctx, turn)
+            return _label_and_comment(ctx, text, label_id, cause, template, token)
+    _own_ref(ctx, _phases(ctx))
+    return _label_and_comment(ctx, text, label_id, cause, template, None)
+
+
+def _label_and_comment(ctx: AgentContext, text: str, label_id: str, cause: str, template: str,
+                       token: Optional[str]) -> dict:
     from kankan import clock
     project = ctx.project
     current = ctx.task
-    _own_ref(ctx, cards.OWNED_PHASES)
+    in_qa = current.get("kind") == "qa"
     card_id = current["card"]
     project.trello.add_label(card_id, label_id)
-    from kankan import notify
     mention = notify.mention(project, card_id)
     mention = f" {mention}" if mention else ""
-    op_id = f"{cause}-" + hashlib.sha1(f"{current['id']}\0{text}".encode()).hexdigest()[:16]
+    key = f"{current['id']}\0{token}\0{text}" if in_qa else f"{current['id']}\0{text}"
+    op_id = f"{cause}-" + hashlib.sha1(key.encode()).hexdigest()[:16]
     comment = project.trello.comment_once(card_id, template.format(seat=ctx.seat, text=text) + mention, op_id)
 
     def record(state):
         state.label_causes.setdefault(card_id, {})[label_id] = {"cause": cause, "at": clock.iso(clock.now())}
-        state.comment_cursor[card_id] = comment.id
+        if not in_qa:
+            state.comment_cursor[card_id] = comment.id
     update_state(project.paths, ctx.seat, record)
     project.log(cause, seat=ctx.seat, card=card_id)
-    signal(ctx, cause)
+    signal(ctx, cause, {"turn": token} if in_qa else None)
     return {"card": card_id, "comment": comment.id}
 
 
 def ask(ctx: AgentContext, question: str) -> dict:
+    refuse_qa(ctx, "ask")
     return _ask_or_fail(ctx, question, ctx.project.cfg.label_question, "ask", messages.ASK)
 
 
-def fail(ctx: AgentContext, reason: str) -> dict:
-    return _ask_or_fail(ctx, reason, ctx.project.cfg.label_error, "fail", messages.FAIL)
+def fail(ctx: AgentContext, reason: str, turn: Optional[str] = None) -> dict:
+    """``fail``; in a Q&A task an optional ``turn`` refuses a delayed call of an older turn (``needs_action``)."""
+    return _ask_or_fail(ctx, reason, ctx.project.cfg.label_error, "fail", messages.FAIL, turn)

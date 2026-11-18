@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import List, Optional, Sequence
 
 from kankan import gitutil
+from kankan.adapters import WORK_ROLES
 from kankan.errors import KankanError, Status
 
 OK, FIXED, MANUAL, WARN, SKIPPED = "ok", "fixed", "manual", "warn", "skipped"
@@ -318,15 +319,15 @@ def _check_autostart(paths, fix: bool, types: Sequence[str]) -> Check:
     if not missing:
         return Check("autostart", OK, str(unit))
     up = re.search(r" -m kankan up (.*)$", text, re.M)
-    wanted = agents_cmd.parse_wanted(up.group(1).split()) if up else {}
+    wanted, qa = agents_cmd.parse_wanted(up.group(1).split()) if up else ({}, None)
     strip = lambda t: re.sub(r"^Environment=PATH=.*$", "", t, flags=re.M)  # noqa: E731
-    generated = up is not None and strip(text) == strip(agents_cmd.unit_content(holder, wanted))
+    generated = up is not None and strip(text) == strip(agents_cmd.unit_content(holder, wanted, qa))
     if not generated:
         return Check("autostart", MANUAL, f"{unit} was edited and its PATH lacks {', '.join(missing)}",
                      f"add {os.pathsep.join(missing)} to its Environment=PATH=")
     if not fix:
         return Check("autostart", MANUAL, f"the unit's PATH lacks {', '.join(missing)}", "kankan doctor (without --no-fix)")
-    unit.write_text(agents_cmd.unit_content(holder, wanted))
+    unit.write_text(agents_cmd.unit_content(holder, wanted, qa))
     _run(["systemctl", "--user", "daemon-reload"])
     return Check("autostart", FIXED, f"{unit}: PATH updated (enabled state unchanged)")
 
@@ -336,7 +337,7 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     from kankan.config import project_lock, registry_block, save_config
     from kankan.init import ensure_labels
     from kankan.project import Project
-    rest = ("registry", "lists", "labels", "reconcile")
+    rest = ("registry", "lists", "qa-list", "labels", "reconcile")
     try:
         project = Project.open(cwd)
         project.trello.me()
@@ -362,10 +363,11 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
                             "stop the other clone's agents, then kankan init --takeover"))
         return checks + [Check(n, SKIPPED, "board bound to another clone") for n in rest[1:]]
     checks.append(Check("registry", OK, "this clone"))
-    closed = [name for list_id, name in cfg.workflow_lists().items()
+    closed = [name for list_id, name in cfg.required_lists().items()
               if list_id not in snap.lists or snap.lists[list_id].closed]
     checks.append(Check("lists", MANUAL, f"archived or deleted: {', '.join(closed)}",
                         f"unarchive list {closed[0]} on Trello") if closed else Check("lists", OK, "open"))
+    checks.append(_check_qa_list(paths, project, cfg, snap, fix))
     missing = [name for attr, name in (("label_hold", "HOLD"), ("label_question", "Question"), ("label_error", "Error"))
                if getattr(cfg, attr) not in snap.labels]
     if not missing:
@@ -387,6 +389,23 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     checks.append(Check("reconcile", WARN, f"{len(issues)} issue(s)", "kankan reconcile, then kankan reconcile --fix "
                         "if appropriate") if issues else Check("reconcile", OK, "consistent"))
     return checks
+
+
+def _check_qa_list(paths, project, cfg, snap, fix: bool) -> Check:
+    """The ``Q&A`` list: added when missing from the configuration, unarchived or recreated when gone."""
+    from kankan.config import load_config, project_lock, qa_list_open, save_config
+    from kankan.init import ensure_qa_list
+    if qa_list_open(cfg, snap.lists):
+        return Check("qa-list", OK, "open")
+    problem = "not configured" if not cfg.qa_list else (
+        "archived" if cfg.qa_list in snap.lists else "deleted")
+    if not fix:
+        return Check("qa-list", MANUAL, f"the Q&A list is {problem}", "kankan doctor (without --no-fix)")
+    with project_lock(paths):
+        fresh = load_config(paths)  # a launcher may have registered a seat meanwhile
+        done = ensure_qa_list(fresh, project.trello, snap)
+        save_config(paths, fresh)
+    return Check("qa-list", FIXED, f"{done} the Q&A list" if done else "open")
 
 
 # ------------------------------------------------------------------ entry points
@@ -416,13 +435,14 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
     from kankan import boardconfig, boardsettings, model_catalog, seeds, settings_setup
     from kankan.adapters import adapter_types
     types = adapter_types(project.paths)
+    roles = boardconfig.roles(project.paths)
     checks = []
     try:
         if online and fix:
             for agent_type in types:
                 catalog = model_catalog.refresh(project.paths, agent_type, force=True)
                 checks.append(Check(f"catalog:{agent_type}", OK if catalog['source'] in ('command', 'override') else WARN, catalog['source']))
-        adapters = seeds.ensure(project.paths, types, interactive=online and fix, say=lambda text: print(text, file=sys.stderr))
+        adapters = seeds.ensure(project.paths, types, interactive=online and fix, say=lambda text: print(text, file=sys.stderr), roles=roles)
     except KankanError as err:
         checks.append(Check("settings", MANUAL, err.message, "kankan doctor in a terminal, or set seeds in agents.json"))
         if err.status != Status.NEEDS_ACTION:
@@ -441,13 +461,15 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
         except KankanError as err:
             if err.status == Status.TRELLO_ERROR and (err.data or {}).get('status') in (400, 404):
                 checks.append(Check("settings-backend", WARN, "backend lacks settings checklists; using seeds"))
-                values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters))
+                values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters, roles))
             else:
                 raise
     else:
-        values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters))
+        values = boardconfig._values(boardconfig.load(project.paths), boardconfig.schema(adapters, roles))
     from kankan import modelcheck
     for role, value in values.items():
+        if role not in roles:
+            continue  # evaluated (never an unknown setting) but inactive: no check and no probe
         checks.append(Check(f"settings:{role}", OK, boardconfig.display(value)))
         for agent_type, pair in value.items():
             result = modelcheck.check(adapters[agent_type], pair, read_only=not (online and fix))
@@ -462,10 +484,10 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
     return checks
 
 
-def preflight(types: Sequence[str], paths=None) -> None:
+def preflight(types: Sequence[str], paths=None, roles: Sequence[str] = WORK_ROLES) -> None:
     """Offline checks before starting agents of ``types``: a missing CLI, kankan or skill stops the start."""
     from kankan import seeds
-    seeds.preflight(paths, types)
+    seeds.preflight(paths, types, roles)
     if os.environ.get("KANKAN_SKIP_PREFLIGHT") == "1":
         return
     checks = [check_kankan_path(),

@@ -39,8 +39,10 @@ def test_task_fields(agent, capsys):
     code, out = run(capsys, "task")
     assert code == 0 and out["ok"]
     assert set(out["data"]) == {"task_id", "kind", "card_id", "short", "title", "url", "desc", "phase", "branch",
-                                "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions", "attachments"}
-    assert out["data"]["attachments"] == []
+                                "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions", "attachments",
+                                "comments", "handoff"}
+    assert out["data"]["attachments"] == [] and out["data"]["handoff"] is None
+    assert [c["role"] for c in out["data"]["comments"]] == ["kankan"]  # the claim notice
     assert out["data"]["title"] == "Feature" and out["data"]["task_id"] == task["id"]
 
 
@@ -169,3 +171,126 @@ def test_code_id_changes_with_the_code(tmp_path, monkeypatch):
     assert first == build.code_id(pkg) and len(first) == 12
     (pkg / "a.py").write_text("x = 2\n")
     assert build.code_id(pkg) != first
+
+
+# --------------------------------------------------------------------- Q&A commands
+
+@pytest.fixture
+def qa_agent(kproject, fake_trello, monkeypatch):
+    from kankan import qa
+    from kankan.adapters import ModelEffort
+    from tests.helpers import add_qa_list
+    project = kproject
+    qa_list = add_qa_list(project, fake_trello)
+    lease = seats.acquire_qa(project, "claude", None)
+    card = fake_trello.add_card(qa_list, "Question")
+    task = qa.claim(project, lease, project.trello.card(card["id"]), ModelEffort("sonnet", "high"))
+    token = qa.start_turn(project, lease, task, qa.Inputs())
+    wt = project.paths.seat_worktree(lease.seat)
+    monkeypatch.setenv("KANKAN_SEAT", lease.seat)
+    monkeypatch.setenv("KANKAN_SESSION", lease.session)
+    monkeypatch.chdir(wt)
+    return project, fake_trello, card, token
+
+
+def test_answer_with_text(qa_agent, capsys):
+    project, fake, card, token = qa_agent
+    code, out = run(capsys, "answer", "--turn", token, "It works like this.")
+    assert code == 0 and out["ok"] and out["data"]["comments"]
+    assert any(c.startswith("It works like this.") for c in fake.card_comments(card["id"]))
+
+
+def test_handoff_with_file(qa_agent, capsys, tmp_path):
+    project, fake, card, token = qa_agent
+    summary = tmp_path / "summary.md"
+    summary.write_text("Implement X — with ü.\n", encoding="utf-8")
+    code, out = run(capsys, "handoff", "--turn", token, "--file", str(summary))
+    assert code == 0 and out["data"]["list"] == project.cfg.backlog
+    assert any(c.startswith("Implement X — with ü.") for c in fake.card_comments(card["id"]))
+    assert fake.card_list(card["id"]) == project.cfg.backlog
+
+
+@pytest.mark.parametrize("argv", [
+    ["answer", "text"],  # no --turn
+    ["answer", "--turn", "t"],  # neither text nor --file
+    ["answer", "--turn", "t", "text", "--file", "x.md"],  # both
+    ["handoff", "--turn", "t", "--file", "/nonexistent/summary.md"],
+])
+def test_answer_and_handoff_arguments(qa_agent, capsys, argv):
+    code, out = run(capsys, *argv)
+    assert code == 41 and out["status"] == "usage_error"
+
+
+@pytest.mark.parametrize("command", ["answer", "handoff"])
+def test_answer_and_handoff_error_precedence_before_their_arguments(qa_agent, capsys, command):
+    """no_work, then not_owner, come before the validation of the text arguments (usage_error)."""
+    from kankan.refstore import card_ref
+    from kankan.seatstate import update_state
+    project, fake, card, token = qa_agent
+    value = project.refs.read(card_ref(card["id"]))
+    assert project.refs.delete(card_ref(card["id"]), value.oid)  # the conversation ended
+    code, out = run(capsys, command, "--turn", token, "text", "--file", "/nonexistent/x.md")
+    assert out["status"] == "not_owner"
+    update_state(project.paths, "claude-qa", lambda state: setattr(state, "task", None))
+    code, out = run(capsys, command, "--turn", token, "text", "--file", "/nonexistent/x.md")
+    assert out["status"] == "no_work"
+
+
+def test_answer_in_an_implementation_task_is_usage_error(agent, capsys):
+    code, out = run(capsys, "answer", "--turn", "t", "text")
+    assert code == 41 and out["status"] == "usage_error"
+
+
+def test_done_in_a_qa_task_is_usage_error(qa_agent, capsys):
+    code, out = run(capsys, "done")
+    assert code == 41 and out["status"] == "usage_error"
+
+
+def test_fail_with_a_stale_turn(qa_agent, capsys):
+    code, out = run(capsys, "fail", "--turn", "0123456789abcdef", "broken")
+    assert out["status"] == "needs_action"
+    project, fake, card, token = qa_agent
+    code, out = run(capsys, "fail", "--turn", token, "broken")
+    assert code == 0 and out["ok"]
+
+
+# ---------------------------------------------------------------------- agent --qa, up and autostart with qa=<type>
+
+@pytest.fixture
+def calls(kproject, monkeypatch):
+    from kankan import agents_cmd
+    recorded = {}
+    monkeypatch.setattr(agents_cmd, "agent", lambda project, agent_type, seat=None, attach=False, tmux=None,
+                        preflight=True, qa=False: recorded.setdefault("agent", (agent_type, seat, qa)) and "s")
+    monkeypatch.setattr(agents_cmd, "up", lambda project, wanted, tmux=None, qa=None:
+                        recorded.setdefault("up", (wanted, qa)) and [])
+    monkeypatch.setattr(agents_cmd, "autostart_enable", lambda project, wanted, qa=None:
+                        recorded.setdefault("autostart", (wanted, qa)) and [])
+    monkeypatch.chdir(kproject.paths.repo)
+    return recorded
+
+
+def test_agent_qa_flag(calls, capsys):
+    code, out = run(capsys, "agent", "claude", "--qa")
+    assert code == 0 and calls["agent"] == ("claude", None, True)
+
+
+def test_up_with_qa(calls, capsys):
+    code, out = run(capsys, "up", "claude=2", "codex=1", "qa=codex")
+    assert code == 0 and calls["up"] == ({"claude": 2, "codex": 1}, "codex")
+
+
+def test_up_with_qa_only(calls, capsys):
+    code, out = run(capsys, "up", "qa=claude")
+    assert code == 0 and calls["up"] == ({}, "claude")
+
+
+def test_autostart_enable_with_qa(calls, capsys):
+    code, out = run(capsys, "autostart", "enable", "claude=2", "qa=codex")
+    assert code == 0 and calls["autostart"] == ({"claude": 2}, "codex")
+
+
+@pytest.mark.parametrize("argv", [["up", "qa=gpt"], ["up", "qa="], ["up", "qa=claude", "qa=codex"]])
+def test_up_with_a_bad_qa_argument_is_usage_error(calls, capsys, argv):
+    code, out = run(capsys, *argv)
+    assert out["status"] == "usage_error" and "up" not in calls

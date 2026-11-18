@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
-from kankan import boardconfig, boardsettings, gitutil, labels, messages, modelcheck, worktrees
+from kankan import boardconfig, boardsettings, gitutil, labels, messages, modelcheck, qa, worktrees
 from kankan.cards import OWNED_PHASES, CardMeta, Phase, _parse_refs, converge, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
@@ -79,7 +79,7 @@ def _gone_card(card_id: str, meta: dict) -> Card:
 
 
 def review_candidates(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue]) -> List[Choice]:
-    implemented_lists = {sc.implemented for sc in project.cfg.seats.values()}
+    implemented_lists = {sc.implemented for sc in project.cfg.work_seats().values()}
     result = []
     for card in sorted(snap.cards.values(), key=lambda c: c.pos):
         if card.list_id not in implemented_lists or has_hold(project, card):
@@ -143,9 +143,12 @@ def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Cla
     branch = existing[0] if existing else worktrees.branch_name(card.short)
     meta = CardMeta(phase=Phase.IMPL.value, card=card.id, short=card.short, owner=lease.seat, session=lease.session,
                     implementer=lease.seat, implementer_type=lease.type, branch=branch,
-                    target_list=target_list_for(project.cfg, Phase.IMPL.value, lease.seat, None))
-    result = transition(project, lease, card, choice.ref, meta,
-                        messages.CLAIMED.format(seat=lease.seat, branch=branch) + _claim_selection(lease, pair, "implementation"))
+                    target_list=target_list_for(project.cfg, Phase.IMPL.value, lease.seat, None),
+                    **_handoff_fields(choice.ref))
+    with project_lock(project.paths):
+        result = transition(project, lease, card, choice.ref, meta,
+                            messages.CLAIMED.format(seat=lease.seat, branch=branch) + _claim_selection(lease, pair, "implementation"))
+        qa.record_remove(project.paths, card.id)  # questions T§2: right after the claim's transaction
     fresh = project.trello.card(card.id)
     if fresh is not None and has_hold(project, fresh):
         park = CardMeta.from_dict(result.ref.meta).evolve(phase=Phase.PARKED.value, owner=None, cause="yield",
@@ -155,6 +158,15 @@ def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Cla
     branch = worktrees.prepare_branch(repo, card.short, project.cfg.integration_branch)
     worktrees.checkout(worktree, branch)
     return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
+
+
+def _handoff_fields(value: Optional[RefValue]) -> dict:
+    """questions T§7: a claim from a parked ref carrying a handoff keeps its summary's comment IDs and its
+    conversation, so ``task`` gives the same handoff after a restart."""
+    meta = value.meta if value is not None else {}
+    if meta.get("phase") != Phase.PARKED.value or not meta.get("handoff"):
+        return {}
+    return {"handoff": meta["handoff"], "conversation": meta.get("conversation")}
 
 
 def _free_branch_for_review(project, lease: Lease, card: Card, value: RefValue) -> None:
@@ -432,19 +444,34 @@ def _store_task(project, lease: Lease, kind: str, card: Card, branch: Optional[s
 
 def active_types(project) -> Set[str]:
     from kankan import seats
-    return {sc.type for name, sc in project.cfg.seats.items() if seats.liveness(project, name) == "alive"}
+    return {sc.type for name, sc in project.cfg.work_seats().items() if seats.liveness(project, name) == "alive"}
 
 
 def waiting_reasons(project, snap: Snapshot, refs: Dict[str, RefValue], types: Optional[Set[str]] = None
                     ) -> Dict[str, str]:
-    """Why cards in Backlog or Implemented lists are not being picked up."""
+    """Why cards in Backlog, Implemented or ``Q&A`` lists are not being picked up."""
     reasons = {}
-    implemented_lists = {sc.implemented for sc in project.cfg.seats.values()}
+    implemented_lists = {sc.implemented for sc in project.cfg.work_seats().values()}
     types = active_types(project) if types is None else types
+    qa_alive = None
     for card in snap.cards.values():
         value = refs.get(card.id)
         phase = value.meta.get("phase") if value else None
-        if card.list_id == project.cfg.backlog:
+        if project.cfg.qa_list and card.list_id == project.cfg.qa_list:
+            # questions F§2–3: an unfinished handoff (parked, move pending) is not taken either
+            if has_hold(project, card):
+                reasons[card.id] = "hold"
+            elif phase not in (None, Phase.PARKED.value, Phase.QA.value) or \
+                    (phase == Phase.PARKED.value and value.meta.get("from_list")):
+                reasons[card.id] = "ineligible_phase"
+            else:
+                if qa_alive is None:
+                    from kankan import seats
+                    qa_seat = project.cfg.qa_seat()
+                    qa_alive = qa_seat is not None and seats.liveness(project, qa_seat) == "alive"
+                if not qa_alive:
+                    reasons[card.id] = "no_qa_seat"
+        elif card.list_id == project.cfg.backlog:
             if has_hold(project, card):
                 reasons[card.id] = "hold"
             elif phase not in (None, Phase.PARKED.value):

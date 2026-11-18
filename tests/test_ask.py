@@ -147,6 +147,20 @@ def test_fail_sets_error_and_waits(kproject, fake_trello, monkeypatch):
     assert load_state(project.paths, "claude-1").signal["kind"] == "fail"
 
 
+def test_work_seat_fail_moves_the_cursor_and_keeps_its_op_id(kproject, fake_trello, monkeypatch):
+    """The Q&A changes of ``_ask_or_fail`` (no cursor, turn in op-id and signal) leave work seats as they were."""
+    project, fake = kproject, fake_trello
+    card = fake.add_card(project.cfg.backlog, "c")
+    lease = seats.acquire(project, "claude")
+    workflow.tick(project, lease)
+    first = agentcmds.fail(agent_ctx(project, lease, monkeypatch), "tests need a database")
+    again = agentcmds.fail(agent_ctx(project, lease, monkeypatch), "tests need a database")
+    assert first["comment"] == again["comment"]
+    state = load_state(project.paths, "claude-1")
+    assert state.comment_cursor[card["id"]] == first["comment"]
+    assert state.signal["payload"] == {}
+
+
 @pytest.mark.parametrize("point,expected", [("after_cursor_save", 1), ("before_paste", 0)])
 def test_crash_between_cursor_and_paste_loses_not_duplicates(waiting, monkeypatch, point, expected):
     project, fake, card, launcher, tmux = waiting

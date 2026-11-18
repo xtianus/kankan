@@ -7,16 +7,22 @@ Usage: fake_agent.py --type=<claude|codex> --scenario <file.json>
 Scenario: {"trust": bool, "log": path, "steps": [step, ...]}. Every received prompt (any line that
 is not a new-conversation command) consumes the next step:
   {"do": [[argv...], ...], "shell": "bash text", "screen": "working|limit|known|unknown|ready",
-   "sleep": seconds, "limit_text": "...", "spawn": "plain|setsid", "exit": true}
-Commands run with the inherited environment (KANKAN_SEAT, KANKAN_SESSION...).
+   "sleep": seconds, "limit_text": "...", "spawn": "plain|setsid", "exit": true, "text": "..."}
+Commands run with the inherited environment (KANKAN_SEAT, KANKAN_SESSION...). In ``do`` argv items and in
+``shell``, ``{turn}`` is replaced by the Q&A turn token found in the received prompt (``turn `<token>```) and
+``{file}`` by a temporary file holding the step's ``text`` (Q&A answers).
 """
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import time
+
+TURN = re.compile(r"turn `([0-9a-f]{16})`")
 
 SCREENS = {
     "claude": {
@@ -119,15 +125,33 @@ def main() -> int:
             show(screens["ready"])
             continue
         step = steps.pop(0) if steps else {}
-        run_step(step, screens, show, log)
+        run_step(step, screens, show, log, text)
         if step.get("exit"):
             log("exit")
             return int(step.get("exit_code", 0))
         show(screens["ready"])
 
 
-def run_step(step, screens, show, log):
+def substitute(step, prompt):
+    """``{turn}``: the token named in ``prompt`` (empty when none); ``{file}``: a file holding ``text``."""
+    found = TURN.search(prompt or "")
+    values = {"{turn}": found.group(1) if found else ""}
+    if "text" in step:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+        handle.write(step["text"])
+        handle.close()
+        values["{file}"] = handle.name
+
+    def fill(item):
+        for key, value in values.items():
+            item = item.replace(key, value)
+        return item
+    return fill
+
+
+def run_step(step, screens, show, log, prompt=""):
     """Show the step's screen, run its commands, wait, optionally read input."""
+    fill = substitute(step, prompt)
     screen = step.get("screen", "working")
     seconds = float(step.get("sleep", 0.5))
     if screen == "limit" and step.get("limit_text"):
@@ -139,10 +163,11 @@ def run_step(step, screens, show, log):
         child = subprocess.Popen(argv, start_new_session=step["spawn"] == "setsid")
         log("spawned", pid=child.pid, mode=step["spawn"])
     for argv in step.get("do", []):
+        argv = [fill(item) for item in argv]
         proc = subprocess.run(argv, capture_output=True, text=True)
         log("command", argv=argv, code=proc.returncode, out=proc.stdout[-2000:], err=proc.stderr[-2000:])
     if step.get("shell"):
-        proc = subprocess.run(["bash", "-c", step["shell"]], capture_output=True, text=True)
+        proc = subprocess.run(["bash", "-c", fill(step["shell"])], capture_output=True, text=True)
         log("shell", code=proc.returncode, out=proc.stdout[-2000:], err=proc.stderr[-2000:])
     deadline = time.time() + seconds
     while time.time() < deadline:

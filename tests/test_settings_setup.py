@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from kankan.adapters import ModelEffort
 from kankan.config import save_config
+from tests.helpers import add_questions_seed
 
 
 def test_build_and_resume_settings_by_name(kproject, fake_trello):
@@ -80,10 +81,28 @@ def test_two_processes_build_one_set_of_cards(kproject):
 
 def test_description_setting_has_value_and_help_comment(kproject, monkeypatch):
     from kankan import settings_setup, boardsettings, boardconfig
-    monkeypatch.setattr(boardconfig, 'schema', lambda adapters: {'mode': boardconfig.SettingSpec('description', help='allowed safe/fast', default='safe', allowed=['safe', 'fast'])})
+    monkeypatch.setattr(boardconfig, 'schema', lambda adapters, roles: {'mode': boardconfig.SettingSpec('description', help='allowed safe/fast', default='safe', allowed=['safe', 'fast'])})
     settings_setup.ensure(kproject, boardsettings.adapters_for(kproject.paths), say=lambda text: None)
     read = kproject.trello.settings_cards(kproject.reload_config().settings_list)
     assert len(read.cards) == 1 and read.cards[0].desc == 'safe'
     assert not read.cards[0].checklists
     comments = kproject.trello.comments(read.cards[0].id)
     assert len(comments) == 1 and comments[0].text.endswith('`kankan:help`')
+
+
+def test_questions_card_exists_only_with_a_qa_seat(kproject, fake_trello):
+    from kankan import settings_setup, boardsettings, seats
+    adapters = boardsettings.adapters_for(kproject.paths)
+    settings_setup.ensure(kproject, adapters, say=lambda text: None)
+    cfg = kproject.reload_config()
+    assert [c.name for c in kproject.trello.settings_cards(cfg.settings_list).cards] == ['implementation', 'review']
+    seats.ensure_created(kproject, 'claude-qa', 'claude')
+    add_questions_seed()
+    adapters = boardsettings.adapters_for(kproject.paths)
+    reports = []
+    settings_setup.ensure(kproject, adapters, say=reports.append)
+    cards = {c.name: c for c in kproject.trello.settings_cards(cfg.settings_list).cards}
+    assert sorted(cards) == ['implementation', 'questions', 'review']
+    assert [c.name for c in cards['questions'].checklists] == ['claude', 'codex']
+    assert all(len([i for i in c.items if i.state == 'complete']) == 1 for c in cards['questions'].checklists)
+    assert any('questions' in report for report in reports)

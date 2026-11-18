@@ -41,6 +41,8 @@ def _supervisor_pid() -> Optional[int]:
 
 
 class Launcher:
+    PLANNED_RESTART_STATES = ('idle',)  # states in which a changed pair gets a fresh CLI version for a restart
+
     def __init__(self, project: Project, adapter: Adapter, tmux: Tmux, agent_type: str, seat: Optional[str] = None):
         self.project = project
         self.adapter = adapter
@@ -131,7 +133,7 @@ class Launcher:
         from kankan import worktrees
         main_wts = worktrees.main_checked_out(self.project.paths.repo, self.cfg.integration_branch)
         pids = {"launcher": os.getpid(), "supervisor": _supervisor_pid(), "sid": seats.pane_sid()}
-        self.lease = seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
+        self.lease = self.acquire(pids)
         self.project.reload_config()
         self.set_state('starting')
         if main_wts:
@@ -155,6 +157,10 @@ class Launcher:
         self.check_start_deadline = clock.monotonic() + self.adapter.model_check_timeout_seconds
         boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap), boardsettings.adapters_for(self.project.paths))
         self.settings_step()
+
+    def acquire(self, pids: dict) -> Lease:
+        """Occupy the seat (hook: the Q&A launcher occupies its ``<type>-qa`` seat)."""
+        return seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
 
     def _resume_block_journal(self) -> None:
         state = load_state(self.project.paths, self.lease.seat)
@@ -211,12 +217,19 @@ class Launcher:
                    *(p.process for _, p in self.probes.values())]
         return {p.pid for p in objects if p is not None} | modelcheck.poll_retired()
 
+    def own_roles(self):
+        """The board-settings roles whose pairs this seat runs; the others never start a check or a restart."""
+        return ('implementation', 'review')
+
     def settings_step(self):
         self.adapters = boardsettings.adapters_for(self.project.paths)
         self.adapter = self.adapters[self.type]
         requests = boardsettings.poll(self.project, self.adapters)
         state = boardconfig.load(self.project.paths)
-        values = boardconfig._values(state, boardconfig.schema(self.adapters))
+        own = self.own_roles()
+        values = {role: value for role, value in boardconfig._values(
+            state, boardconfig.schema(self.adapters, boardconfig.ROLES)).items() if role in own}
+        requests = [request for request in requests if request.role in own]
         if not requests:
             requests = [boardconfig.CheckRequest(role, name, pair, state.settings.get(role, {}).get('revision', 0))
                         for role, value in values.items() for name, pair in value.items()]
@@ -242,7 +255,7 @@ class Launcher:
                 self.versions[name] = modelcheck.start_version(adapter)
         pair = values.get('implementation', {}).get(self.type)
         # A claim that needs a restart gets a fresh polled CLI version before it is eligible.
-        if self.running_pair and self.state == 'idle':
+        if self.running_pair and self.state in self.PLANNED_RESTART_STATES:
             changed = tuple(sorted((r, p.model, p.effort) for r, value in values.items()
                                    if (p := value.get(self.type)) is not None and p != self.running_pair))
             if changed and changed != self.assignment_version_pair and self.type not in self.versions:
@@ -296,13 +309,17 @@ class Launcher:
             return
         self.refresh_error = None
 
+    def startup_roles(self):
+        """The roles whose pairs may start the agent, in order (hook): the held card's role, else both."""
+        refs = workflow.card_refs(self.project)
+        held = [v.meta.get('phase') for v in refs.values() if v.meta.get('owner') == self.lease.seat and v.meta.get('phase') in ('impl', 'review')]
+        if held:
+            return ['review' if 'review' in held else 'implementation']
+        return ['implementation', 'review']
+
     def startup_step(self, cls):
         if self.agent is None:
-            roles = ['implementation', 'review']
-            refs = workflow.card_refs(self.project)
-            held = [v.meta.get('phase') for v in refs.values() if v.meta.get('owner') == self.lease.seat and v.meta.get('phase') in ('impl', 'review')]
-            if held:
-                roles = ['review' if 'review' in held else 'implementation']
+            roles = self.startup_roles()
             if self.type in self.version_known and self.type not in self.versions and self.type not in self.catalogs:
                 for role in roles:
                     pair = boardconfig.effective(self.project.paths, role).get(self.type)
@@ -372,7 +389,7 @@ class Launcher:
             if cls.state == 'ready':
                 self.agent_ready()
                 self.restart = None
-                self.activate(cls)  # a transient failure keeps self.prepared; idle() retries it
+                self.after_restart_ready(cls)
                 return True
             return False
         if self.agent.poll() is None:
@@ -410,6 +427,10 @@ class Launcher:
         self.spawn_agent(pair)
         restart['phase'] = 'ready'
         return False
+
+    def after_restart_ready(self, cls: Classification) -> None:
+        """The replacement agent is ready (hook): activate the prepared task."""
+        self.activate(cls)  # a transient failure keeps self.prepared; idle() retries it
 
     def trust_allowed(self) -> bool:
         worktree = os.path.realpath(self.project.paths.seat_worktree(self.lease.seat))
@@ -476,7 +497,7 @@ class Launcher:
             return True
         procutil.reap_adopted(self.own_children())
         if self.state == 'starting' and self.stop_requested():
-            self.release_unsent(self.prepared)
+            self.release_on_stop(self.prepared)
             return True
         cls = self.screen() if self.agent is not None or self.state != 'starting' else Classification('unknown')
         dialog = self.answer_dialogs(cls)
@@ -546,7 +567,7 @@ class Launcher:
             self.flush_assignment(cls)
             return self.exit_now
         if self.stop_requested():
-            self.release_unsent(self.prepared)
+            self.release_on_stop(self.prepared)
             self.log("stop_honoured")
             return True
         if self.prepared is not None:
@@ -604,7 +625,11 @@ class Launcher:
         if task is not None:
             self.assign(task, cls)
         elif self.stop_requested():
-            self.release_unsent(prepared)
+            self.release_on_stop(prepared)
+
+    def release_on_stop(self, prepared: Optional[dict]) -> None:
+        """A stop arrived before the prompt (hook): give back a fresh claim."""
+        self.release_unsent(prepared)
 
     def release_unsent(self, prepared: Optional[dict]) -> None:
         """A stop arrived before the prompt: give back a fresh, untouched claim (others stay held for a resume)."""
@@ -634,7 +659,7 @@ class Launcher:
             return
         stopping = self.stop_requested()
         try:
-            active = None if stopping else workflow.refresh_task(self.project, self.lease, self.task)
+            active = None if stopping else self.refresh_assignment(self.task)
         except KankanError as err:
             self.log('assignment_recheck_failed', error=err.message)
             if err.status not in (Status.CONFIG_ERROR, Status.NOT_OWNER):
@@ -644,7 +669,7 @@ class Launcher:
             active = None
         if active is None:
             if stopping:
-                self.release_unsent(self.task)
+                self.release_on_stop(self.task)
             task_id = self.task.get('id') if self.task else None
             def cancel(state):
                 if state.task and state.task.get('id') == task_id:
@@ -664,6 +689,10 @@ class Launcher:
             self.working_since = clock.monotonic()
         else:
             clock.sleep(1.0)
+
+    def refresh_assignment(self, task: dict) -> Optional[dict]:
+        """Revalidate an unsent assignment before each write (hook); None cancels it."""
+        return workflow.refresh_task(self.project, self.lease, task)
 
     # ------------------------------------------------------------------ working
     def take_signal(self) -> Optional[dict]:
@@ -721,12 +750,16 @@ class Launcher:
         elif self.unknown_since and now - self.unknown_since >= limit:
             message = messages.UNKNOWN_SCREEN.format(seat=self.lease.seat)
         if message:
-            self.inactivity_reported = True
-            try:
-                labels.set_label(self.project, self.task["card"], self.cfg.label_error, "inactivity", self.lease.seat,
-                                 comment=message, op_id=f"inactive-{self.task['id']}")
-            except KankanError as err:
-                self.log("label_failed", error=err.message)
+            self.report_inactivity(message)
+
+    def report_inactivity(self, message: str) -> None:
+        """The agent stopped without a signal or shows an unknown screen (hook): ``Error`` once per task."""
+        self.inactivity_reported = True
+        try:
+            labels.set_label(self.project, self.task["card"], self.cfg.label_error, "inactivity", self.lease.seat,
+                             comment=message, op_id=f"inactive-{self.task['id']}")
+        except KankanError as err:
+            self.log("label_failed", error=err.message)
 
     # suspension requests are recorded in seat state by HOLD/user-move detection
     def suspend_pending(self) -> bool:
@@ -869,7 +902,11 @@ def main(agent_type: str, seat: Optional[str]) -> int:
         signal.signal(sig, signal.SIG_IGN)
     project = Project.open(os.getcwd())
     adapter = load_adapter(project.paths, agent_type)
-    launcher = Launcher(project, adapter, Tmux(), agent_type, seat)
+    kind = Launcher
+    if seat and seat.endswith("-qa"):
+        from kankan.qa_launcher import QaLauncher
+        kind = QaLauncher
+    launcher = kind(project, adapter, Tmux(), agent_type, seat)
     try:
         return launcher.run()
     except KankanError as err:

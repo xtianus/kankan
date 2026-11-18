@@ -154,3 +154,61 @@ def test_auditlog_append(git_repo):
     auditlog.append(paths, "x")
     lines = (paths.kankan_dir / "log.jsonl").read_text().splitlines()
     assert len(lines) == 2 and '"seat_recovered"' in lines[0]
+
+
+def test_old_config_without_qa_fields_loads(git_repo):
+    paths = Paths.discover(git_repo)
+    data = make_cfg(seats={"claude-1": SeatConfig("claude", "a" * 24, "b" * 24, "c" * 24)}).to_dict()
+    del data["qa_list"], data["qa_poll_seconds"]
+    del data["seats"]["claude-1"]["role"]
+    atomic_write_json(paths.kankan_dir / "config.json", data)
+    cfg = load_config(paths)
+    assert cfg.qa_list is None and cfg.qa_poll_seconds == 30
+    assert cfg.seats["claude-1"].role == "work" and cfg.qa_seat() is None
+    assert list(cfg.work_seats()) == ["claude-1"]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "30", 1.5, None])
+def test_invalid_qa_poll_seconds_config_error(git_repo, value):
+    paths = Paths.discover(git_repo)
+    data = make_cfg().to_dict()
+    data["qa_poll_seconds"] = value
+    atomic_write_json(paths.kankan_dir / "config.json", data)
+    with pytest.raises(KankanError) as exc:
+        load_config(paths)
+    assert exc.value.status == Status.CONFIG_ERROR and "qa_poll_seconds" in exc.value.message
+
+
+def qa_cfg(**kw):
+    seats = {"claude-1": SeatConfig("claude", "a" * 24, "b" * 24, "c" * 24),
+             "codex-qa": SeatConfig("codex", role="qa")}
+    return make_cfg(seats=seats, **kw)
+
+
+def test_qa_seat_has_no_lists_and_is_skipped():
+    cfg = qa_cfg(qa_list="9" * 24)
+    assert cfg.qa_seat() == "codex-qa" and list(cfg.work_seats()) == ["claude-1"]
+    assert set(cfg.seat_lists()) == {"a" * 24, "b" * 24, "c" * 24}
+    assert "" not in cfg.workflow_lists() and cfg.workflow_lists()["9" * 24] == "Q&A"
+
+
+def test_check_lists_ignores_qa_seat_and_missing_qa_list():
+    cfg = qa_cfg(qa_list="9" * 24)
+    lists = {i: TList(i, "x", False, 1) for i in ("1" * 24, "2" * 24, "3" * 24, "a" * 24, "b" * 24, "c" * 24)}
+    check_lists(cfg, lists)  # qa_list absent from the board
+    lists["9" * 24] = TList("9" * 24, "Q&A", True, 1)
+    check_lists(cfg, lists)  # archived
+    lists["3" * 24] = TList("3" * 24, "Blocked", True, 1)
+    with pytest.raises(KankanError) as exc:
+        check_lists(cfg, lists)
+    assert exc.value.status == Status.CONFIG_ERROR
+
+
+def test_qa_list_open():
+    from kankan.config import qa_list_open
+    lists = {"9" * 24: TList("9" * 24, "Q&A", False, 1)}
+    assert qa_list_open(qa_cfg(qa_list="9" * 24), lists)
+    assert not qa_list_open(qa_cfg(), lists)
+    assert not qa_list_open(qa_cfg(qa_list="8" * 24), lists)
+    lists["9" * 24] = TList("9" * 24, "Q&A", True, 1)
+    assert not qa_list_open(qa_cfg(qa_list="9" * 24), lists)

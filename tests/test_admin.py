@@ -121,3 +121,30 @@ def test_purge_remote(board, tmp_path):
     assert diag.purge_remote(project)["deleted"] == ["refs/agent-cards/" + "a" * 24]
     assert git(project.paths.repo, "ls-remote", "origin", "refs/agent-*") == ""
     assert git(project.paths.repo, "ls-remote", "origin", "main") != ""
+
+
+def test_seat_remove_of_the_qa_seat(board):
+    from kankan import attachments, qa
+    from kankan.adapters import ModelEffort
+    from tests.helpers import add_qa_list
+    project, fake = board
+    qa_list = add_qa_list(project, fake)
+    lease = seats.acquire_qa(project, "claude", None)
+    card = fake.add_card(qa_list, "question")
+    task = qa.claim(project, lease, project.trello.card(card["id"]), ModelEffort("sonnet", "high"))
+    att_dir = attachments.card_dir(project.paths, card["shortLink"])
+    att_dir.mkdir(parents=True)
+    with pytest.raises(KankanError) as exc:
+        diag.seat_remove(project, "claude-qa")
+    assert exc.value.status == Status.NEEDS_ACTION and "alive" in exc.value.message
+    assert project.refs.read(card_ref(card["id"])) is not None
+    seats.release(project, lease)
+    lists_before = {ident for ident, data in fake.state["lists"].items() if not data["closed"]}
+    result = diag.seat_remove(project, "claude-qa")
+    assert result == {"seat": "claude-qa", "worktree_removed": True}
+    assert project.refs.read(card_ref(card["id"])) is None
+    assert not att_dir.exists() and not qa.conversation_dir(project.paths, task["conversation"]).exists()
+    assert {ident for ident, data in fake.state["lists"].items() if not data["closed"]} == lists_before
+    assert "claude-qa" not in project.reload_config().seats
+    assert not project.paths.seat_worktree("claude-qa").exists()
+    assert fake.card_list(card["id"]) == qa_list

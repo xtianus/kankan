@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import timedelta
 
 import pytest
@@ -197,3 +198,172 @@ def test_reconcile_fix_integrated_ref_also_discards(kproject, fake_trello, monke
     assert "integrated_ref_deleted" in {i.kind for i in issues if i.fixed}
     assert project.refs.read(card_ref(card["id"])) is None
     assert not directory.exists()
+
+
+def test_qa_seat_ignored_by_list_checks(board):
+    from tests.helpers import add_qa_list
+    project, fake, lease = board
+    add_qa_list(project, fake)
+    qa = seats.acquire_qa(project, "claude", None)
+    seats.release(project, qa)
+    assert "seat_without_lists" not in kinds(diag.reconcile(project))
+    assert not [i for i in diag.reconcile(project) if i.kind == "card_without_ref"]
+
+
+def test_seat_remove_of_qa_seat_archives_no_list(board):
+    from tests.helpers import add_qa_list
+    project, fake, lease = board
+    add_qa_list(project, fake)
+    seats.release(project, seats.acquire_qa(project, "claude", None))
+    open_before = {i for i, l in fake.state["lists"].items() if not l["closed"]}
+    diag.seat_remove(project, "claude-qa")
+    assert "claude-qa" not in project.reload_config().seats
+    assert {i for i, l in fake.state["lists"].items() if not l["closed"]} == open_before
+    assert not project.paths.seat_worktree("claude-qa").exists()
+
+
+# ---------------------------------------------------------------------- Q&A (questions T§2, T§3)
+from kankan import qa  # noqa: E402
+from kankan.config import project_lock  # noqa: E402
+from tests.helpers import add_qa_list, put_card_ref  # noqa: E402
+
+CONV = "0123456789abcdef"
+
+
+def _record(project, *card_ids):
+    with project_lock(project.paths):
+        for card_id in card_ids:
+            qa.record_add(project.paths, card_id)
+
+
+def test_done_without_merge_exempts_qa_cards_until_implementation_claim(board):
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.done, "answered question")
+    _record(project, card["id"])
+    assert not find(diag.reconcile(project), "done_without_merge")
+    fake.user_move(card["id"], project.cfg.backlog)
+    workflow.tick(project, lease)
+    value = project.refs.read(card_ref(card["id"]))
+    assert value.meta["phase"] == "impl"
+    project.refs.delete(card_ref(card["id"]), value.oid)
+    fake.user_move(card["id"], project.cfg.done)
+    assert find(diag.reconcile(project), "done_without_merge")[0].subject == card["id"]
+
+
+@pytest.mark.parametrize("where", ["done", "archived", "deleted"])
+def test_qa_conversation_ended_reported_and_fixed(board, where):
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    card = fake.add_card(qa_list, "question")
+    put_card_ref(project, card["id"], card["shortLink"], phase="qa", owner="claude-qa", target_list=qa_list,
+                 conversation=CONV)
+    qa.conversation_dir(project.paths, CONV).mkdir(parents=True)
+    assert not kinds(diag.reconcile(project)) & {"qa_conversation_ended", "qa_conversation_dir_without_ref"}
+    getattr(fake, {"done": "user_move", "archived": "user_archive", "deleted": "user_delete"}[where])(
+        *((card["id"], project.cfg.done) if where == "done" else (card["id"],)))
+    for _ in range(2):  # a list mismatch is reported only on a second run: make sure it never is
+        issues = diag.reconcile(project)
+    assert find(issues, "qa_conversation_ended")[0].subject == card["id"]
+    assert not kinds(issues) & {"phase_list_mismatch", "ref_of_deleted_card", "ref_of_archived_card"}
+    fixed = diag.reconcile(project, fix=True)
+    assert find(fixed, "qa_conversation_ref_deleted")[0].fixed
+    assert project.refs.read(card_ref(card["id"])) is None
+    assert find(fixed, "qa_conversation_dir_deleted")[0].subject == CONV
+    assert not qa.conversation_dir(project.paths, CONV).exists()
+
+
+def test_qa_conversation_of_alive_seat_not_reported(board):
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    qa_lease = seats.acquire_qa(project, "claude", None)
+    card = fake.add_card(qa_list, "question")
+    put_card_ref(project, card["id"], card["shortLink"], phase="qa", owner=qa_lease.seat, target_list=qa_list,
+                 conversation=CONV)
+    fake.user_move(card["id"], project.cfg.done)
+    assert not find(diag.reconcile(project), "qa_conversation_ended")
+    diag.reconcile(project, fix=True)
+    assert project.refs.read(card_ref(card["id"])) is not None
+
+
+def test_fix_removes_stale_qa_record_entries(board):
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    held = {}
+    for phase in ("impl", "implemented", "review", "integrated", "parked"):
+        card = fake.add_card(project.cfg.backlog, phase)
+        put_card_ref(project, card["id"], card["shortLink"], phase=phase, owner=None, target_list=project.cfg.backlog)
+        held[phase] = card["id"]
+    done = fake.add_card(project.cfg.done, "answered")["id"]
+    asking = fake.add_card(qa_list, "asking")["id"]
+    deleted = fake.add_card(qa_list, "deleted")["id"]
+    archived = fake.add_card(qa_list, "archived")["id"]
+    fake.user_delete(deleted)
+    fake.user_archive(archived)
+    _record(project, *held.values(), done, asking, deleted, archived)
+    fixed = diag.reconcile(project, fix=True)
+    assert qa.recorded(project.paths) == {held["parked"], done, asking}
+    assert {i.subject for i in find(fixed, "qa_record_entry_removed")} == {
+        held["impl"], held["implemented"], held["review"], held["integrated"], deleted, archived}
+
+
+def test_fix_reads_archived_recorded_cards_outside_the_project_lock_and_prunes_them(board, monkeypatch):
+    import time
+    from kankan import config
+    from kankan.trello import TrelloClient
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    archived = [fake.add_card(qa_list, f"old {i}")["id"] for i in range(3)]
+    for card_id in archived:
+        fake.user_archive(card_id)
+    _record(project, *archived)
+    lock = str(project.paths.kankan_dir / "project.lock")
+    reads = []
+    real = TrelloClient.card
+
+    def card(self, card_id, *args, **kwargs):
+        if card_id in archived:
+            entry = config._LOCK_DEPTH.get(lock)
+            reads.append(entry is not None and entry[1] == threading.get_ident())
+            time.sleep(0.2)  # a slow Trello
+        return real(self, card_id, *args, **kwargs)
+    monkeypatch.setattr(TrelloClient, "card", card)
+    fixed = diag.reconcile(project, fix=True)
+    assert reads == [False, False, False]  # read without the project lock
+    assert qa.recorded(project.paths) == set()
+    assert {i.subject for i in find(fixed, "qa_record_entry_removed")} == set(archived)
+    reads.clear()
+    diag.reconcile(project, fix=True)
+    assert reads == []  # pruned: never read again
+
+
+def test_fix_keeps_a_recorded_card_whose_ref_changed_during_the_reads(board, monkeypatch):
+    from kankan.trello import TrelloClient
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    card_id = fake.add_card(qa_list, "old")["id"]
+    fake.user_archive(card_id)
+    _record(project, card_id)
+    real = TrelloClient.card
+
+    def card(self, ident, *args, **kwargs):
+        result = real(self, ident, *args, **kwargs)
+        if ident == card_id and project.refs.read(card_ref(card_id)) is None:
+            put_card_ref(project, card_id, "abcdefgh", phase="parked", owner=None, target_list=qa_list)
+        return result
+    monkeypatch.setattr(TrelloClient, "card", card)
+    diag.reconcile(project, fix=True)
+    assert qa.recorded(project.paths) == {card_id}
+
+
+def test_fix_removes_conversation_dirs_no_ref_names(board):
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "handed off")
+    named, orphan = "1" * 16, "2" * 16
+    put_card_ref(project, card["id"], card["shortLink"], phase="parked", cause="handoff",
+                 target_list=project.cfg.backlog, handoff=["h1"], conversation=named)
+    for name in (named, orphan):
+        qa.conversation_dir(project.paths, name).mkdir(parents=True)
+    assert [i.subject for i in find(diag.reconcile(project), "qa_conversation_dir_without_ref")] == [orphan]
+    fixed = diag.reconcile(project, fix=True)
+    assert [i.subject for i in find(fixed, "qa_conversation_dir_deleted")] == [orphan]
+    assert qa.conversations(project.paths) == [named]

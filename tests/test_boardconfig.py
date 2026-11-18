@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tests.helpers import add_questions_seed
+
 from kankan.adapters import ModelEffort, load_adapter
 from kankan.trello import Card
 
@@ -70,7 +72,7 @@ def role_card(adapters, *, two=False):
 def test_role_atomic_validation_and_schema_change():
     from kankan.boardconfig import schema
     adapters = {'claude': load_adapter(None, 'claude', read_only=True)}
-    specs = schema(adapters)
+    specs = schema(adapters, ('implementation', 'review'))
     good = role_card(adapters)
     result = evaluate([good], schema=specs)
     assert result.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
@@ -79,7 +81,7 @@ def test_role_atomic_validation_and_schema_change():
     assert bad.state.settings['implementation']['invalid']
     assert 'two' in ' '.join(comments(bad))
     adapters['codex'] = load_adapter(None, 'codex')
-    added = evaluate([good], result.state, schema(adapters))
+    added = evaluate([good], result.state, schema(adapters, ('implementation', 'review')))
     assert added.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
     assert added.values['implementation']['codex'] == ModelEffort('gpt-6.1-sol', 'high')
     assert added.state.settings['implementation']['invalid']
@@ -107,3 +109,51 @@ def test_corrupt_nested_state_is_rebuilt(git_repo):
     paths = Paths.discover(git_repo)
     atomic_write_json(paths.kankan_dir/'board-settings.json', {'settings': {'implementation': {'value': {'claude': {'model': 'broken'}}}}})
     assert boardconfig.effective(paths, 'implementation')['claude'] == ModelEffort('sonnet', 'high')
+
+
+def test_roles_follow_the_registered_qa_seat(kproject):
+    from kankan import boardconfig, seats
+    assert boardconfig.roles(kproject.paths) == ('implementation', 'review')
+    seats.ensure_created(kproject, 'claude-qa', 'claude')
+    assert boardconfig.roles(kproject.paths) == ('implementation', 'review', 'questions')
+    add_questions_seed()
+    assert boardconfig.effective(kproject.paths, 'questions')['claude'] == ModelEffort('sonnet', 'high')
+
+
+def test_questions_is_evaluated_without_a_qa_seat_but_not_active(kproject):
+    from kankan import boardconfig
+    assert boardconfig.effective(kproject.paths, 'questions') == {}
+    assert 'questions' not in boardconfig.roles(kproject.paths)
+
+
+def test_questions_card_is_no_unknown_setting_once_the_qa_seat_is_removed(kproject):
+    from kankan import boardsettings
+    from kankan.trello import SettingsRead
+    adapters = {'claude': load_adapter(kproject.paths, 'claude', read_only=True)}
+    questions = role_card(adapters)
+    questions.name, questions.id = 'questions', 'questions-card'
+    result = boardsettings.apply_read(kproject, SettingsRead([questions], NOW, True), adapters)
+    assert not result.state.cards['questions-card'].get('invalid')
+    assert not [a for a in result.actions if a.kind == 'add_error']
+    assert not [a.text for a in result.actions if 'unknown setting' in a.text]
+
+
+def test_roles_logs_an_unreadable_configuration(kproject):
+    from kankan import auditlog, boardconfig
+    (kproject.paths.kankan_dir / 'config.json').write_text('{broken')
+    assert boardconfig.roles(kproject.paths) == ('implementation', 'review')
+    assert any(e['event'] == 'roles_config_unreadable' for e in auditlog.read(kproject.paths))
+
+
+def test_invalid_questions_card_never_changes_the_work_roles():
+    from kankan.boardconfig import schema
+    adapters = {'claude': load_adapter(None, 'claude', read_only=True)}
+    specs = schema(adapters, ('implementation', 'review', 'questions'))
+    good = role_card(adapters)
+    broken = role_card(adapters, two=True)
+    broken.name, broken.id = 'questions', 'questions-card'
+    result = evaluate([good, broken], schema=specs)
+    assert result.values['implementation']['claude'] == ModelEffort('sonnet', 'high')
+    assert result.state.settings['questions']['invalid'] and not result.state.settings['implementation']['invalid']
+    missing = evaluate([good], schema=specs)
+    assert missing.values['implementation']['claude'] == ModelEffort('sonnet', 'high')

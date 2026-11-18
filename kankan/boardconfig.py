@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from typing import Optional, Union
 
 from kankan import messages
-from kankan.adapters import Adapter, ModelEffort, adapter_types, combinations, load_adapter
+from kankan.adapters import WORK_ROLES, Adapter, ModelEffort, adapter_types, combinations, load_adapter
 from kankan.trello import SettingsRead
 
+ROLES = WORK_ROLES + ('questions',)  # the evaluated roles: a questions card is never an unknown setting
 SettingValue = Union[str, int, dict[str, ModelEffort]]
 
 
@@ -70,7 +71,7 @@ class SettingsState:
             raise ValueError('invalid settings records')
         for key, record in state.settings.items():
             value = record.get('value')
-            if key in ('implementation', 'review') and value is not None and not isinstance(value, dict):
+            if key in ROLES and value is not None and not isinstance(value, dict):
                 raise ValueError('role values must be model/effort maps')
             if isinstance(value, dict):
                 for name, pair in value.items():
@@ -107,9 +108,27 @@ class Evaluation:
     checks: list[CheckRequest]
 
 
-def schema(adapters: dict[str, Adapter]) -> dict[str, SettingSpec]:
-    return {role: SettingSpec('checklist', help=messages.SETTINGS_HELP, adapters=adapters)
-            for role in ('implementation', 'review')}
+def roles(paths) -> tuple[str, ...]:
+    """The active roles (seeds, preflight, setting cards created, probes): ``questions`` only while a ``qa`` seat is
+    registered in the project configuration. The evaluation uses ``ROLES``, so removing the Q&A seat never turns
+    the ``questions`` card into an unknown setting. An unreadable configuration counts as no ``qa`` seat, and is
+    logged."""
+    from kankan.config import load_config
+    from kankan.errors import KankanError
+    try:
+        qa = load_config(paths).qa_seat() is not None
+    except (KankanError, OSError, ValueError, AttributeError) as err:
+        from kankan import auditlog
+        try:
+            auditlog.append(paths, 'roles_config_unreadable', error=str(getattr(err, 'message', err)))
+        except OSError:
+            pass
+        qa = False
+    return ROLES if qa else WORK_ROLES
+
+
+def schema(adapters: dict[str, Adapter], roles: tuple[str, ...]) -> dict[str, SettingSpec]:
+    return {role: SettingSpec('checklist', help=messages.SETTINGS_HELP, adapters=adapters) for role in roles}
 
 
 def fingerprint(value) -> str:
@@ -338,4 +357,4 @@ def load(paths) -> SettingsState:
 
 def effective(paths, key: str) -> SettingValue:
     adapters = {name: load_adapter(paths, name, read_only=True) for name in adapter_types(paths)}
-    return _values(load(paths), schema(adapters))[key]
+    return _values(load(paths), schema(adapters, ROLES))[key]
