@@ -519,7 +519,9 @@ def _qa_seat_remove(project, seat: str) -> dict:
             raise KankanError(Status.USAGE_ERROR, messages.UNKNOWN_SEAT.format(seat=seat))
         state = seats.liveness(project, seat)
         if state != "free":
-            raise KankanError(Status.NEEDS_ACTION, messages.QA_SEAT_REMOVE_RUNNING.format(seat=seat, state=state),
+            template = {"dead": messages.QA_SEAT_REMOVE_DEAD,
+                        "unavailable": messages.QA_SEAT_REMOVE_UNAVAILABLE}.get(state, messages.QA_SEAT_REMOVE_RUNNING)
+            raise KankanError(Status.NEEDS_ACTION, template.format(seat=seat, state=state),
                               {"blockers": [f"the seat is {state}"]})
     with qa.lifecycle_lock(project.paths):  # never between the stages of a replacement
         with project_lock(project.paths):

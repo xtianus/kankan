@@ -151,7 +151,7 @@ def test_seat_remove_of_the_qa_seat(board):
 
 
 def test_seat_remove_of_a_dead_qa_seat_is_refused_until_recovered(board):
-    from kankan import qa
+    from kankan import messages, qa
     from kankan.adapters import ModelEffort
     from tests.helpers import add_qa_list
     project, fake = board
@@ -162,7 +162,8 @@ def test_seat_remove_of_a_dead_qa_seat_is_refused_until_recovered(board):
     seats._release_fd(lease.fd)  # the launcher died: its seat ref stays
     with pytest.raises(KankanError) as exc:
         diag.seat_remove(project, "claude-qa")
-    assert exc.value.status == Status.NEEDS_ACTION and "dead" in exc.value.message
+    assert exc.value.status == Status.NEEDS_ACTION
+    assert exc.value.message == messages.QA_SEAT_REMOVE_DEAD.format(seat="claude-qa")
     assert project.refs.read(card_ref(card["id"])).meta["phase"] == "qa"
     assert "claude-qa" in project.reload_config().seats
     assert qa.conversation_dir(project.paths, task["conversation"]).exists()
