@@ -324,7 +324,8 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
                 if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
     for card_id, record in cardsections_feedback.load(project.paths)["cards"].items():
-        if record.get("owned_error") and _age(record.get("at", "")) > limit:
+        written = record.get("error_write_started") or record.get("error_confirmed")
+        if record.get("owned_error") and written and _age(record.get("at", "")) > limit:
             issues.append(Issue("old_label", card_id, f"sections since {record.get('at')}"))
     # push failures
     if cfg.push_main:

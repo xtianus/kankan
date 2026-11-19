@@ -432,3 +432,60 @@ def test_moved_into_settings_list_keeps_settings_error(env):
     fb.drain(project)
     assert project.cfg.label_error in _labels(project, fake, card["id"])
     assert _rec(project, card["id"]) is None
+
+
+def _settings_cycle(project, fake, card_id):
+    from datetime import datetime, timedelta, timezone
+    from kankan import boardsettings
+    # board settings evaluate only cards whose last activity is at least 10 seconds old
+    fake.state["cards"][card_id]["dateLastActivity"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    adapters = boardsettings.adapters_for(project.paths)
+    read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
+    boardsettings.apply_read(project, read, adapters)
+    boardsettings.drain_actions(project)
+
+
+def _settings_list(project, fake):
+    from kankan.config import save_config
+    if not project.cfg.settings_list:
+        project.cfg.settings_list = fake.add_list(project.cfg.board_id, "kankan")["id"]
+        save_config(project.paths, project.cfg)
+    return project.cfg.settings_list
+
+
+def test_moved_into_settings_list_error_handed_over_and_removed(env):
+    from kankan import boardconfig
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    fb.drain(project)
+    assert project.cfg.label_error in _labels(project, fake, card["id"])
+    fake.user_move(card["id"], _settings_list(project, fake))
+    _settings_cycle(project, fake, card["id"])  # unknown setting name: invalid, but Error is already there
+    fb.sweep(project, project.trello.snapshot(project.cfg.board_id))
+    fb.drain(project)
+    assert _rec(project, card["id"]) is None
+    assert project.cfg.label_error in _labels(project, fake, card["id"])
+    entry = boardconfig.load(project.paths).cards[card["id"]]
+    assert entry["owned_error"] and entry["error_confirmed"]
+    fake.user_move(card["id"], project.cfg.backlog)
+    _settings_cycle(project, fake, card["id"])
+    assert project.cfg.label_error not in _labels(project, fake, card["id"])
+
+
+def test_moved_into_settings_list_user_error_not_handed_over(env):
+    from kankan import boardconfig
+    project, fake = env
+    card = _card(project, fake)
+    fake.user_label(card["id"], project.cfg.label_error)
+    _record(project, card["id"])
+    fb.drain(project)
+    fake.user_move(card["id"], _settings_list(project, fake))
+    _settings_cycle(project, fake, card["id"])
+    fb.sweep(project, project.trello.snapshot(project.cfg.board_id))
+    fb.drain(project)
+    assert _rec(project, card["id"]) is None
+    assert not boardconfig.load(project.paths).cards[card["id"]].get("owned_error")
+    fake.user_move(card["id"], project.cfg.backlog)
+    _settings_cycle(project, fake, card["id"])
+    assert project.cfg.label_error in _labels(project, fake, card["id"])

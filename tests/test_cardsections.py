@@ -120,3 +120,13 @@ def test_inline_triple_backtick_is_not_a_fence():
     parsed = parse("```python -V``` prints the version.\n## agent: claude review\nreviewer only\n", TYPES)
     assert parsed.spec == "```python -V``` prints the version.\n"
     assert for_seat(parsed, "claude", "review") == "## agent: claude review\nreviewer only"
+
+
+def test_unicode_line_separators_are_not_line_breaks():
+    parsed = parse("Spec text ## agent: claude\fstill text\nmore", ["claude"])
+    assert parsed.valid and not parsed.sections and parsed.spec.endswith("more")
+
+
+def test_for_seat_ignores_the_case_of_the_configured_type():
+    parsed = parse("Spec\n## agent: claude review\nUse the advisor.", ["Claude"])
+    assert for_seat(parsed, "Claude", "review") == "## agent: claude review\nUse the advisor."

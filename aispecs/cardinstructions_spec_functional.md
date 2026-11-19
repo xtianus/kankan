@@ -64,6 +64,8 @@ An invalid card is **not claimed**: it gets `Error` (unless it already has one: 
 
 When the user fixes the description, kankan removes the `Error` it set at its next board read, and the card can be claimed again. kankan never removes an `Error` it did not set for this reason.
 
+A refused card moved into the `kankan` list is a setting card there. If it is also invalid as a setting card, the `Error` kankan set stays and the board settings take it over: kankan removes it when the card is fixed as a setting card or moves out of the `kankan` list ([§8](#8-changes-to-the-board-settings-specification)). A card moved back to the `Backlog` with its headings still invalid loses `Error` and is reported again at its next claim attempt.
+
 A configured agent type removed later makes the cards that name it invalid at their next claim, with the same comment.
 
 **`kankan status`** lists every card in the `Backlog` or a seat's `Implemented` list whose agent headings are invalid among the waiting cards, with reason `invalid_headings` and its problems (line numbers and reasons), whether or not `Error` is still on the card: a user who removed the label by hand, or a card not yet tried by any seat, still shows why it waits.
@@ -131,6 +133,8 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 
 **§2 Board settings, table.** In the row "Card whose name is not a known setting", add: "The name `Instructions` is reserved for the help card and is never an unknown setting." In the row "Two cards with the same title", add: "Two `Instructions` cards: `Error` on both, and `doctor` updates neither until one is removed."
 
+**§2 Board settings, table.** In the row "Card whose name is not a known setting" (and every row that sets `Error`), add: "An `Error` kankan set on a card refused for its agent headings ([card instructions §4](cardinstructions_spec_functional.md#4-errors)) and then moved here is treated as set by the board settings: it is removed when the card becomes valid or leaves the list."
+
 ## 9. Acceptance tests
 
 1. A card without agent headings: `desc` is the whole description, `card_instructions` is `null`, in both phases.
@@ -152,6 +156,7 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 17. Two open `Instructions` cards both get the duplicate-title `Error`; after one is removed, the next `doctor` updates the other.
 18. A code block left unclosed before an agent heading: the heading is ordinary text of the specification, and every agent gets it in `desc`.
 19. `kankan status` shows `invalid_headings` with the problems for an invalid card in the `Backlog` before any claim attempt, and still after the user removed its `Error`; a fixed card leaves the list.
+20. A card refused for `## agent: cluade` is moved into the `kankan` list, where its name is not a known setting: `Error` stays; after the card is moved out of the list, `Error` is removed. The same card with an `Error` set by the user before the refusal keeps it.
 
 ## 10. Out of scope
 

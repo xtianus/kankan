@@ -7,6 +7,7 @@ its one write is made and acknowledged. ``sweep`` only schedules removals; ``dra
 """
 
 import json
+import re
 from typing import Optional
 
 from kankan import boardconfig, clock, messages, notify
@@ -64,23 +65,42 @@ def _types(project) -> list:
     return adapter_types(project.paths)
 
 
+def _code(text: str) -> str:
+    """``text`` as a Markdown code span, whatever backticks it holds."""
+    fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def _comment_text(problems, types) -> str:
     shown = []
     for problem in problems[:MAX_PROBLEMS]:
         heading = problem.heading if len(problem.heading) <= HEADING_CHARS else problem.heading[:HEADING_CHARS - 1] + "…"
-        shown.append(f"`{heading}` (line {problem.line}): {problem.reason}")
+        shown.append(f"{_code(heading)} (line {problem.line}): {problem.reason}")
     text = "; ".join(shown)
     if len(problems) > MAX_PROBLEMS:
         text += f"; and {len(problems) - MAX_PROBLEMS} more"
     return messages.SECTIONS_INVALID.format(problems=text, targets=", ".join(sorted(types) + ["all"]))
 
 
-def _other_cause(project, card_id: str) -> bool:
-    """Whether another cause needs ``Error`` on the card: a seat state's cause (the ``sections`` cause never is one),
-    or the board settings, for a card moved into the ``kankan`` list that is invalid there."""
-    if any(label_cause(load_state(project.paths, seat), card_id, project.cfg.label_error) for seat in project.cfg.seats):
-        return True
-    return bool(boardconfig.load(project.paths).cards.get(card_id, {}).get("invalid"))
+def _seat_cause(project, card_id: str) -> bool:
+    """Whether a seat state records a cause for ``Error`` on the card (the ``sections`` cause never is one)."""
+    return any(label_cause(load_state(project.paths, seat), card_id, project.cfg.label_error) for seat in project.cfg.seats)
+
+
+def _hand_over_to_settings(project, card_id: str) -> bool:
+    """A refused card moved into the ``kankan`` list and invalid there: the board settings take over kankan's
+    ``Error`` and remove it when the card becomes valid or leaves the list (card instructions T§3, T§10).
+    Saves ``board-settings.json`` before the caller drops the record, so a crash in between repeats the handover.
+    The caller holds the project lock. True when the label was handed over."""
+    state = boardconfig.load(project.paths)
+    entry = state.cards.get(card_id)
+    if not (entry and entry.get("invalid")):
+        return False
+    entry.update(owned_error=True, error_confirmed=True, observed_error=True)
+    atomic_write_json(project.paths.kankan_dir / "board-settings.json", state.to_dict())
+    project.log("sections_error_handed_over", card=card_id)
+    return True
 
 
 def record_invalid_locked(project, card, fp: str, problems) -> None:
@@ -114,7 +134,9 @@ def _remove_owned(project, record, card) -> bool:
     """Remove the ``Error`` kankan owns on ``card`` if no other cause needs it; True when nothing remains to do."""
     if not (record.get("owned_error") and (record.get("error_write_started") or record.get("error_confirmed"))):
         return True
-    if project.cfg.label_error not in card.label_ids or _other_cause(project, card.id):
+    if project.cfg.label_error not in card.label_ids or _seat_cause(project, card.id):
+        return True
+    if _hand_over_to_settings(project, card.id):
         return True
     project.trello.remove_label(card.id, project.cfg.label_error)  # 400/404: the label is not on the card
     return True

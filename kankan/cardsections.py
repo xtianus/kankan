@@ -15,6 +15,8 @@ RESERVED = "all"
 _CANDIDATE = re.compile(r"^ {0,3}#{1,6}[ \t]+agent:(.*)$", re.IGNORECASE)
 _CLOSING_HASHES = re.compile(r"(?:^|[ \t]+)#+$")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# Markdown line endings only: str.splitlines also splits on \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029.
+_LINE_END = re.compile(r"(?<=\n)|(?<=\r)(?!\n)")
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,7 @@ def parse(desc: str, agent_types: Iterable[str]) -> Parsed:
     def close():
         if current:
             sections.append(Section(current[0], current[1], current[2], _render(current[2], current[3]), current[4]))
-    for number, raw in enumerate(desc.splitlines(keepends=True), start=1):
+    for number, raw in enumerate((part for part in _LINE_END.split(desc) if part), start=1):
         text = raw.rstrip("\r\n")
         start = offset
         offset += len(raw)
@@ -124,6 +126,7 @@ def parse(desc: str, agent_types: Iterable[str]) -> Parsed:
 
 def for_seat(parsed: Parsed, agent_type: str, phase: str) -> Optional[str]:
     """The sections for a seat of ``agent_type`` in ``phase``, in description order; None when none matches."""
+    agent_type = agent_type.lower()  # targets are lowercased by ``parse``
     matching = [section.body for section in parsed.sections
                 if section.target in (agent_type, RESERVED) and section.phase in (None, phase)]
     return "\n\n".join(matching) if matching else None

@@ -456,7 +456,7 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
             else:
                 report = settings_setup.ensure_instructions_card(project, adapter_types(project.paths), write=False)
                 if report:  # card instructions T§6
-                    checks.append(Check("instructions-card", WARN, report, "kankan doctor"))
+                    checks.append(Check("instructions-card", WARN, report, "kankan doctor (without --no-fix)"))
             read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
             result = boardsettings.apply_read(project, read, adapters, write=fix)
             if fix:
