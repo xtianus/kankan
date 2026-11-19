@@ -1,8 +1,10 @@
 """Recoverable settings-list/card construction, serialized separately from workflow transactions."""
 from __future__ import annotations
 
-from kankan import boardconfig, boardsettings, messages
-from kankan.adapters import combinations
+from typing import Optional
+
+from kankan import boardconfig, boardsettings, cardsections, messages
+from kankan.adapters import adapter_types, combinations
 from kankan.config import file_lock, load_config, project_lock, save_config
 from kankan.errors import KankanError
 
@@ -87,6 +89,49 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
                     state = boardconfig.load(project.paths)
                     state.construction.pop(key, None)
                     boardsettings._save(project, state)
+        report = ensure_instructions_card(project, adapter_types(project.paths), write=True)
+        if report:
+            reports.append(report)
+            say(report)
         result = boardsettings.apply_read(project, project.trello.settings_cards(project.cfg.settings_list), adapters)
         boardsettings.drain_actions(project)
     return reports
+
+
+def ensure_instructions_card(project, agent_types, *, write: bool) -> Optional[str]:
+    """Create or update the `Instructions` card and keep it first in the list (card instructions T§6); with ``write``
+    false, only report.
+
+    Two or more such cards are left alone: the settings evaluation reports the duplicate."""
+    list_id = project.cfg.settings_list
+    if not list_id:
+        return None
+    read = project.trello.settings_cards(list_id)
+    if not read.list_available:
+        return None
+    cards = [card for card in read.cards if card.name == cardsections.INSTRUCTIONS_TITLE and not card.closed]
+    text = cardsections.help_text(agent_types)
+    if len(cards) > 1:
+        return None
+    if not cards:
+        if not write:
+            return messages.INSTRUCTIONS_CARD_MISSING
+        project.trello._write_once(
+            lambda: project.trello.create_card(list_id, cardsections.INSTRUCTIONS_TITLE, text, pos="top"),
+            lambda: next((c for c in project.trello.settings_cards(list_id).cards
+                          if c.name == cardsections.INSTRUCTIONS_TITLE), None))
+        return messages.INSTRUCTIONS_CARD_CREATED
+    card = cards[0]
+    outdated = cardsections.normalize_help(card.desc) != cardsections.normalize_help(text)
+    misplaced = any(other.pos < card.pos for other in read.cards if other.id != card.id and not other.closed)
+    if not write:
+        return "; ".join([message for flag, message in ((outdated, messages.INSTRUCTIONS_CARD_OUTDATED),
+                          (misplaced, messages.INSTRUCTIONS_CARD_NOT_FIRST)) if flag]) or None
+    reports = []
+    if outdated:
+        project.trello.set_card_desc(card.id, text)
+        reports.append(messages.INSTRUCTIONS_CARD_UPDATED.format(types=", ".join(sorted(set(agent_types)))))
+    if misplaced:
+        project.trello.move_card(card.id, list_id, "top")
+        reports.append(messages.INSTRUCTIONS_CARD_MOVED)
+    return "; ".join(reports) or None

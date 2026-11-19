@@ -5,6 +5,11 @@ from kankan.config import save_config
 from tests.helpers import add_questions_seed
 
 
+
+def role_cards(read):
+    """The setting cards of a ``kankan`` list read, without the ``Instructions`` help card."""
+    return [card for card in read.cards if card.name != 'Instructions']
+
 def test_build_and_resume_settings_by_name(kproject, fake_trello):
     from kankan import settings_setup, boardsettings
     adapters = boardsettings.adapters_for(kproject.paths)
@@ -13,14 +18,15 @@ def test_build_and_resume_settings_by_name(kproject, fake_trello):
     cfg = kproject.reload_config()
     assert cfg.settings_list and cfg.settings_list not in cfg.workflow_lists()
     read = kproject.trello.settings_cards(cfg.settings_list)
-    assert [card.name for card in read.cards] == ['Implementation Agents', 'Review Agents']
-    for card in read.cards:
+    assert [card.name for card in role_cards(read)] == ['Implementation Agents', 'Review Agents']
+    assert [card.name for card in read.cards][0] == 'Instructions'  # the help card, first: card instructions F§6
+    for card in role_cards(read):
         assert card.desc
         assert [c.name for c in card.checklists] == ['claude', 'codex']
         assert all(len([i for i in c.items if i.state == 'complete']) == 1 for c in card.checklists)
     assert 'sonnet/high' in ' '.join(reports)
     settings_setup.ensure(kproject, adapters, say=reports.append)
-    assert len(kproject.trello.settings_cards(cfg.settings_list).cards) == 2
+    assert len(kproject.trello.settings_cards(cfg.settings_list).cards) == 3
     kproject.trello.archive_list(cfg.settings_list)
     settings_setup.ensure(kproject, adapters, say=reports.append)
     assert kproject.trello.settings_cards(cfg.settings_list).list_available
@@ -75,8 +81,8 @@ def test_two_processes_build_one_set_of_cards(kproject):
         stdout, stderr = child.communicate(timeout=25)
         assert child.returncode == 0, stderr.decode()
     read = kproject.trello.settings_cards(kproject.reload_config().settings_list)
-    assert sorted(c.name for c in read.cards) == ['Implementation Agents', 'Review Agents']
-    assert all([c.name for c in card.checklists] == ['claude', 'codex'] for card in read.cards)
+    assert sorted(c.name for c in read.cards) == ['Implementation Agents', 'Instructions', 'Review Agents']
+    assert all([c.name for c in card.checklists] == ['claude', 'codex'] for card in role_cards(read))
 
 
 def test_description_setting_has_value_and_help_comment(kproject, monkeypatch):
@@ -84,9 +90,10 @@ def test_description_setting_has_value_and_help_comment(kproject, monkeypatch):
     monkeypatch.setattr(boardconfig, 'schema', lambda adapters, roles: {'mode': boardconfig.SettingSpec('description', help='allowed safe/fast', default='safe', allowed=['safe', 'fast'])})
     settings_setup.ensure(kproject, boardsettings.adapters_for(kproject.paths), say=lambda text: None)
     read = kproject.trello.settings_cards(kproject.reload_config().settings_list)
-    assert len(read.cards) == 1 and read.cards[0].desc == 'safe'
-    assert not read.cards[0].checklists
-    comments = kproject.trello.comments(read.cards[0].id)
+    cards = role_cards(read)
+    assert len(cards) == 1 and cards[0].desc == 'safe'
+    assert not cards[0].checklists
+    comments = kproject.trello.comments(cards[0].id)
     assert len(comments) == 1 and comments[0].text.endswith('`kankan:help`')
 
 
@@ -95,14 +102,14 @@ def test_questions_card_exists_only_with_a_qa_seat(kproject, fake_trello):
     adapters = boardsettings.adapters_for(kproject.paths)
     settings_setup.ensure(kproject, adapters, say=lambda text: None)
     cfg = kproject.reload_config()
-    assert [c.name for c in kproject.trello.settings_cards(cfg.settings_list).cards] == ['Implementation Agents', 'Review Agents']
+    assert [c.name for c in role_cards(kproject.trello.settings_cards(cfg.settings_list))] == ['Implementation Agents', 'Review Agents']
     seats.ensure_created(kproject, 'claude-qa', 'claude')
     add_questions_seed()
     adapters = boardsettings.adapters_for(kproject.paths)
     reports = []
     settings_setup.ensure(kproject, adapters, say=reports.append)
     cards = {c.name: c for c in kproject.trello.settings_cards(cfg.settings_list).cards}
-    assert sorted(cards) == ['Implementation Agents', 'Q&A Agents', 'Review Agents']
+    assert sorted(cards) == ['Implementation Agents', 'Instructions', 'Q&A Agents', 'Review Agents']
     assert [c.name for c in cards['Q&A Agents'].checklists] == ['claude', 'codex']
     assert all(len([i for i in c.items if i.state == 'complete']) == 1 for c in cards['Q&A Agents'].checklists)
     assert any('Q&A Agents' in report for report in reports)

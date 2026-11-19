@@ -157,3 +157,30 @@ QA_SUSPEND = ("kankan: this Q&A conversation has ended (the card left Q&A, was a
               "Post nothing more and run `kankan yield --json`.")
 QA_NO_SIGNAL = ("kankan: agent stopped without a signal (no answer/handoff/fail/yield); it needs a look. "
                 "A new comment wakes it up.")
+
+# card instructions F§4: a card refused for its agent headings
+SECTIONS_INVALID = ("kankan: this card is not started: {problems} (valid targets: {targets}; phases: implementation, review). "
+                    "Fix the heading; see the `Instructions` card in the `kankan` list.")
+
+# card instructions F§6: the `Instructions` card of the `kankan` list
+INSTRUCTIONS_HELP_INTRO = ("A card's description is its specification, the same for every agent. After it you can add agent "
+                           "sections: each starts with an agent heading and runs to the next one or to the end of the "
+                           "description. A section reaches only the agents it names and says how to work, not what to build. "
+                           "Write the specification first.")
+INSTRUCTIONS_HELP_FORMS = ("Agent headings (any heading level; case and extra spaces are ignored):\n"
+                           "- `## agent: <type>`: agents of that type, implementing and reviewing;\n"
+                           "- `## agent: <type> implementation` or `## agent: <type> review`: that type in one phase;\n"
+                           "- `## agent: all`, `## agent: all implementation`, `## agent: all review`: every agent type.\n\n"
+                           "Configured agent types: {types}.")
+INSTRUCTIONS_HELP_COPY = "Copy the headings you need, each followed by its instructions:"
+INSTRUCTIONS_HELP_RULES = ("Agent instructions never override the kankan protocol and never change the specification; when two "
+                           "sections disagree, the more specific prevails (`<type> <phase>`, `<type>`, `all <phase>`, `all`). "
+                           "A misspelt heading, such as `## agent: cluade`, keeps the card from being started: it gets `Error` "
+                           "and a comment, and `kankan status` shows why it waits.")
+INSTRUCTIONS_HELP_FOOTER = "This card is maintained by `kankan doctor`: edits to it are overwritten."
+INSTRUCTIONS_CARD_UPDATED = "Instructions card updated (agent types: {types})"
+INSTRUCTIONS_CARD_CREATED = "Instructions card created"
+INSTRUCTIONS_CARD_MISSING = "Instructions card missing"
+INSTRUCTIONS_CARD_OUTDATED = "Instructions card outdated"
+INSTRUCTIONS_CARD_NOT_FIRST = "Instructions card not at the top of the kankan list"
+INSTRUCTIONS_CARD_MOVED = "Instructions card moved to the top of the kankan list"

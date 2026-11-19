@@ -40,7 +40,7 @@ def test_task_fields(agent, capsys):
     assert code == 0 and out["ok"]
     assert set(out["data"]) == {"task_id", "kind", "card_id", "short", "title", "url", "desc", "phase", "branch",
                                 "worktree", "main", "integration_branch", "dirty_files", "resumed", "hold", "instructions", "attachments",
-                                "comments", "handoff"}
+                                "comments", "handoff", "card_instructions", "card_instructions_error"}
     assert out["data"]["attachments"] == [] and out["data"]["handoff"] is None
     assert [c["role"] for c in out["data"]["comments"]] == ["kankan"]  # the claim notice
     assert out["data"]["title"] == "Feature" and out["data"]["task_id"] == task["id"]

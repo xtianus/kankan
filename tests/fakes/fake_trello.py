@@ -69,7 +69,7 @@ class FakeTrello:
         handler = self._make_handler()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)  # fast shutdown
         self.thread.start()
         return self
 
@@ -336,9 +336,14 @@ class FakeTrello:
                 else:
                     self.send_header("Content-Length", str(len(raw.content)))
                 self.end_headers()
-                if self._write(raw.content, truncate):
+                # counted before the bytes go out, so a client that has read them all always sees the count;
+                # taken back when the write fails
+                if not truncate:
                     with fake.lock:
                         fake.downloads[raw.att_id] += 1
+                if not self._write(raw.content, truncate) and not truncate:
+                    with fake.lock:
+                        fake.downloads[raw.att_id] -= 1
 
             def _write(self, data, truncate):
                 """Send ``data`` (only its first half and close, if ``truncate``); True when all was sent."""
@@ -452,7 +457,8 @@ class FakeTrello:
             if len(parts) == 2 and method == "GET":
                 return 200, lst
             if len(parts) == 3 and parts[2] == "cards" and method == "GET":
-                return 200, [self._card_out(c, False) for c in st["cards"].values() if c["idList"] == lst["id"] and not c["closed"]]
+                return 200, [self._card_out(c, False) for c in sorted(st["cards"].values(), key=lambda c: c["pos"])
+                             if c["idList"] == lst["id"] and not c["closed"]]
             if len(parts) == 3 and parts[2] == "closed" and method == "PUT":
                 lst["closed"] = str(p.get("value")).lower() == "true"
                 return 200, lst
@@ -502,6 +508,8 @@ class FakeTrello:
                         card["pos"] = max(others or [0]) + 1024
                 if "closed" in p:
                     card["closed"] = str(p["closed"]).lower() == "true"
+                if "desc" in p:
+                    card["desc"] = p["desc"]
                 card["dateLastActivity"] = self._now()
                 return 200, self._card_out(card, False)
             if len(parts) == 2 and method == "DELETE":

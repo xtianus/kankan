@@ -1,7 +1,7 @@
 """Manual live run with real Claude Code and Codex agents on the Trello test board.
 
     .venv/bin/python -m tests.live.agents_e2e [--clean] [--no-ask] [--no-hold] [--no-attach] [--no-settings]
-                                              [--no-qa] [--timeout MIN] [--keep] [--base DIR]
+                                              [--no-qa] [--no-instructions] [--timeout MIN] [--keep] [--base DIR]
 
 Never collected by pytest. See docs/developer-manual.md §3.5.
 """
@@ -290,6 +290,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-hold", action="store_true", help="skip the card you put on HOLD")
     parser.add_argument("--no-attach", action="store_true", help="skip the card you attach a file to")
     parser.add_argument("--no-qa", action="store_true", help="skip the Q&A dialogue (no Q&A seat)")
+    parser.add_argument("--no-instructions", action="store_true", help="skip the card with agent review instructions")
     parser.add_argument("--no-settings", action="store_true", help="skip ticking other review models on the board "
                         "(the agents then use the model and effort already ticked)")
     parser.add_argument("--timeout", type=int, default=60, help="minutes before giving up (default 60)")
@@ -392,7 +393,8 @@ def _main(args, state) -> int:
                 return 2
         selection, pre_problems = (None, []) if args.no_settings else choose_settings(client, project, clone)
         cards = es.create_cards(client, cfg, run_id, es.scenario(ask=not args.no_ask, hold=not args.no_hold,
-                                                                 attach=not args.no_attach, qa=qa_type is not None))
+                                                                 attach=not args.no_attach, qa=qa_type is not None,
+                                                                 instructions=not args.no_instructions))
         card_ids += [c.id for c in cards.values()]
         wt = run_dir / "user-work-wt"
         subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "user-work", str(wt), "main"], check=True)
@@ -450,6 +452,10 @@ def _main(args, state) -> int:
         if selection is not None:
             for line in es.restart_report(events)[1]:
                 say(f"observed: {line}")
+        covered = sorted({str(es.reviewer_seat(events, cards[key].id)).split("-")[0]
+                          for key in es.INSTRUCTION_CARDS if key in cards})
+        if covered:
+            say(f"observed: card-instructions reviews by {', '.join(covered)}")
         if "hold" in cards and es.hold_path(events, cards["hold"].id):
             say(f"observed: HOLD noticed first by {es.hold_path(events, cards['hold'].id)}")
         if problems:

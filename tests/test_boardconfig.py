@@ -172,3 +172,39 @@ def test_setting_cards_are_recognized_by_title_not_by_key():
     assert not result.state.settings['implementation'].get('invalid')
     duplicate = evaluate([role_card(adapters), replace(role_card(adapters), id='other')], schema=specs)
     assert duplicate.state.cards['other']['structural'] == ['duplicate setting `Implementation Agents`']
+
+
+def test_instructions_card_is_not_unknown():
+    result = evaluate([card('Instructions', desc='help', ident='help')])
+    assert not result.state.cards.get('help', {}).get('invalid')
+    assert not [a for a in result.actions if a.kind == 'add_error']
+    assert not [t for t in comments(result) if 'unknown setting' in t]
+
+
+def test_instructions_duplicate_cleared():
+    dup = evaluate([card('Instructions', ident='a'), card('Instructions', ident='b')])
+    assert {a.card_id for a in dup.actions if a.kind == 'add_error'} == {'a', 'b'}
+    assert all('duplicate' in t for t in comments(dup)) and len(comments(dup)) == 2
+    for record in dup.state.cards.values():
+        record['observed_error'] = True
+    single = evaluate([card('Instructions', ident='a')], dup.state, date=NOW + timedelta(seconds=20))
+    assert 'a' in {a.card_id for a in single.actions if a.kind == 'remove_error'}
+
+
+def test_instructions_card_migrates_from_unknown():
+    unknown = evaluate([card('Notes', ident='x')])
+    assert unknown.state.cards['x']['invalid'] and unknown.state.cards['x']['owned_error']
+    unknown.state.cards['x']['probes'] = {'claude': {'pair': 'p'}}
+    renamed = evaluate([card('Instructions', ident='x')], unknown.state, date=NOW + timedelta(seconds=20))
+    assert not renamed.state.cards['x']['invalid']
+    assert [a.card_id for a in renamed.actions if a.kind == 'remove_error'] == ['x']
+
+
+def test_instructions_renamed_away_and_back():
+    first = evaluate([card('Instructions', ident='x')])
+    away = evaluate([card('Notes', ident='x')], first.state, date=NOW + timedelta(seconds=20))
+    assert away.state.cards['x']['invalid']
+    away.state.cards['x']['observed_error'] = True
+    back = evaluate([card('Instructions', ident='x')], away.state, date=NOW + timedelta(seconds=40))
+    assert not back.state.cards['x']['invalid']
+    assert 'x' in {a.card_id for a in back.actions if a.kind == 'remove_error'}

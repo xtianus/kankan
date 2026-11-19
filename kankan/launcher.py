@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from kankan import boardconfig, boardsettings, cards, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
+from kankan import boardconfig, boardsettings, cards, cardsections_feedback, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
 from kankan.adapters import Adapter, Classification, ModelEffort, classify, load_adapter, start_command
 from kankan.config import check_lists, check_registry
 from kankan.errors import KankanError, Status
@@ -24,7 +24,19 @@ from kankan.seatstate import load_state, update_state
 from kankan.tmux import Tmux, session_name
 
 STATES = ("starting", "idle", "working", "waiting_human", "limited", "suspending", "closing", "stopping")
-SCREEN_POLL = 1.0
+
+
+def _screen_poll() -> float:
+    """Seconds between two steps of the main loop: 1 s. Tests shorten it with ``KANKAN_SCREEN_POLL`` (a number
+    from 0.05 to 1; any other value is ignored), since their launchers run as real processes (developer manual §1)."""
+    try:
+        value = float(os.environ.get("KANKAN_SCREEN_POLL", ""))
+    except ValueError:
+        return 1.0
+    return value if 0.05 <= value <= 1.0 else 1.0
+
+
+SCREEN_POLL = _screen_poll()
 FATAL_EXIT = 3  # configuration problems: the supervisor does not restart the launcher
 # Restart phase at the moment the old agent was found dead → how it ended (audit event `agent_restart`).
 RESTART_ENDINGS = {'wait_exit': 'exit_command', 'term': 'sigterm', 'kill': 'sigkill'}
@@ -808,6 +820,11 @@ class Launcher:
             self.request_suspend("hold")
         if self.state in ("working", "suspending", "limited", "waiting_human"):
             self.check_user_move(snap)
+        try:  # card instructions T§3; after HOLD and user moves, which a failure here must never skip
+            cardsections_feedback.sweep(self.project, snap)
+            cardsections_feedback.drain(self.project)
+        except KankanError as err:
+            self.log("sections_action_failed", error=err.message)
 
     def check_user_move(self, snap) -> None:
         """§14.6: an in-progress card moved out of the seat's lists, archived or deleted by the user."""

@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from kankan import attachments, cards, messages, notify, qa, worktrees
+from kankan import attachments, cards, cardsections, messages, notify, qa, worktrees
+from kankan.adapters import adapter_types
 from kankan.cards import CardMeta, Phase, target_list_for, transition
 from kankan.errors import KankanError, Status
 from kankan.project import Project
@@ -257,9 +258,15 @@ def task(ctx: AgentContext) -> dict:
     if current["kind"] == "impl":
         thread = ctx.project.trello.comments(card.id)
         extra = {"comments": _thread(ctx.project, thread), "handoff": _handoff(ctx.project, value.meta, thread)}
+    parsed = cardsections.parse(card.desc, adapter_types(ctx.project.paths))
+    if current["kind"] in ("impl", "review"):
+        # card instructions T§4: the seat's sections, or the problems of a description broken during the task
+        phase = "implementation" if current["kind"] == "impl" else "review"
+        extra["card_instructions"] = cardsections.for_seat(parsed, ctx.lease.type, phase) if parsed.valid else None
+        extra["card_instructions_error"] = None if parsed.valid else cardsections.problems_text(parsed.problems)
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
-        "title": card.name, "url": card.url, "desc": card.desc, "phase": value.meta.get("phase"),
+        "title": card.name, "url": card.url, "desc": parsed.spec, "phase": value.meta.get("phase"),
         "branch": value.meta.get("branch"), "worktree": str(ctx.worktree), "main": ctx.project.cfg.integration_branch,
         "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),

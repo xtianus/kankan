@@ -1,7 +1,7 @@
 # Kanban backend requirements for kankan
 
-**Status:** v1.3 — attachments and board-settings endpoints in use
-**Date:** 2026-11-10
+**Status:** v1.4 — card instructions: description update (C9) and the description editor requirement
+**Date:** 2026-11-19
 **Related:** [`initial_spec_functional.md`](initial_spec_functional.md), [`initial_spec_technical.md`](initial_spec_technical.md)
 
 ## 1. Purpose
@@ -55,12 +55,13 @@ Requirement levels:
 
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
-| C1 | MUST | Read one card by ID with list, labels, attachments, title, description, URL, archived state and last activity. The attachments carry ID, name, file name, URL, size, MIME type, the member who added them, the upload flag and the creation date (`date`); the Q&A seat uses them to detect follow-up attachments. Used for the reread after a claim and for verification after every move. | `GET /1/cards/{id}?attachments=true&attachment_fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,date` |
+| C1 | MUST | Read one card by ID with list, labels, attachments, title, description, URL, archived state and last activity. The attachments carry ID, name, file name, URL, size, MIME type, the member who added them, the upload flag and the creation date (`date`); the Q&A seat uses them to detect follow-up attachments. Used for the reread after a claim and for verification after every move, and before each pending feedback action on a card refused for its agent headings, which also tells archived and deleted cards apart ([card instructions technical §3](cardinstructions_spec_technical.md#3-check-at-claim)). | `GET /1/cards/{id}?attachments=true&attachment_fields=id,name,fileName,url,bytes,mimeType,idMember,isUpload,date` |
 | C2 | MUST | Resolve a card from a short, URL-safe, globally unique code that is stable across board moves. kankan puts this code in branch names. | `shortLink`; `GET /1/cards/{shortLink}` |
-| C3 | MUST | Move a card to another list of the same board and place it at the top, or at the bottom (the Q&A `handoff` moves the card to the bottom of `Backlog`). kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top` or `pos=bottom`) then `GET /1/cards/{id}` |
+| C3 | MUST | Move a card to another list of the same board and place it at the top, or at the bottom (the Q&A `handoff` moves the card to the bottom of `Backlog`). `doctor` also uses it within the same list to put the `Instructions` help card back at the top of the `kankan` list ([card instructions §6](cardinstructions_spec_functional.md#6-the-instructions-card)). kankan verifies every move with a C1 reread. | `PUT /1/cards/{id}` (`idList`, `pos=top` or `pos=bottom`) then `GET /1/cards/{id}` |
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
-| C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; `init` and `doctor` create the setting cards of the `kankan` list ([board settings §2](boardsettings_spec_functional.md#2-board-settings)). Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
+| C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; `init` and `doctor` create the setting cards of the `kankan` list ([board settings §2](boardsettings_spec_functional.md#2-board-settings)) at the bottom and the `Instructions` help card at the top. Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
+| C9 | SHOULD | Update a card's description. Used by `doctor` to keep the `Instructions` help card of the `kankan` list current ([card instructions §6](cardinstructions_spec_functional.md#6-the-instructions-card)). Without it, the user deletes the card and `doctor` recreates it. | `PUT /1/cards/{id}` (`desc`) |
 | C7 | SHOULD | Create a named checklist on a card. The model and effort setting cards have one checklist per agent type ([board settings §3](boardsettings_spec_functional.md#3-model-and-effort)). Without checklists, those settings cannot be held on the board. | `POST /1/cards/{id}/checklists` (`name`) |
 | C8 | SHOULD | Add a checklist item, ticked or not, move it and delete it; ticking from the UI updates the card's last activity. Used for creating the setting cards and keeping their items in sync with the adapters, in the adapters' order. | `POST /1/checklists/{id}/checkItems` (`name`, `checked`), `PUT /1/cards/{id}/checkItem/{idCheckItem}` (`pos`), `DELETE /1/checklists/{id}/checkItems/{idCheckItem}` |
 
@@ -79,7 +80,7 @@ Requirement levels:
 | ID | Level | Capability | Trello endpoint |
 |---|---|---|---|
 | M1 | MUST | Add a plain-text or Markdown comment to a card. A comment has a maximum length (Trello: 16 384 characters, longer texts are rejected with HTTP 400); kankan splits longer texts into several comments. | `POST /1/cards/{id}/actions/comments` |
-| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp), with pagination. Used to forward the user's answers to a waiting agent, to find kankan's own comment (by its `kankan:<op-id>` marker) after a comment post timed out, and by `kankan task` to give the agent of a Q&A or implementation task the card's whole comment thread (and the handoff summary). | `GET /1/cards/{id}/actions?filter=commentCard&since=<action id>&before=<action id>&limit=50` |
+| M2 | MUST | List a card's comments with ID, author ID, author username, creation timestamp and text, newest first, and fetch only comments after a given point (ID or timestamp), with pagination. Used to forward the user's answers to a waiting agent, to find kankan's own comment (by its `kankan:<op-id>` marker) after a comment post timed out, by `kankan task` to give the agent of a Q&A or implementation task the card's whole comment thread (and the handoff summary), and to check that the comment on a card refused for its agent headings was not already posted ([card instructions technical §3](cardinstructions_spec_technical.md#3-check-at-claim)). | `GET /1/cards/{id}/actions?filter=commentCard&since=<action id>&before=<action id>&limit=50` |
 | M3 | MUST | Mentioning a user in a comment (e.g. `@username`) sends that user a notification (app, push or email). This is how kankan alerts the user about Question, Error and Blocked. | Trello `@mention` behaviour |
 | M4 | SHOULD | React to a comment or reply to it, to acknowledge that a comment was forwarded. Workaround: post a new comment. | `POST /1/actions/{id}/reactions` |
 | M5 | MUST | Identify the authenticated user (ID and username). | `GET /1/members/me` |
@@ -116,6 +117,7 @@ Files and links the user attaches to a card are task inputs for the agent ([spec
 - **UI:** users create and reorder cards, create extra lists, add and remove labels, link cards, attach files and links, and write comments from a web or mobile UI. kankan provides no UI of its own.
 - **Visibility:** the UI shows labels, comments and list membership on the card front or in the card detail.
 - **Data model:** each card is in exactly one list at a time.
+- **Description editor:** a Markdown heading typed or pasted in a card's description editor is stored as Markdown source (`## agent: claude review`) in the description the API returns, and lines copied from a rendered code block keep their `#` characters. kankan reads agent sections from the description this way ([card instructions §2](cardinstructions_spec_functional.md#2-agent-sections), observed on Trello: [technical §12](cardinstructions_spec_technical.md#12-observed-trello-behaviour)).
 - **Free tier:** the use case (one board per project, a few dozen lists, low thousands of cards) should fit a free or low-cost plan, as it does on Trello.
 
 ## 12. Adapter checklist

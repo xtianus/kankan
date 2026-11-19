@@ -268,6 +268,28 @@ Ask the agents about the code without asking for a change: create a card in the 
 
 Attachments of a `Q&A` card are downloaded as for any task and removed when the conversation ends, unless the card was handed over for implementation.
 
+### 6.3 Card instructions
+
+A card's description is its specification: every agent working on the card, the implementer and the reviewer, gets it unchanged. After it you can add **agent sections** that tell some agents **how** to work, for example to consult a second opinion before integrating:
+
+```
+Implement feature X: …
+
+## agent: claude review
+Consult your advisor before `kankan integrate`.
+
+## agent: all implementation
+Write the commit messages in Italian.
+```
+
+- Each section starts with an agent heading and runs to the next one or to the end of the description, so write the specification first.
+- `## agent: <type>` reaches the agents of that type (`claude`, `codex`, …) in both phases; `## agent: <type> implementation` and `## agent: <type> review` only in that phase; `all` instead of a type reaches every agent. Any heading level works, and case and extra spaces are ignored.
+- An agent gets only the sections that name it; when two disagree, the more specific wins. Sections say how to work: they never change what to build and never make an agent skip kankan's steps.
+- A misspelt heading (`## agent: cluade`) stops the card from being started: it gets `Error` and a comment listing the problems, and `kankan status` shows it waiting with reason `invalid_headings`. Fix the heading: kankan removes its `Error` and the card is picked up. The other cards go on meanwhile.
+- The `Instructions` card, first in the `kankan` list, has ready-to-copy headings for the agent types configured in your project; copy the lines from its grey blocks. kankan keeps that card up to date: `kankan doctor` overwrites edits to it and puts it back at the top of the list.
+
+Agent sections are not read on `Q&A` cards.
+
 ## 7. Talking to the agents
 
 | Label | Meaning | What you do |

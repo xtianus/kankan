@@ -711,6 +711,10 @@ class TrelloClient:
                 return comment
         return None
 
+    def set_card_desc(self, card_id: str, desc: str) -> Card:
+        """C9: update a card's description (the `Instructions` card, card instructions T§6)."""
+        return _card(self._ok("PUT", f"/1/cards/{card_id}", body={"desc": desc}))
+
     def create_card(self, list_id: str, name: str, desc: str = "", pos: str = "bottom") -> Card:
         body = {"idList": list_id, "name": name, "pos": pos}
         if desc:

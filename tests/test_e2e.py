@@ -22,6 +22,7 @@ REVIEW = ("kankan sync --json && H=$(git rev-parse HEAD) && kankan verify --test
 
 def test_card_goes_from_backlog_to_done(git_repo, fake_trello, monkeypatch, agent_path, tmux_server, tmp_path):
     fake = fake_trello
+    monkeypatch.delenv("KANKAN_SCREEN_POLL")  # one end-to-end flow at the launcher's real 1 s pace
     monkeypatch.setenv("KANKAN_TRELLO_URL", fake.url)
     monkeypatch.setenv("KANKAN_TRELLO_KEY", KEY)
     monkeypatch.setenv("KANKAN_TRELLO_TOKEN", TOKEN)

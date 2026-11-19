@@ -44,7 +44,7 @@ class ExternalHost:
 
         self.server = ThreadingHTTPServer(("localhost", 0), Handler)
         self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)  # fast shutdown
         self.thread.start()
         return self
 

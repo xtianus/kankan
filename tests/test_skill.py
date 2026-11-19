@@ -39,3 +39,9 @@ def test_skill_install_symlinks(isolated_home):
     assert claude.is_symlink() and (claude / "SKILL.md").exists()
     assert any("not a symlink" in m for m in messages)
     assert any("already installed" in m for m in skill_install())
+
+
+def test_skill_has_card_instructions():
+    text = (skill_dir() / "SKILL.md").read_text()
+    assert "card_instructions" in text and "card_instructions_error" in text
+    assert "Card instructions" in text

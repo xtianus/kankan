@@ -9,6 +9,30 @@ def git(repo, *args, check=True):
     return subprocess.run(["git", "-C", str(repo), *args], check=check, capture_output=True, text=True).stdout.strip()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def no_fsync():
+    """Skip fsync in the pytest process: on a slow disk it dominated unit test time, and no in-process test
+    checks durability across a power loss (crash tests kill processes, which the page cache survives)."""
+    patch = pytest.MonkeyPatch()
+    patch.setattr(os, "fsync", lambda fd: None)
+    yield
+    patch.undo()
+
+
+@pytest.fixture(scope="session")
+def _git_repo_template(tmp_path_factory):
+    """One initialized repository per session, copied by ``git_repo`` instead of running git four times per test."""
+    repo = tmp_path_factory.mktemp("template") / "proj"
+    repo.mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid", "GIT_CONFIG_GLOBAL": os.devnull}
+    for args in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "init"]):
+        if args[0] == "add":
+            (repo / "README.md").write_text("hello\n")
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env)
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Keep every test away from the real ~/.config, ~/coding/.kankan and skills."""
@@ -24,6 +48,9 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.invalid")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("KANKAN_SKIP_PREFLIGHT", "1")  # tests/test_doctor.py unsets it where it matters
+    # launchers started by tests (real processes in private tmux servers) step every 0.5 s instead of 1 s;
+    # tests/test_e2e.py::test_card_goes_from_backlog_to_done keeps the real pace
+    monkeypatch.setenv("KANKAN_SCREEN_POLL", "0.5")
     from kankan import trello
     monkeypatch.setattr(trello._BUCKET, "limit", 10 ** 9)
     # `kankan init` waits settle_seconds (3 s) before reading the registry back from the real Trello; the fake
@@ -47,13 +74,11 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def git_repo(tmp_path):
+def git_repo(tmp_path, _git_repo_template):
+    import shutil
     repo = tmp_path / "coding" / "proj"
-    repo.mkdir(parents=True)
-    git(repo, "init", "-q", "-b", "main")
-    (repo / "README.md").write_text("hello\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-q", "-m", "init")
+    repo.parent.mkdir(parents=True)
+    shutil.copytree(_git_repo_template, repo, symlinks=True)
     return repo
 
 
@@ -84,16 +109,53 @@ def kproject(git_repo, fake_trello, monkeypatch):
     return bind_project(git_repo, fake_trello, monkeypatch)
 
 
-@pytest.fixture
-def tmux_server():
-    """A private tmux server, killed at teardown."""
-    from kankan.tmux import Tmux
-    server = Tmux(f"kankan-test-{os.getpid()}-{id(object())}")
-    yield server
-    server.run(["kill-server"], check=False)
-    socket = Path(f"/tmp/tmux-{os.getuid()}") / server.socket
+TMUX_PREFIX = "kankan-test-"
+
+
+def _kill_tmux_server(name: str) -> None:
+    """Kill a private tmux server and remove its socket; a server still answering after the first try is killed
+    again (a test could leave one behind, and its supervisors and agents kept running for later runs)."""
+    for _ in range(3):
+        subprocess.run(["tmux", "-L", name, "kill-server"], capture_output=True, timeout=10)
+        if subprocess.run(["tmux", "-L", name, "list-sessions"], capture_output=True, timeout=10).returncode != 0:
+            break
+    socket = Path(f"/tmp/tmux-{os.getuid()}") / name
     if socket.exists():
         socket.unlink()
+
+
+def _kill_processes_under(path) -> None:
+    """SIGKILL every process whose working directory is under ``path`` (a test's temporary directory): the
+    supervisors, launchers and agents a test started, even when they escaped their tmux server."""
+    import signal
+    from kankan import procutil
+    for pid in procutil.pids_with_cwd_under(str(path)):
+        if pid not in (os.getpid(), os.getppid()):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_leftover_processes(tmp_path_factory):
+    """When this pytest process (an xdist worker, or the whole run) ends, nothing it started keeps running:
+    its private tmux servers are killed, then any process left under its temporary directory."""
+    yield
+    sockets = Path(f"/tmp/tmux-{os.getuid()}")
+    for socket in sockets.glob(f"{TMUX_PREFIX}{os.getpid()}-*"):
+        _kill_tmux_server(socket.name)
+    _kill_processes_under(tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture
+def tmux_server(tmp_path):
+    """A private tmux server, killed at teardown with every process the test left under ``tmp_path``."""
+    from kankan.tmux import Tmux
+    server = Tmux(f"{TMUX_PREFIX}{os.getpid()}-{id(object())}")
+    yield server
+    _kill_tmux_server(server.socket)
+    _kill_processes_under(tmp_path)
 
 
 ROOT = Path(__file__).resolve().parent.parent
