@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python ≥ 3.10 standard library, pytest, the existing fake Trello server (`tests/fakes/fake_trello.py`).
 
-**Spec:** [card instructions functional](../aispecs/cardinstructions_spec_functional.md) (F) and [card instructions technical](../aispecs/cardinstructions_spec_technical.md) (T). They change the initial and board settings specifications as listed in F§7–8 and T§9–10; do not edit those files. [Kanban requirements](../aispecs/kanban_requirements.md) is revised in Task 5, in the commit that first calls C9 (T§8).
+**Spec:** [card instructions functional](../aispecs/cardinstructions_spec_functional.md) (F) and [card instructions technical](../aispecs/cardinstructions_spec_technical.md) (T). They change the initial and board settings specifications as listed in F§7–8 and T§9–10; do not edit those files. [Kanban requirements](../aispecs/kanban_requirements.md) is revised in Tasks 1, 3 and 5, in the commits that start relying on each capability (T§8).
 
 **Status:** not started.
 
@@ -23,7 +23,7 @@
 - Only work launchers (`workflow.tick`, `Launcher.periodic_board_check`) sweep and drain the record; the Q&A launcher does not (T§3).
 - Removals are confirmed on a fresh C1 read inside the lock; `sweep` only schedules them, so a stale snapshot never removes a label (T§3).
 - Local record: `<gcd>/kankan/card-sections.json` (`project.paths.kankan_dir / "card-sections.json"`), written with `config.atomic_write_json` under `config.project_lock` (T§3). The `sections` cause is never written to seat states.
-- Lock rule: `claim_impl` and `claim_review` run inside the project lock taken by `workflow.tick`, so code they call must not take it again; Trello writes of the record are performed only by `drain`, one action per lock hold (T§3).
+- Lock rule: `claim_impl` and `claim_review` run inside the project lock taken by `workflow.tick`, so code they call must not take it again; Trello writes of the record are performed by `drain`, one action per lock hold, and by `clear_at_claim_locked`, which makes at most one DELETE inside the claim's lock (T§3).
 - `sweep` and `drain` never raise: they catch `KankanError`, log `sections_action_failed` and leave the action pending (T§3).
 - `kanban_requirements.md` is revised in the commit that starts relying on a capability: Task 1 adds the editor behaviour to §11, Task 3 adds the new C1 and M2 uses, Task 5 adds C9 (T§8, AGENTS.md).
 - Instructions card title: `Instructions` (F§6). Doctor report: `Instructions card updated (agent types: claude, codex)`.
@@ -141,6 +141,7 @@ Expected: PASS.
   - `test_existing_error_only_comments`: a card that already has `Error` gets the comment, `owned_error` false; after a fix the label stays.
   - `test_crash_after_label_post`: `error_write_started` saved and the label present, `error_confirmed` missing (simulate by editing the record); after a fix, `sweep` + `drain` removes the label.
   - `test_ownership_survives_new_version`: invalid A (kankan adds `Error`) → invalid B → valid: the label is removed.
+  - `test_cancelled_clear_keeps_pending_feedback`: a version recorded but not yet drained, a stale `sweep` with a valid snapshot, then `drain` with the card still invalid: both the comment and the label end up on the card.
   - `test_restored_version_cancels_clear`: invalid A reported, valid read swept (`clearing`), then `record_invalid_locked` with A again: state `reported`, no `remove_error`, label and single comment kept.
   - `test_stale_snapshot_does_not_clear`: `sweep` with an old snapshot showing a valid description schedules `remove_error`, but the card (C1) is invalid now: `drain` cancels, label kept.
   - `test_sweep_moved_archived_deleted`: a card moved to another list and an archived one get their label removed; a deleted card (404) loses its record without writes.
@@ -226,7 +227,7 @@ Expected: PASS.
 Run: `.venv/bin/python -m pytest -q tests/test_instructions_card.py tests/test_boardconfig.py::test_instructions_card_is_not_unknown`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**: the help text from constants in `messages.py` following F§6 (paragraphs 1–5, one fenced block per sorted type and one for `all`, each heading followed by `Instructions for <target> <phase> go here.`), dropping placeholder lines if the text would exceed 16,384 characters; `set_card_desc` and the fake's `desc` field in its card PUT handler; `ensure_instructions_card` reads the `kankan` list with `settings_cards`, creates through `_write_once` like the setting cards, compares with `normalize_help`; `settings_setup.ensure` calls it with `write=True` after the setting cards and adds its report; `doctor.run` calls it with `write=False` when `fix` is false and online, as a `WARN` check `instructions-card`; offline it is skipped. In `boardconfig.evaluate`, cards named `INSTRUCTIONS_TITLE` are kept out of `unknown`; two or more go through `card_error` with `SETTINGS_DUPLICATE` under the pseudo-key `instructions` (record in `state.settings` with no value; fingerprint of the sorted card IDs; revision incremented like a setting's), and when only one remains its `Error` is removed (T§10). Add `test_instructions_duplicate_cleared` to `tests/test_boardconfig.py`, with `dateLastActivity` values older than 10 seconds (the evaluator defers recent edits), and `test_instructions_card_migrates_from_unknown`: a card recorded as unknown (or renamed from a setting with a recorded failed probe) and then named `Instructions` gets its kankan `Error` removed and its old record dropped. Add C9 to §5 of `kanban_requirements.md` and the editor behaviour line to its §11 (T§8), bump its status to v1.4.
+- [ ] **Step 3: Implement**: the help text from constants in `messages.py` following F§6 (paragraphs 1–5, one fenced block per sorted type and one for `all`, each heading followed by `Instructions for <target> <phase> go here.`), dropping placeholder lines if the text would exceed 16,384 characters; `set_card_desc` and the fake's `desc` field in its card PUT handler; `ensure_instructions_card` reads the `kankan` list with `settings_cards`, creates through `_write_once` like the setting cards, compares with `normalize_help`; `settings_setup.ensure` calls it with `write=True` after the setting cards and adds its report; `doctor.run` calls it with `write=False` when `fix` is false and online, as a `WARN` check `instructions-card`; offline it is skipped. In `boardconfig.evaluate`, cards named `INSTRUCTIONS_TITLE` are kept out of `unknown`; two or more go through `card_error` with `SETTINGS_DUPLICATE` under the pseudo-key `instructions` (record in `state.settings` with no value; fingerprint of the sorted card IDs; revision incremented like a setting's), and when only one remains its `Error` is removed (T§10). Add `test_instructions_duplicate_cleared` to `tests/test_boardconfig.py`, with `dateLastActivity` values older than 10 seconds (the evaluator defers recent edits), and `test_instructions_card_migrates_from_unknown`: a card recorded as unknown (or renamed from a setting with a recorded failed probe) and then named `Instructions` gets its kankan `Error` removed and its old record dropped. Add C9 to §5 of `kanban_requirements.md` (T§8) and bump its status to v1.4.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -238,7 +239,7 @@ Expected: PASS.
 ### Task 6: Documentation, live check and status
 
 **Files:**
-- Modify: `docs/user-manual.md` (new §6.3 after "Questions: `Q&A` cards"), `aiknowledge/notes.md`, `tests/live/test_trello_live.py`, `aispecs/cardinstructions_spec_functional.md` and `_technical.md` (status lines), `AGENTS.md` (feature list), this plan's status line
+- Modify: `docs/user-manual.md` (new §6.3 after "Questions: `Q&A` cards"), `aiknowledge/notes.md`, `tests/live/test_trello_live.py`, `tests/live/agents_e2e.py`, `docs/developer-manual.md` (§3.5), `aispecs/cardinstructions_spec_functional.md` and `_technical.md` (status lines), `AGENTS.md` (feature list), this plan's status line
 - Test: the whole suite
 
 - [ ] **Step 1: Add the live round trip** `test_card_desc_update_round_trip` to `tests/live/test_trello_live.py`: `set_card_desc` on a `kt-` card and a C1 read give back the same text (C9 on real Trello).
