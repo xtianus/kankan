@@ -120,3 +120,15 @@ def test_live_qa_capabilities(live_board, run_prefix):
         assert item.id and item.url and item.member_id and item.date.startswith("20")
     upload = next(a for a in read.attachment_items if a.is_upload)
     assert upload.file_name == "kankan_qa.txt" and upload.bytes == 3
+
+
+def test_card_desc_update_round_trip(live_board, run_prefix):
+    """C9 (card instructions T§8): a description written with set_card_desc reads back unchanged."""
+    client, board, created = live_board
+    lst = client.create_list(board["id"], f"{run_prefix} desc")
+    created["lists"].append(lst.id)
+    card = client.create_card(lst.id, f"{run_prefix} desc card", "old")
+    created["cards"].append(card.id)
+    text = "spec\n\n```\n## agent: claude review\nInstructions for claude review go here.\n```\n"
+    assert client.set_card_desc(card.id, text).desc == text
+    assert client.card(card.id).desc == text

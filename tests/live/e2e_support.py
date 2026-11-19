@@ -57,7 +57,45 @@ def new_run_id() -> str:
     return f"{RUN_PREFIX}{int(time.time())}-{secrets.token_hex(3)}"
 
 
-def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool = True) -> List[ScenarioCard]:
+# card instructions F§9 test 11: review instructions per agent type, after the specification (and its footer)
+INSTRUCTIONS_SECTIONS = (
+    "\n\n## agent: claude review\n"
+    "Before `kankan integrate`, consult your advisor about the change, then post "
+    "`kankan note \"card-instructions: claude review, advisor consulted\"`.\n\n"
+    "## agent: codex review\n"
+    "Post `kankan note \"card-instructions: codex review\"` before `kankan integrate`.\n\n"
+    "## agent: all review\n"
+    "Also run the `teleport` tool on the branch; if you cannot, say so in a `kankan note` that contains the word "
+    "`teleport`, and finish the review.\n")
+
+
+def instruction_notes(comments, kankan_id: str) -> List[Tuple[str, str]]:
+    """``(seat, text)`` of the agents' notes on the card-instructions card (notes are kankan comments ``<seat>: …``)."""
+    found = []
+    for comment in comments:
+        match = re.match(r"([a-z]+-\d+): (.*)", comment.text, re.S)
+        if comment.member_id == kankan_id and match:
+            found.append((match.group(1), match.group(2)))
+    return found
+
+
+def instruction_problems(notes: List[Tuple[str, str]]) -> List[str]:
+    """F§9 test 11: exactly the reviewer's own section was followed, and the impossible instruction was noted."""
+    marks = [(seat, text) for seat, text in notes if "card-instructions:" in text]
+    if len(marks) != 1:
+        return [f"instructions: {len(marks)} `card-instructions:` notes instead of 1 (the reviewer's)"]
+    seat, text = marks[0]
+    agent_type = seat.split("-")[0]
+    problems = []
+    if f"card-instructions: {agent_type} review" not in text:
+        problems.append(f"instructions: {seat} followed another type's section ({text.strip()!r})")
+    if not any(s == seat and "teleport" in t for s, t in notes):
+        problems.append(f"instructions: {seat} did not note the `teleport` instruction it cannot carry out")
+    return problems
+
+
+def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool = True,
+             instructions: bool = True) -> List[ScenarioCard]:
     cards = [
         ScenarioCard("hello", "Say hello", "Append the line `hello` to `greetings.txt`, then post `kankan note \"hello\"`."),
         ScenarioCard("word", "Type one random word",
@@ -79,8 +117,13 @@ def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool 
                                   "This card has one file attachment (see `attachments` in `kankan task --json`). "
                                   "Append one line to `hashes.txt` with the file's SHA-256 in lowercase hex, only the "
                                   "64 hex digits (the first field printed by `sha256sum`).", "attach"))
+    if instructions:
+        cards.append(ScenarioCard("instr", "Follow card instructions",
+                                  "Append the line `instructions` to `instructions.txt`."))
     for card in cards:
         card.desc += FOOTER
+        if card.key == "instr":
+            card.desc += INSTRUCTIONS_SECTIONS
     if qa:  # a question, not a task: no commit instructions (questions F§3)
         cards.append(ScenarioCard("qa", "Ask about check.sh",
                                   "What does `check.sh` in this repository check? Answer in two sentences.\n\n"
@@ -493,6 +536,7 @@ EXPECTED_FILES = {
     "ask": ("colors.txt", lambda text, ctx: any(a.strip() and a.strip().lower() in text.lower() for a in ctx["answers"]),
             "one of the user's answers"),
     "merge": ("user.txt", lambda text, ctx: text == "from the user\n", "`from the user`"),
+    "instr": ("instructions.txt", lambda text, ctx: "instructions" in text.splitlines(), "a line `instructions`"),
     "hold": ("count.txt", lambda text, ctx: text == "1\n2\n3\n4\n5\n", "the numbers 1 to 5"),
     "attach": ("hashes.txt", lambda text, ctx: bool(ctx.get("sha256")) and text == f"{ctx['sha256']}\n",
                "one line with the attached file's SHA-256"),
@@ -638,6 +682,8 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
         text = _show(repo, f"refs/heads/{branch}", path)
         if text is None or not check(text, {"answers": answers, "sha256": attach_sha256, "qa_line": qa_line}):
             problems.append(f"{cards[key].name}: {path} does not contain {what} (found {text!r})")
+    if "instr" in cards:
+        problems += instruction_problems(instruction_notes(client.comments(cards["instr"].id), cfg.kankan_member_id))
     if "hello" in cards and not any("hello" in c.text for c in client.comments(cards["hello"].id)):
         problems.append(f"{cards['hello'].name}: no `hello` note on the card")
     for name, sha in (user_refs or {}).items():

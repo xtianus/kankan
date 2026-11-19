@@ -1,6 +1,6 @@
 # kankan card instructions — functional specification
 
-**Status:** specified, not implemented.
+**Status:** implemented locally ([plan](../aiplans/2026-11-19-cardinstructions.md)); the live agents run with the card-instructions card ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents), F§9 test 11) remains outstanding.
 **Date:** 2026-11-19
 **Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md) and [`questions_spec_functional.md`](questions_spec_functional.md); this feature changes them as listed in [§7](#7-changes-to-the-initial-specification) and [§8](#8-changes-to-the-board-settings-specification).
 **Companion:** [`cardinstructions_spec_technical.md`](cardinstructions_spec_technical.md) — how kankan implements this feature.
