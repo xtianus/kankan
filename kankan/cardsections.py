@@ -135,3 +135,39 @@ def fingerprint(desc: str, agent_types: Iterable[str]) -> str:
 
 def problems_text(problems) -> str:
     return "; ".join(f"line {problem.line}: {problem.reason}" for problem in problems)
+
+
+# ---------------------------------------------------------------- the `Instructions` card (F§6, T§6)
+
+INSTRUCTIONS_TITLE = "Instructions"
+DESCRIPTION_LIMIT = 16384
+
+
+def _block(target: str, placeholders: bool) -> str:
+    lines = []
+    for suffix in ("", " implementation", " review"):
+        lines.append(f"## agent: {target}{suffix}")
+        if placeholders:
+            lines.append(f"Instructions for {target}{suffix} go here.")
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def help_text(agent_types: Iterable[str]) -> str:
+    """The description of the `Instructions` card: deterministic for a set of agent types."""
+    from kankan import messages
+    types = sorted(set(agent_types))
+    def build(placeholders: bool) -> str:
+        parts = [messages.INSTRUCTIONS_HELP_INTRO,
+                 messages.INSTRUCTIONS_HELP_FORMS.format(types=", ".join(f"`{name}`" for name in types)),
+                 messages.INSTRUCTIONS_HELP_COPY]
+        parts += [_block(name, placeholders) for name in types + [RESERVED]]
+        parts += [messages.INSTRUCTIONS_HELP_RULES, messages.INSTRUCTIONS_HELP_FOOTER]
+        return "\n\n".join(parts) + "\n"
+    text = build(True)
+    return text if len(text.encode("utf-16-le")) // 2 <= DESCRIPTION_LIMIT else build(False)
+
+
+def normalize_help(text: str) -> str:
+    """Line endings, trailing horizontal whitespace and trailing blank lines do not count as a difference."""
+    lines = [line.rstrip(" \t") for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(lines).rstrip("\n")

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import List, Optional, Sequence
 
 from kankan import gitutil
-from kankan.adapters import WORK_ROLES
+from kankan.adapters import WORK_ROLES, adapter_types
 from kankan.errors import KankanError, Status
 
 OK, FIXED, MANUAL, WARN, SKIPPED = "ok", "fixed", "manual", "warn", "skipped"
@@ -453,6 +453,10 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
             if fix:
                 reports = settings_setup.ensure(project, adapters, say=lambda text: None)
                 checks.extend(Check("settings-created", FIXED, report) for report in reports)
+            else:
+                report = settings_setup.ensure_instructions_card(project, adapter_types(project.paths), write=False)
+                if report:  # card instructions T§6
+                    checks.append(Check("instructions-card", WARN, report, "kankan doctor"))
             read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
             result = boardsettings.apply_read(project, read, adapters, write=fix)
             if fix:

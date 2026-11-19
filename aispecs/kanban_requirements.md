@@ -1,7 +1,7 @@
 # Kanban backend requirements for kankan
 
-**Status:** v1.3 — attachments and board-settings endpoints in use
-**Date:** 2026-11-10
+**Status:** v1.4 — card instructions: description update (C9) and the description editor requirement
+**Date:** 2026-11-19
 **Related:** [`initial_spec_functional.md`](initial_spec_functional.md), [`initial_spec_technical.md`](initial_spec_technical.md)
 
 ## 1. Purpose
@@ -61,6 +61,7 @@ Requirement levels:
 | C4 | MUST | Report whether a card is archived or deleted. | `closed` field, or 404 |
 | C5 | MUST | A canonical human-readable card URL, used in merge commit messages and comments. | `url` field |
 | C6 | SHOULD | Card creation (title, description, top or bottom of a list) and deletion through the API. `kankan merge-request` creates a card at the top of `Backlog`; `init` and `doctor` create the setting cards of the `kankan` list ([board settings §2](boardsettings_spec_functional.md#2-board-settings)). Deletion is used only by the live test suites. Without creation, merge requests and setting cards are created by hand. | `POST /1/cards` (`idList`, `name`, `desc`, `pos`), `DELETE /1/cards/{id}` |
+| C9 | SHOULD | Update a card's description. Used by `doctor` to keep the `Instructions` help card of the `kankan` list current ([card instructions §6](cardinstructions_spec_functional.md#6-the-instructions-card)). Without it, the user deletes the card and `doctor` recreates it. | `PUT /1/cards/{id}` (`desc`) |
 | C7 | SHOULD | Create a named checklist on a card. The model and effort setting cards have one checklist per agent type ([board settings §3](boardsettings_spec_functional.md#3-model-and-effort)). Without checklists, those settings cannot be held on the board. | `POST /1/cards/{id}/checklists` (`name`) |
 | C8 | SHOULD | Add a checklist item, ticked or not, move it and delete it; ticking from the UI updates the card's last activity. Used for creating the setting cards and keeping their items in sync with the adapters, in the adapters' order. | `POST /1/checklists/{id}/checkItems` (`name`, `checked`), `PUT /1/cards/{id}/checkItem/{idCheckItem}` (`pos`), `DELETE /1/checklists/{id}/checkItems/{idCheckItem}` |
 

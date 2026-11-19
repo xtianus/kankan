@@ -476,7 +476,7 @@ def test_doctor_ignores_questions_without_a_qa_seat(bound, fake_trello, fakebin)
     assert checks['settings:implementation'].status == doctor.OK
     assert 'settings:questions' not in checks and 'settings' not in checks
     names = [c.name for c in bound.trello.settings_cards(bound.reload_config().settings_list).cards]
-    assert names == ['Implementation Agents', 'Review Agents']
+    assert names == ['Implementation Agents', 'Review Agents', 'Instructions']
 
 
 def test_doctor_asks_the_questions_seed_with_a_qa_seat(bound, fake_trello, fakebin):
@@ -494,7 +494,7 @@ def test_doctor_creates_the_questions_card_with_a_qa_seat(bound, fake_trello, fa
     checks = by_name(doctor.run(bound.paths.repo, fix=True, online=True))
     assert checks['settings:questions'].status == doctor.OK
     cards = {c.name: c for c in bound.trello.settings_cards(bound.reload_config().settings_list).cards}
-    assert sorted(cards) == ['Implementation Agents', 'Q&A Agents', 'Review Agents']
+    assert sorted(cards) == ['Implementation Agents', 'Instructions', 'Q&A Agents', 'Review Agents']
     assert sorted(c.name for c in cards['Q&A Agents'].checklists) == ['claude', 'codex']
 
 

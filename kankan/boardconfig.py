@@ -108,6 +108,11 @@ class Evaluation:
     checks: list[CheckRequest]
 
 
+# card instructions T§10: the reserved help card of the ``kankan`` list and its pseudo-key
+from kankan.cardsections import INSTRUCTIONS_TITLE  # noqa: E402
+INSTRUCTIONS_KEY = "instructions"
+
+
 def roles(paths) -> tuple[str, ...]:
     """The active roles (seeds, preflight, setting cards created, probes): ``questions`` only while a ``qa`` seat is
     registered in the project configuration. The evaluation uses ``ROLES``, so removing the Q&A seat never turns
@@ -258,8 +263,15 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
     # Setting cards are grouped by key (found through their title); any other card by its name, in ``unknown``.
     keys = {title(key, spec): key for key, spec in schema.items()}
     groups, unknown, unsettled, unsettled_names = {}, {}, set(), set()
+    help_cards = []
     for card in cards.cards:
         if card.closed:
+            continue
+        if card.name == INSTRUCTIONS_TITLE:  # card instructions T§10: the help card is never a setting
+            help_cards.append(card)
+            timestamp = activity(card.last_activity)
+            if timestamp is None or (date-timestamp).total_seconds() < 10:
+                unsettled_names.add(card.name)
             continue
         key = keys.get(card.name)
         (groups if key else unknown).setdefault(key or card.name, []).append(card)
@@ -344,6 +356,16 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
         if not problems and isinstance(new, dict):
             state.cards.setdefault(card.id, {})['probes'] = {name: probe for name, probe in previous_probes.items() if name in new and probe.get('pair') == encode(new[name])}
         card_error(card, key, problems, fp, revision, feedback)
+    if help_cards and INSTRUCTIONS_TITLE not in unsettled_names:
+        record = state.settings.setdefault(INSTRUCTIONS_KEY, {})
+        fp = fingerprint(sorted(c.id for c in help_cards))
+        if record.get('fingerprint') != fp:
+            revision = record.get('revision', 0) + 1
+            record.update(fingerprint=fp, revision=revision, invalid=len(help_cards) > 1)
+            for help_card in help_cards:
+                state.cards.setdefault(help_card.id, {})['probes'] = {}
+                problems = [messages.SETTINGS_DUPLICATE.format(name=INSTRUCTIONS_TITLE)] if len(help_cards) > 1 else []
+                card_error(help_card, INSTRUCTIONS_KEY, problems, fp, revision)
     for name, matches in unknown.items():
         if name in unsettled_names:
             continue
