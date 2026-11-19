@@ -19,7 +19,7 @@ def test_build_and_resume_settings_by_name(kproject, fake_trello):
     assert cfg.settings_list and cfg.settings_list not in cfg.workflow_lists()
     read = kproject.trello.settings_cards(cfg.settings_list)
     assert [card.name for card in role_cards(read)] == ['Implementation Agents', 'Review Agents']
-    assert [card.name for card in read.cards][-1] == 'Instructions'  # the help card, card instructions F§6
+    assert [card.name for card in read.cards][0] == 'Instructions'  # the help card, first: card instructions F§6
     for card in role_cards(read):
         assert card.desc
         assert [c.name for c in card.checklists] == ['claude', 'codex']

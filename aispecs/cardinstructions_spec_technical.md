@@ -97,11 +97,11 @@ When the card reaches `Done`, `clear_kankan_labels` removes kankan's labels as b
 
 **Creation and update.** `settings_setup.ensure` (called by `init` and by `doctor` with fixes enabled) handles the card after the setting cards:
 - it looks for open cards named `Instructions` in the `kankan` list read (L6);
-- none: it creates one at the bottom of the list with `help_text(adapter_types)` as description (C6), found again by name after a create that timed out, like the setting cards;
-- one: when its description, normalized (line endings, trailing whitespace per line, trailing blank lines), differs from the normalized `help_text`, it rewrites it (C9) and reports `messages.INSTRUCTIONS_CARD_UPDATED`;
+- none: it creates one at the top of the list (`pos=top`) with `help_text(adapter_types)` as description (C6), found again by name after a create that timed out, like the setting cards;
+- one: when its description, normalized (line endings, trailing whitespace per line, trailing blank lines), differs from the normalized `help_text`, it rewrites it (C9) and reports `messages.INSTRUCTIONS_CARD_UPDATED`; when another open card of the list read has a lower `pos`, it moves the card to the top (C3, `pos=top` within the same list) and reports `messages.INSTRUCTIONS_CARD_MOVED`; both reports are joined with "; " when both apply;
 - two or more: no write; the duplicate is reported by the settings evaluation ([§10](#10-changes-to-the-board-settings-technical-specification)).
 
-`doctor --no-fix` reports "Instructions card missing" or "Instructions card outdated" and writes nothing; offline it skips the card. Launchers never call this code.
+`doctor --no-fix` reports "Instructions card missing", "Instructions card outdated" or "Instructions card not at the top of the kankan list" and writes nothing; offline it skips the card. Launchers never call this code.
 
 **Text.** `help_text` is built from constants in `messages.py` and the sorted agent types: the paragraphs of [functional §6](cardinstructions_spec_functional.md#6-the-instructions-card), a fenced block per agent type with its three headings, each followed by a placeholder line, and the block for `all`. The text is deterministic, so an unchanged configuration never causes a rewrite. It stays far below Trello's description limit (16,384 characters) for any reasonable number of agent types; `help_text` drops the placeholder lines if the limit would be exceeded.
 

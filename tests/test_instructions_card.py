@@ -84,3 +84,23 @@ def test_duplicates_not_written(kproject, fake_trello):
     del fake_trello.state["cards"][first.id]
     assert settings_setup.ensure_instructions_card(kproject, TYPES, write=True).startswith("Instructions card updated")
     assert fake_trello.state["cards"][extra["id"]]["desc"] == help_text(TYPES)
+
+
+def test_card_first_and_moved_back_to_top(kproject, fake_trello):
+    _ensure(kproject)
+    list_id = kproject.cfg.settings_list
+    assert kproject.trello.settings_cards(list_id).cards[0].name == INSTRUCTIONS_TITLE
+    card = _help_cards(kproject)[0]
+    first = min(c["pos"] for c in fake_trello.state["cards"].values() if c["idList"] == list_id)
+    fake_trello.add_card(list_id, "Dragged above", pos=first / 2)
+    assert settings_setup.ensure_instructions_card(kproject, TYPES, write=False) == \
+        "Instructions card not at the top of the kankan list"
+    fake_trello.state["cards"][card.id]["desc"] = "edited"
+    assert settings_setup.ensure_instructions_card(kproject, TYPES, write=False) == \
+        "Instructions card outdated; Instructions card not at the top of the kankan list"
+    report = settings_setup.ensure_instructions_card(kproject, TYPES, write=True)
+    assert report == ("Instructions card updated (agent types: claude, codex); "
+                      "Instructions card moved to the top of the kankan list")
+    cards = kproject.trello.settings_cards(list_id).cards
+    assert cards[0].id == card.id and cards[0].desc == help_text(TYPES)
+    assert settings_setup.ensure_instructions_card(kproject, TYPES, write=True) is None

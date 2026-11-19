@@ -286,7 +286,7 @@ Write the commit messages in Italian.
 - `## agent: <type>` reaches the agents of that type (`claude`, `codex`, …) in both phases; `## agent: <type> implementation` and `## agent: <type> review` only in that phase; `all` instead of a type reaches every agent. Any heading level works, and case and extra spaces are ignored.
 - An agent gets only the sections that name it; when two disagree, the more specific wins. Sections say how to work: they never change what to build and never make an agent skip kankan's steps.
 - A misspelt heading (`## agent: cluade`) stops the card from being started: it gets `Error` and a comment listing the problems, and `kankan status` shows it waiting with reason `invalid_headings`. Fix the heading: kankan removes its `Error` and the card is picked up. The other cards go on meanwhile.
-- The `Instructions` card in the `kankan` list has ready-to-copy headings for the agent types configured in your project; copy the lines from its grey blocks. kankan keeps that card up to date: `kankan doctor` overwrites edits to it.
+- The `Instructions` card, first in the `kankan` list, has ready-to-copy headings for the agent types configured in your project; copy the lines from its grey blocks. kankan keeps that card up to date: `kankan doctor` overwrites edits to it and puts it back at the top of the list.
 
 Agent sections are not read on `Q&A` cards.
 

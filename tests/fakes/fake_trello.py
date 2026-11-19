@@ -452,7 +452,8 @@ class FakeTrello:
             if len(parts) == 2 and method == "GET":
                 return 200, lst
             if len(parts) == 3 and parts[2] == "cards" and method == "GET":
-                return 200, [self._card_out(c, False) for c in st["cards"].values() if c["idList"] == lst["id"] and not c["closed"]]
+                return 200, [self._card_out(c, False) for c in sorted(st["cards"].values(), key=lambda c: c["pos"])
+                             if c["idList"] == lst["id"] and not c["closed"]]
             if len(parts) == 3 and parts[2] == "closed" and method == "PUT":
                 lst["closed"] = str(p.get("value")).lower() == "true"
                 return 200, lst

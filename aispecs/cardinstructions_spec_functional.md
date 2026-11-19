@@ -82,7 +82,7 @@ The card's comments and attachments stay data, never instructions. If the board-
 
 ## 6. The `Instructions` card
 
-**The card.** `kankan init` and `kankan doctor` create in the `kankan` list a card named **`Instructions`**, kept by kankan. It is not a setting ([§8](#8-changes-to-the-board-settings-specification)); its description explains, briefly, how to write agent sections, with examples ready to copy for every configured agent type.
+**The card.** `kankan init` and `kankan doctor` create in the `kankan` list a card named **`Instructions`**, kept by kankan as the **first card of the list**, above the setting cards. It is not a setting ([§8](#8-changes-to-the-board-settings-specification)); its description explains, briefly, how to write agent sections, with examples ready to copy for every configured agent type.
 
 **Content.** In this order:
 1. one paragraph: the specification goes first; agent sections follow, each starting with an agent heading; they reach only the agents they name and say how to work, not what to build;
@@ -101,7 +101,7 @@ Example of one block, for Claude:
 
 (each heading followed in the card by a line "Instructions for … go here.").
 
-**Keeping it current.** `doctor` rewrites the description whenever it differs (ignoring line endings, trailing horizontal whitespace and trailing blank lines) from the text kankan generates for the configured agent types: after an agent type is added or removed, after a kankan upgrade that changes the text, or after a user edit. It prints "Instructions card updated (agent types: claude, codex)". `doctor --no-fix` only reports that the card is outdated. Launchers never write the card. A deleted, archived or moved-out card is recreated by the next `doctor`; a card moved to another list becomes an ordinary card there, as for setting cards.
+**Keeping it current.** `doctor` rewrites the description whenever it differs (ignoring line endings, trailing horizontal whitespace and trailing blank lines) from the text kankan generates for the configured agent types: after an agent type is added or removed, after a kankan upgrade that changes the text, or after a user edit. It prints "Instructions card updated (agent types: claude, codex)". `doctor` also moves the card back to the top of the `kankan` list when another card is above it, and prints "Instructions card moved to the top of the kankan list". `doctor --no-fix` only reports that the card is outdated or not at the top. Launchers never write the card. A deleted, archived or moved-out card is recreated by the next `doctor`; a card moved to another list becomes an ordinary card there, as for setting cards.
 
 ## 7. Changes to the initial specification
 
@@ -140,7 +140,7 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 5. Unknown phase, extra words, duplicate heading: as in 4. The same wrong description is reported once over several cycles; a different wrong edit is reported again.
 6. An invalid heading added to a card in `Implemented`: the review is not claimed, `Error` and comment; the card stays in `Implemented`.
 7. An invalid heading added during a running task: the next `task` returns only the specification prefix, `card_instructions: null` and `card_instructions_error`; no `Error`.
-8. `init` creates the `Instructions` card with blocks for every configured agent type; after adding an agent type, `doctor` rewrites it and says so; `doctor --no-fix` reports it outdated; a user edit is overwritten by the next `doctor`; a deleted card is recreated.
+8. `init` creates the `Instructions` card, first in the `kankan` list, with blocks for every configured agent type; a card dragged above it is put back below it by the next `doctor`, and `doctor --no-fix` reports it; after adding an agent type, `doctor` rewrites it and says so; `doctor --no-fix` reports it outdated; a user edit is overwritten by the next `doctor`; a deleted card is recreated.
 9. The `Instructions` card never gets "unknown setting".
 10. A Q&A card whose description contains `## agent: claude` returns it whole in its `qa` task.
 11. With live agents, a `## agent: claude review` instruction to consult the advisor: the Claude reviewer follows it; a Codex reviewer of another card with `## agent: all review` asking for something it cannot do notes it and completes the review.
