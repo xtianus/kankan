@@ -114,3 +114,9 @@ def test_fingerprint():
 def test_long_token_quoted_short():
     parsed = parse("S\n## agent: " + "x" * 2000 + "\n", TYPES)
     assert len(parsed.problems[0].reason) < 80 and "…" in parsed.problems[0].reason
+
+
+def test_inline_triple_backtick_is_not_a_fence():
+    parsed = parse("```python -V``` prints the version.\n## agent: claude review\nreviewer only\n", TYPES)
+    assert parsed.spec == "```python -V``` prints the version.\n"
+    assert for_seat(parsed, "claude", "review") == "## agent: claude review\nreviewer only"

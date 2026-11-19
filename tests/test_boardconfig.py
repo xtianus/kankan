@@ -198,3 +198,13 @@ def test_instructions_card_migrates_from_unknown():
     renamed = evaluate([card('Instructions', ident='x')], unknown.state, date=NOW + timedelta(seconds=20))
     assert not renamed.state.cards['x']['invalid']
     assert [a.card_id for a in renamed.actions if a.kind == 'remove_error'] == ['x']
+
+
+def test_instructions_renamed_away_and_back():
+    first = evaluate([card('Instructions', ident='x')])
+    away = evaluate([card('Notes', ident='x')], first.state, date=NOW + timedelta(seconds=20))
+    assert away.state.cards['x']['invalid']
+    away.state.cards['x']['observed_error'] = True
+    back = evaluate([card('Instructions', ident='x')], away.state, date=NOW + timedelta(seconds=40))
+    assert not back.state.cards['x']['invalid']
+    assert 'x' in {a.card_id for a in back.actions if a.kind == 'remove_error'}

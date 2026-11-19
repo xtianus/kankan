@@ -37,9 +37,10 @@ def test_scenario_flags():
     assert [c.key for c in es.scenario(ask=False, hold=False, attach=False, qa=False, instructions=False)] == [
         "hello", "word", "name"]
     full = es.scenario()
-    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold", "attach", "instr", "qa"]
+    assert [c.key for c in full] == ["hello", "word", "name", "ask", "hold", "attach", "instr", "instr2", "qa"]
     assert {c.key: c.interactive for c in full} == {"hello": None, "word": None, "name": None, "ask": "ask",
-                                                     "hold": "hold", "attach": "attach", "instr": None, "qa": "qa"}
+                                                     "hold": "hold", "attach": "attach", "instr": None, "instr2": None,
+                                                     "qa": "qa"}
     assert all("never push `main`" in c.desc for c in full)
     qa = full[-1]
     assert "check.sh" in qa.desc and "Commit" not in qa.desc
@@ -114,7 +115,7 @@ def test_create_cards_order_and_names(board, tmp_path, virtual_time):
     clone, _ = es.make_repos(tmp_path)
     cfg = es.bind(clone, tmp_path, b["url"], creds, lambda s: None)
     cards = es.create_cards(client(fake), cfg, "ke-1-abc", es.scenario())
-    assert list(cards) == ["hello", "word", "name", "ask", "hold", "attach", "instr", "qa"]
+    assert list(cards) == ["hello", "word", "name", "ask", "hold", "attach", "instr", "instr2", "qa"]
     assert cards["hello"].name == "ke-1-abc Say hello" and "greetings.txt" in cards["hello"].desc
     order = sorted((c for c in fake.state["cards"].values() if c["idList"] == cfg.backlog), key=lambda c: c["pos"])
     assert [c["id"] for c in order] == [c.id for key, c in cards.items() if key != "qa"]
@@ -609,6 +610,12 @@ def test_instructions_card_and_check():
     assert "advisor" in for_seat(parsed, "claude", "review") and "advisor" not in for_seat(parsed, "codex", "review")
     assert for_seat(parsed, "claude", "implementation") is None
     good = [("claude-1", "card-instructions: claude review, advisor consulted"), ("claude-1", "no teleport tool here")]
-    assert es.instruction_problems(good) == []
-    assert es.instruction_problems([]) and es.instruction_problems([("codex-1", "card-instructions: claude review")])
-    assert es.instruction_problems([("codex-1", "card-instructions: codex review")])  # no teleport note
+    assert es.instruction_problems(good, "claude-1") == []
+    assert es.instruction_problems(good, None)  # never reviewed
+    assert es.instruction_problems([("claude-1", "card-instructions: claude review"), ("claude-1", "teleport")], "claude-1")
+    assert es.instruction_problems(good + [("codex-1", "card-instructions: codex review")], "claude-1")  # not the reviewer
+    assert es.instruction_problems([("codex-1", "card-instructions: codex review")], "codex-1")  # no teleport note
+    assert es.instruction_problems([("codex-1", "card-instructions: codex review"), ("codex-1", "teleport: no")], "codex-1") == []
+    events = [{"event": "task_assigned", "card": "c", "kind": "impl", "seat": "claude-1"},
+              {"event": "task_assigned", "card": "c", "kind": "review", "seat": "codex-1"}]
+    assert es.reviewer_seat(events, "c") == "codex-1" and es.reviewer_seat(events, "d") is None

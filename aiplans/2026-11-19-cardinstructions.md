@@ -10,7 +10,7 @@
 
 **Spec:** [card instructions functional](../aispecs/cardinstructions_spec_functional.md) (F) and [card instructions technical](../aispecs/cardinstructions_spec_technical.md) (T). They change the initial and board settings specifications as listed in F§7–8 and T§9–10; do not edit those files. [Kanban requirements](../aispecs/kanban_requirements.md) is revised in Tasks 1, 3 and 5, in the commits that start relying on each capability (T§8).
 
-**Status:** implemented locally (Tasks 1–6); final review pending; the live agents run (F§9 test 11) remains outstanding.
+**Status:** implemented locally (Tasks 1–6, plus the fixes of the final whole-branch review by the Codex advisor, planned with the internal advisor); the live agents run (F§9 test 11) remains outstanding.
 
 ## Global Constraints
 

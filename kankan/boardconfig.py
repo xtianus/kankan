@@ -356,10 +356,14 @@ def evaluate(cards: SettingsRead, state: SettingsState, schema: dict[str, Settin
         if not problems and isinstance(new, dict):
             state.cards.setdefault(card.id, {})['probes'] = {name: probe for name, probe in previous_probes.items() if name in new and probe.get('pair') == encode(new[name])}
         card_error(card, key, problems, fp, revision, feedback)
-    if help_cards and INSTRUCTIONS_TITLE not in unsettled_names:
+    if (help_cards or INSTRUCTIONS_KEY in state.settings) and INSTRUCTIONS_TITLE not in unsettled_names:
         record = state.settings.setdefault(INSTRUCTIONS_KEY, {})
-        fp = fingerprint(sorted(c.id for c in help_cards))
-        if record.get('fingerprint') != fp:
+        # An empty group is recorded too, so a card renamed away and back is evaluated again.
+        fp = fingerprint(sorted(c.id for c in help_cards)) if help_cards else None
+        stale_role = any(state.cards.get(c.id, {}).get('key') != INSTRUCTIONS_KEY for c in help_cards)
+        if not help_cards:
+            record.update(fingerprint=None, invalid=False)
+        elif record.get('fingerprint') != fp or stale_role:
             revision = record.get('revision', 0) + 1
             record.update(fingerprint=fp, revision=revision, invalid=len(help_cards) > 1)
             for help_card in help_cards:

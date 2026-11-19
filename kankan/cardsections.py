@@ -93,6 +93,8 @@ def parse(desc: str, agent_types: Iterable[str]) -> Parsed:
                 current[3].append(text)
             continue
         opening = _FENCE_OPEN.match(text)
+        if opening and opening.group(1)[0] == "`" and "`" in text[opening.end():]:
+            opening = None  # a backtick fence's info string has no backtick: this is an inline code span
         if opening:
             fence = (opening.group(1)[0], len(opening.group(1)))
             if current:

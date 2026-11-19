@@ -452,6 +452,10 @@ def _main(args, state) -> int:
         if selection is not None:
             for line in es.restart_report(events)[1]:
                 say(f"observed: {line}")
+        covered = sorted({str(es.reviewer_seat(events, cards[key].id)).split("-")[0]
+                          for key in es.INSTRUCTION_CARDS if key in cards})
+        if covered:
+            say(f"observed: card-instructions reviews by {', '.join(covered)}")
         if "hold" in cards and es.hold_path(events, cards["hold"].id):
             say(f"observed: HOLD noticed first by {es.hold_path(events, cards['hold'].id)}")
         if problems:

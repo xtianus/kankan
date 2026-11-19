@@ -202,7 +202,8 @@ def test_adapter_change_reports_again(kproject, fake_trello, monkeypatch):
     card = fake.add_card(project.cfg.backlog, "c", desc=BAD)
     lease = seats.acquire(project, "claude")
     workflow.tick(project, lease)
-    monkeypatch.setattr(workflow, "adapter_types", lambda paths=None: ["claude", "codex", "gemini"])
+    for module in (workflow, feedback):  # a real adapter change reaches every caller
+        monkeypatch.setattr(module, "adapter_types", lambda paths=None: ["claude", "codex", "gemini"])
     workflow.tick(project, lease)
     assert len(_sections_comments(project, card["id"])) == 2
 

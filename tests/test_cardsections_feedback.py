@@ -311,3 +311,124 @@ def test_sweep_and_drain_never_raise(env):
     (project.paths.kankan_dir / "agents.json").write_text(json.dumps({"all": {}}))
     fb.sweep(project, snap)
     fb.drain(project)
+
+# ---------------------------------------------------------------- final review fixes
+
+
+def _lock_held(project):
+    from kankan import config
+    entry = config._LOCK_DEPTH.get(str(project.paths.kankan_dir / "project.lock"))
+    return entry is not None and entry[1] == threading.get_ident()
+
+
+def test_rejected_label_post_is_not_kankans(env):
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    fake.inject("POST", r"/idLabels$", "404", times=100)
+    fb.drain(project)
+    assert not _rec(project, card["id"])["error_write_started"]
+    fake.faults.clear()
+    fake.user_label(card["id"], project.cfg.label_error)
+    fb.drain(project)
+    _fix_and_clear(project, fake, card["id"])
+    assert project.cfg.label_error in _labels(project, fake, card["id"])
+
+
+def test_unanswered_label_post_stays_kankans(env):
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    fake.inject("POST", r"/idLabels$", "500", times=100)
+    fb.drain(project)
+    assert _rec(project, card["id"])["error_write_started"]
+    fake.faults.clear()
+    fake.user_label(card["id"], project.cfg.label_error)  # the unanswered POST had reached Trello
+    _fix_and_clear(project, fake, card["id"])
+    assert project.cfg.label_error not in _labels(project, fake, card["id"])
+
+
+def test_fixed_before_drain_posts_nothing(env):
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    _set_desc(fake, card["id"], GOOD)
+    fb.drain(project)
+    assert _comments(project, card["id"]) == [] and project.cfg.label_error not in _labels(project, fake, card["id"])
+    assert _rec(project, card["id"]) is None
+
+
+def test_edited_before_drain_reports_again(env):
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    _set_desc(fake, card["id"], BAD_B)
+    fb.drain(project)
+    assert _comments(project, card["id"]) == []
+    _set_desc(fake, card["id"], BAD)
+    _record(project, card["id"])
+    fb.drain(project)
+    assert len(_comments(project, card["id"])) == 1
+    assert project.cfg.label_error in _labels(project, fake, card["id"])
+
+
+def test_failing_card_does_not_block_others(env):
+    project, fake = env
+    first, second = _card(project, fake), _card(project, fake)
+    _record(project, first["id"])
+    _record(project, second["id"])
+    fake.inject("POST", rf"/1/cards/{first['id']}/actions/comments$", "404", times=1000)
+    fb.drain(project)
+    fb.drain(project)
+    assert len(_comments(project, second["id"])) == 1
+    assert project.cfg.label_error in _labels(project, fake, second["id"])
+
+
+def test_reads_happen_outside_the_project_lock(env, monkeypatch):
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    client = type(project.trello)
+    for name in ("card", "comments"):
+        original = getattr(client, name)
+        def guarded(self, *args, _original=original, **kwargs):
+            assert not _lock_held(project), "a Trello read under the project lock"
+            return _original(self, *args, **kwargs)
+        monkeypatch.setattr(client, name, guarded)
+    fb.drain(project)
+    _set_desc(fake, card["id"], GOOD)
+    fb.sweep(project, project.trello.snapshot(project.cfg.board_id))
+    fb.drain(project)
+    assert len(_comments(project, card["id"])) == 1 and _rec(project, card["id"]) is None
+
+
+def test_malformed_entries_dropped(env):
+    from kankan import diag
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    data = fb.load(project.paths)
+    data["cards"]["x" * 24] = None
+    data["cards"]["y" * 24] = {"fingerprint": 3, "pending": "no"}
+    fb.save(project.paths, data)
+    assert list(fb.load(project.paths)["cards"]) == [card["id"]]
+    fb.sweep(project, project.trello.snapshot(project.cfg.board_id))
+    fb.drain(project)
+    diag.reconcile(project)
+    assert len(_comments(project, card["id"])) == 1
+
+
+def test_moved_into_settings_list_keeps_settings_error(env):
+    from kankan import boardconfig, boardsettings
+    project, fake = env
+    card = _card(project, fake)
+    _record(project, card["id"])
+    fb.drain(project)
+    state = boardconfig.load(project.paths)
+    state.cards[card["id"]] = {"key": "instructions", "invalid": True, "observed_error": True}
+    boardsettings._save(project, state)
+    fake.state["cards"][card["id"]]["idList"] = project.cfg.settings_list or fake.add_list(project.cfg.board_id, "kankan")["id"]
+    fb.sweep(project, project.trello.snapshot(project.cfg.board_id))
+    fb.drain(project)
+    assert project.cfg.label_error in _labels(project, fake, card["id"])
+    assert _rec(project, card["id"]) is None

@@ -1,18 +1,19 @@
 """Feedback on invalid agent headings: the project-level record ``card-sections.json`` (card instructions T§3).
 
 No seat holds a card refused for its headings, so the report lives here, not in a seat state. Every Trello write is
-a pending action performed by ``drain`` one at a time under the project lock, after rereading the card, as for the
-setting cards (``boardsettings.drain_actions``). ``sweep`` only schedules removals; ``drain`` confirms them.
+a pending action performed by ``drain``: the reads it needs (the card, its comments, the mention) happen first,
+without the project lock; then, under the lock, the action is checked to be still pending for the same report and
+its one write is made and acknowledged. ``sweep`` only schedules removals; ``drain`` confirms them on the reread card.
 """
 
 import json
 from typing import Optional
 
-from kankan import clock, messages, notify
+from kankan import boardconfig, clock, messages, notify
 from kankan.adapters import adapter_types
-from kankan.cardsections import parse
+from kankan.cardsections import fingerprint, parse
 from kankan.config import atomic_write_json, project_lock
-from kankan.errors import KankanError
+from kankan.errors import KankanError, Status
 from kankan.labels import label_cause
 from kankan.seatstate import load_state
 from kankan.trello import marker
@@ -33,7 +34,22 @@ def load(paths) -> dict:
         return {"cards": {}}
     if not isinstance(data, dict) or not isinstance(data.get("cards"), dict):
         return {"cards": {}}
+    data["cards"] = {card_id: record for card_id, record in data["cards"].items() if _well_formed(record)}
     return data
+
+
+def _well_formed(record) -> bool:
+    """A record as ``record_invalid_locked`` writes it; anything else is dropped at load (it was never valid)."""
+    if not isinstance(record, dict) or not isinstance(record.get("report"), str) or not isinstance(record.get("at"), str):
+        return False
+    if not (record.get("fingerprint") is None or isinstance(record.get("fingerprint"), str)):
+        return False
+    if record.get("state") not in ("reported", "clearing") or not isinstance(record.get("pending"), list):
+        return False
+    if not all(isinstance(record.get(flag, False), bool) for flag in ("owned_error", "error_write_started", "error_confirmed")):
+        return False
+    return all(isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("kind") in ("comment", "add_error", "remove_error")
+               and isinstance(a.get("text", ""), str) for a in record["pending"])
 
 
 def save(paths, data) -> None:
@@ -60,9 +76,11 @@ def _comment_text(problems, types) -> str:
 
 
 def _other_cause(project, card_id: str) -> bool:
-    """Whether a seat state records a cause for ``Error`` on the card (the ``sections`` cause never is)."""
-    return any(label_cause(load_state(project.paths, seat), card_id, project.cfg.label_error)
-               for seat in project.cfg.seats)
+    """Whether another cause needs ``Error`` on the card: a seat state's cause (the ``sections`` cause never is one),
+    or the board settings, for a card moved into the ``kankan`` list that is invalid there."""
+    if any(label_cause(load_state(project.paths, seat), card_id, project.cfg.label_error) for seat in project.cfg.seats):
+        return True
+    return bool(boardconfig.load(project.paths).cards.get(card_id, {}).get("invalid"))
 
 
 def record_invalid_locked(project, card, fp: str, problems) -> None:
@@ -98,9 +116,8 @@ def _remove_owned(project, record, card) -> bool:
         return True
     if project.cfg.label_error not in card.label_ids or _other_cause(project, card.id):
         return True
-    project.trello.remove_label(card.id, project.cfg.label_error)
-    fresh = project.trello.card(card.id)
-    return fresh is None or project.cfg.label_error not in fresh.label_ids
+    project.trello.remove_label(card.id, project.cfg.label_error)  # 400/404: the label is not on the card
+    return True
 
 
 def clear_at_claim_locked(project, card) -> None:
@@ -151,61 +168,118 @@ def sweep(project, snap) -> None:
         project.log("sections_action_failed", kind="sweep", error=getattr(err, "message", str(err)))
 
 
+def _current(project, card_id: str, report: str, action_id: str):
+    """Under the lock: the record and action, if the action is still pending for the same report; else (None, None)."""
+    data = load(project.paths)
+    record = data["cards"].get(card_id)
+    if record is None or record.get("report") != report:
+        return data, None, None
+    action = next((a for a in record["pending"] if a["id"] == action_id), None)
+    return data, (record if action else None), action
+
+
 def _perform(project, card_id: str, action_id: str) -> None:
-    """One pending action under the project lock; raises KankanError on a Trello failure (the action stays)."""
-    with project_lock(project.paths):
-        data = load(project.paths)
-        record = data["cards"].get(card_id)
-        action = next((a for a in (record or {}).get("pending", []) if a["id"] == action_id), None)
-        if action is None:
-            return
-        card = project.trello.card(card_id)
-        if card is None:  # deleted
-            data["cards"].pop(card_id, None)
-            save(project.paths, data)
-            return
-        removal = next((a for a in record["pending"] if a["kind"] == "remove_error"), None)
-        if removal is not None:
-            # A pending clear is decided first: confirmed, it drops the stale feedback; cancelled, the feedback goes on.
-            if _clear_confirmed(project, card, _types(project)):
-                if _remove_owned(project, record, card):
-                    data["cards"].pop(card_id, None)
+    """One pending action; raises KankanError on a Trello failure (the action stays pending)."""
+    record = load(project.paths)["cards"].get(card_id)
+    action = next((a for a in (record or {}).get("pending", []) if a["id"] == action_id), None)
+    if action is None:
+        return
+    report = record["report"]
+    card = project.trello.card(card_id)  # every read before the lock
+    types = _types(project)
+    if card is None:  # deleted
+        with project_lock(project.paths):
+            data, current, _ = _current(project, card_id, report, action_id)
+            if current is not None:
+                data["cards"].pop(card_id, None)
                 save(project.paths, data)
+        return
+    if _clear_confirmed(project, card, types):
+        # Fixed, moved or archived: any pending feedback is stale; remove kankan's Error and forget the card.
+        with project_lock(project.paths):
+            data, current, _ = _current(project, card_id, report, action_id)
+            if current is not None and _remove_owned(project, current, card):
+                data["cards"].pop(card_id, None)
+                save(project.paths, data)
+        return
+    if fingerprint(card.desc, types) != record.get("fingerprint"):
+        # Edited to another invalid version before the report went out: drop it, keep the ownership flags,
+        # and let the next claim attempt report the current version.
+        with project_lock(project.paths):
+            data, current, _ = _current(project, card_id, report, action_id)
+            if current is not None:
+                current.update(fingerprint=None, state="reported", pending=[])
+                save(project.paths, data)
+        return
+    if action["kind"] == "remove_error":  # still invalid at the reported version: the clear is cancelled
+        with project_lock(project.paths):
+            data, current, _ = _current(project, card_id, report, action_id)
+            if current is not None:
+                current["pending"] = [a for a in current["pending"] if a["kind"] != "remove_error"]
+                current["state"] = "reported"
+                save(project.paths, data)
+        return
+    if action["kind"] == "comment":
+        me = notify.kankan_member_id(project)
+        posted = any(c.member_id == me and c.text.rstrip().endswith(marker(action_id)) for c in project.trello.comments(card_id))
+        mention = "" if posted else notify.mention(project, card_id)
+        with project_lock(project.paths):
+            data, current, _ = _current(project, card_id, report, action_id)
+            if current is None:
                 return
-            record["pending"].remove(removal)
-            record["state"] = "reported"
-            save(project.paths, data)
-            if action is removal:
-                return
-        if action["kind"] == "comment":
-            me = notify.kankan_member_id(project)
-            posted = any(c.member_id == me and c.text.rstrip().endswith(marker(action_id))
-                         for c in project.trello.comments(card_id))
             if not posted:
-                mention = notify.mention(project, card_id)
                 project.trello.add_comment(card_id, f"{action['text']} {mention}".rstrip(), action_id, member_id=me)
-        elif action["kind"] == "add_error":
-            has_error = project.cfg.label_error in card.label_ids
-            if has_error and not (record.get("error_write_started") or record.get("error_confirmed")):
-                record["owned_error"] = False  # the label appeared before kankan's first write
-            elif has_error:
-                record["error_confirmed"] = True
-            else:
-                record["owned_error"] = True  # kankan performs the POST: the label is its own
-                record["error_write_started"] = True
-                save(project.paths, data)
+            current["pending"] = [a for a in current["pending"] if a["id"] != action_id]
+            save(project.paths, data)
+        return
+    with project_lock(project.paths):  # add_error
+        data, current, _ = _current(project, card_id, report, action_id)
+        if current is None:
+            return
+        has_error = project.cfg.label_error in card.label_ids
+        if has_error and not (current["error_write_started"] or current["error_confirmed"]):
+            current["owned_error"] = False  # the label appeared before kankan's first write
+        elif has_error:
+            current["error_confirmed"] = True
+        else:
+            owned_before = current["owned_error"]
+            current.update(owned_error=True, error_write_started=True)  # kankan performs the POST: the label is its own
+            save(project.paths, data)
+            try:
                 project.trello.add_label(card_id, project.cfg.label_error)
-                record["error_confirmed"] = True
-        record["pending"] = [a for a in record["pending"] if a["id"] != action_id]
+            except KankanError as err:
+                if err.status == Status.TRELLO_ERROR:  # Trello answered and refused: nothing was written
+                    current.update(owned_error=owned_before, error_write_started=False)
+                    save(project.paths, data)
+                raise
+            current["error_confirmed"] = True
+        current["pending"] = [a for a in current["pending"] if a["id"] != action_id]
         save(project.paths, data)
 
 
+MAX_FAILED_CARDS = 2
+
+
 def drain(project) -> None:
-    """Perform the pending actions; stop at the first failure, which stays pending for the next read. Never raises."""
+    """Perform the pending actions. A failing card is skipped for the rest of the pass and the others go on; the pass
+    ends when Trello does not answer or after ``MAX_FAILED_CARDS`` failed cards. Never raises."""
     try:
         work = [(card_id, action["id"]) for card_id, record in load(project.paths)["cards"].items()
-                for action in record.get("pending", [])]
-        for card_id, action_id in work:
+                for action in record["pending"]]
+    except OSError as err:
+        project.log("sections_action_failed", kind="drain", error=str(err))
+        return
+    failed = set()
+    for card_id, action_id in work:
+        if card_id in failed:
+            continue
+        try:
             _perform(project, card_id, action_id)
-    except (KankanError, OSError) as err:
-        project.log("sections_action_failed", kind="drain", error=getattr(err, "message", str(err)))
+        except KankanError as err:
+            project.log("sections_action_failed", card=card_id, error=err.message)
+            failed.add(card_id)
+            if err.status != Status.TRELLO_ERROR or len(failed) >= MAX_FAILED_CARDS:
+                return
+        except OSError as err:
+            project.log("sections_action_failed", card=card_id, error=str(err))
+            return

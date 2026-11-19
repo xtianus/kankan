@@ -79,19 +79,33 @@ def instruction_notes(comments, kankan_id: str) -> List[Tuple[str, str]]:
     return found
 
 
-def instruction_problems(notes: List[Tuple[str, str]]) -> List[str]:
-    """F§9 test 11: exactly the reviewer's own section was followed, and the impossible instruction was noted."""
+def reviewer_seat(events: List[dict], card_id: str) -> Optional[str]:
+    """The seat of the card's last review assignment, from the audit log."""
+    seats = [e.get("seat") for e in events if e.get("event") == "task_assigned" and e.get("card") == card_id
+             and e.get("kind") == "review"]
+    return seats[-1] if seats else None
+
+
+def instruction_problems(notes: List[Tuple[str, str]], reviewer: Optional[str], name: str = "instructions") -> List[str]:
+    """F§9 test 11 on one card: the reviewer followed its own type's section (a Claude reviewer reports that it
+    consulted the advisor) and noted the instruction it cannot carry out; nobody else followed a review section."""
+    if reviewer is None:
+        return [f"{name}: never assigned for review"]
+    agent_type = reviewer.split("-")[0]
     marks = [(seat, text) for seat, text in notes if "card-instructions:" in text]
-    if len(marks) != 1:
-        return [f"instructions: {len(marks)} `card-instructions:` notes instead of 1 (the reviewer's)"]
-    seat, text = marks[0]
-    agent_type = seat.split("-")[0]
-    problems = []
-    if f"card-instructions: {agent_type} review" not in text:
-        problems.append(f"instructions: {seat} followed another type's section ({text.strip()!r})")
-    if not any(s == seat and "teleport" in t for s, t in notes):
-        problems.append(f"instructions: {seat} did not note the `teleport` instruction it cannot carry out")
+    problems = [f"{name}: {seat} posted a review instruction note but did not review"
+                for seat, _ in marks if seat != reviewer]
+    own = [text for seat, text in marks if seat == reviewer]
+    if not any(f"card-instructions: {agent_type} review" in text for text in own):
+        problems.append(f"{name}: the reviewer {reviewer} did not follow its `{agent_type} review` section")
+    if agent_type == "claude" and not any("advisor consulted" in text for text in own):
+        problems.append(f"{name}: the Claude reviewer {reviewer} did not report consulting the advisor")
+    if not any(seat == reviewer and "teleport" in text for seat, text in notes):
+        problems.append(f"{name}: {reviewer} did not note the `teleport` instruction it cannot carry out")
     return problems
+
+
+INSTRUCTION_CARDS = ("instr", "instr2")
 
 
 def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool = True,
@@ -118,11 +132,14 @@ def scenario(ask: bool = True, hold: bool = True, attach: bool = True, qa: bool 
                                   "Append one line to `hashes.txt` with the file's SHA-256 in lowercase hex, only the "
                                   "64 hex digits (the first field printed by `sha256sum`).", "attach"))
     if instructions:
+        # Two cards: kankan picks the implementers, so two cards give both reviewer types a chance (F§9 test 11).
         cards.append(ScenarioCard("instr", "Follow card instructions",
                                   "Append the line `instructions` to `instructions.txt`."))
+        cards.append(ScenarioCard("instr2", "Follow card instructions again",
+                                  "Append the line `instructions again` to `instructions2.txt`."))
     for card in cards:
         card.desc += FOOTER
-        if card.key == "instr":
+        if card.key in INSTRUCTION_CARDS:
             card.desc += INSTRUCTIONS_SECTIONS
     if qa:  # a question, not a task: no commit instructions (questions F§3)
         cards.append(ScenarioCard("qa", "Ask about check.sh",
@@ -537,6 +554,8 @@ EXPECTED_FILES = {
             "one of the user's answers"),
     "merge": ("user.txt", lambda text, ctx: text == "from the user\n", "`from the user`"),
     "instr": ("instructions.txt", lambda text, ctx: "instructions" in text.splitlines(), "a line `instructions`"),
+    "instr2": ("instructions2.txt", lambda text, ctx: "instructions again" in text.splitlines(),
+               "a line `instructions again`"),
     "hold": ("count.txt", lambda text, ctx: text == "1\n2\n3\n4\n5\n", "the numbers 1 to 5"),
     "attach": ("hashes.txt", lambda text, ctx: bool(ctx.get("sha256")) and text == f"{ctx['sha256']}\n",
                "one line with the attached file's SHA-256"),
@@ -682,8 +701,11 @@ def verify_run(project, client: TrelloClient, cards: Dict[str, Card], origin: Pa
         text = _show(repo, f"refs/heads/{branch}", path)
         if text is None or not check(text, {"answers": answers, "sha256": attach_sha256, "qa_line": qa_line}):
             problems.append(f"{cards[key].name}: {path} does not contain {what} (found {text!r})")
-    if "instr" in cards:
-        problems += instruction_problems(instruction_notes(client.comments(cards["instr"].id), cfg.kankan_member_id))
+    events = _events(project)
+    for key in INSTRUCTION_CARDS:
+        if key in cards:
+            notes = instruction_notes(client.comments(cards[key].id), cfg.kankan_member_id)
+            problems += instruction_problems(notes, reviewer_seat(events, cards[key].id), cards[key].name)
     if "hello" in cards and not any("hello" in c.text for c in client.comments(cards["hello"].id)):
         problems.append(f"{cards['hello'].name}: no `hello` note on the card")
     for name, sha in (user_refs or {}).items():
