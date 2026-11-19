@@ -112,9 +112,12 @@ How this feature changes [`boardsettings_spec_technical.md`](boardsettings_spec_
 - Adapters: a type named `all` is refused.
 - Live agents run: acceptance test 11 of [functional §9](cardinstructions_spec_functional.md#9-acceptance-tests).
 
-## 12. Behaviour not yet observed
+## 12. Observed Trello behaviour
 
-- That Trello's current description editor stores a heading typed or pasted in the rendered editor as Markdown source (`## agent: claude`) in `desc`, as the parser expects.
-- That copying a fenced code block from Trello's rendered view keeps the `##` characters.
+Observed on the test board on 2026-11-19 (Trello web editor, descriptions read back through the API):
+- A description written through the API comes back byte for byte, headings, extra spaces and fenced blocks included.
+- A heading typed in the web editor (`## agent: codex review`, then Enter) is stored as Markdown source, `## agent: codex review`, followed by a blank line.
+- Lines copied from a fenced code block in the rendered view keep their `##`; pasted into another description they become a real heading, stored as `## agent: claude review`.
+- Saving in the web editor a description written through the API re-serializes it: it adds a blank line after each heading and keeps the heading text as written (`### Agent:  Codex  Implementation`, with its double spaces), the other headings and the fenced block unchanged.
 
-Both are checked on the test board before the implementation relies on them; if the editor stores headings differently, `parse` is adapted and this section records what was found.
+`parse` therefore needs no adaptation: the blank lines the editor adds are part of the section bodies and are stripped with the surrounding whitespace.
