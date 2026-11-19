@@ -6,4 +6,4 @@
 - Implementation plans: `aiplans/`. Project knowledge base: `aiknowledge/notes.md`.
 - Python code uses 4-space indentation (PEP 8), overriding the global tabs rule (see `.editorconfig`).
 - Runtime code uses the Python standard library only (Python >= 3.10); pytest is a dev dependency.
-- Every commit that adds, changes or removes a Trello endpoint call revises `aispecs/kanban_requirements.md` in the same commit.
+- Every commit that adds, changes or removes something kankan requires from the board revises `aispecs/kanban_requirements.md` in the same commit: a Trello endpoint call, and also behaviour of the board product outside the API that kankan relies on (for example how its editor stores what users type).

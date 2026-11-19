@@ -85,6 +85,8 @@ New capability, added to [`kanban_requirements.md`](kanban_requirements.md) in t
 
 Everything else uses the reads and writes already listed: B3 (descriptions on every cycle), L6 and C6 (the `kankan` list and card creation), T3 and M1 (`Error` and its comment).
 
+The same commit adds to [`kanban_requirements.md`](kanban_requirements.md) §11 (requirements outside the API) the editor behaviour of [§12](#12-observed-trello-behaviour): a heading typed or pasted in the description editor is stored as Markdown source (`## agent: …`) in the description the API returns, and lines copied from a rendered code block keep their `##`.
+
 ## 9. Changes to the initial technical specification
 
 How this feature changes [`initial_spec_technical.md`](initial_spec_technical.md), by its section numbers. That file is not edited.
