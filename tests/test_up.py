@@ -54,7 +54,11 @@ def test_kill9_supervisor_and_launcher_up_recovers(project, fake_trello, env):
     first = load_state(project.paths, "claude-1").task
     info = proc_info(project, "claude-1")
     os.kill(info["supervisor"]["pid"], signal.SIGKILL)
-    os.kill(info["launcher"]["pid"], signal.SIGKILL)
+    try:
+        os.kill(info["launcher"]["pid"], signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # the launcher's PDEATHSIG may already have killed it with the supervisor
+    assert wait_for(lambda: not pid_alive(info["launcher"]["pid"]), timeout=10)
     assert wait_for(lambda: not pid_alive(info["agent"]["pid"]), timeout=10)
     assert seats.liveness(project, "claude-1") == "dead"
     agents_cmd.up(project, {"claude": 1})
@@ -219,7 +223,11 @@ def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project
     assert exc.value.status == Status.NEEDS_ACTION
     info = proc_info(project, "claude-qa")
     os.kill(info["supervisor"]["pid"], signal.SIGKILL)
-    os.kill(info["launcher"]["pid"], signal.SIGKILL)
+    try:
+        os.kill(info["launcher"]["pid"], signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # the launcher's PDEATHSIG may already have killed it with the supervisor
+    assert wait_for(lambda: not pid_alive(info["launcher"]["pid"]), timeout=10)
     assert wait_for(lambda: not pid_alive(info["agent"]["pid"]), timeout=10)
     assert seats.liveness(project, "claude-qa") == "dead"
     top = fake.add_card(project.qa_list, "another question", pos=0)

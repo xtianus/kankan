@@ -24,7 +24,19 @@ from kankan.seatstate import load_state, update_state
 from kankan.tmux import Tmux, session_name
 
 STATES = ("starting", "idle", "working", "waiting_human", "limited", "suspending", "closing", "stopping")
-SCREEN_POLL = 1.0
+
+
+def _screen_poll() -> float:
+    """Seconds between two steps of the main loop: 1 s. Tests shorten it with ``KANKAN_SCREEN_POLL`` (a number
+    from 0.05 to 1; any other value is ignored), since their launchers run as real processes (developer manual §1)."""
+    try:
+        value = float(os.environ.get("KANKAN_SCREEN_POLL", ""))
+    except ValueError:
+        return 1.0
+    return value if 0.05 <= value <= 1.0 else 1.0
+
+
+SCREEN_POLL = _screen_poll()
 FATAL_EXIT = 3  # configuration problems: the supervisor does not restart the launcher
 # Restart phase at the moment the old agent was found dead → how it ended (audit event `agent_restart`).
 RESTART_ENDINGS = {'wait_exit': 'exit_command', 'term': 'sigterm', 'kill': 'sigkill'}

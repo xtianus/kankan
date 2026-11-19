@@ -6,7 +6,7 @@ For using kankan see the [user manual](user-manual.md). The design is in [`aispe
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-setsid -w .venv/bin/python -m pytest -q -n auto         # everything, in parallel (about 1.5 min on 8 cores; about 8 min serially); the live Trello tests skip without a test board (§3.3)
+setsid -w .venv/bin/python -m pytest -q -n 16 --dist worksteal  # everything, in parallel (about 1.5 min on 8 cores); the live Trello tests skip without a test board (§3.3)
 .venv/bin/python -m pytest -q -m trello_live  # live Trello tests only (§3)
 .venv/bin/python -m tests.live.agents_e2e     # live run with real agents, manual (§3.5)
 ```
@@ -18,6 +18,8 @@ Runtime code uses the Python standard library only (Python ≥ 3.10); pytest is 
 - `trello_live`: runs against a real Trello test board; part of the default run when a test board is configured ([section 3.3](#33-configure-the-tests)), skipped otherwise. `-m 'not trello_live'` leaves them out, `-m trello_live` runs only them.
 
 The local tests use a fake Trello server, real Git in temporary directories, real tmux and a fake agent ([spec §18.1](../aispecs/initial_spec_technical.md#181-strategy)).
+
+The process tests (markers `tmux` and `slow`) mostly wait for launchers running as real processes, so the full run uses more workers than cores (`-n 16`) and `--dist worksteal` to spread the long tests; a single file runs quickly without `-n`. For speed, the tests set `KANKAN_SCREEN_POLL=0.5`, which makes launchers read the screen every 0.5 s instead of every second (values from 0.05 to 1 are accepted, anything else is ignored); `tests/test_e2e.py::test_card_goes_from_backlog_to_done` unsets it to keep one flow at the real pace. In the pytest process `os.fsync` does nothing, and each test copies one session-wide template Git repository instead of creating its own.
 
 ## 2. Agent adapters
 

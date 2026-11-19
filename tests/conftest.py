@@ -9,6 +9,30 @@ def git(repo, *args, check=True):
     return subprocess.run(["git", "-C", str(repo), *args], check=check, capture_output=True, text=True).stdout.strip()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def no_fsync():
+    """Skip fsync in the pytest process: on a slow disk it dominated unit test time, and no in-process test
+    checks durability across a power loss (crash tests kill processes, which the page cache survives)."""
+    patch = pytest.MonkeyPatch()
+    patch.setattr(os, "fsync", lambda fd: None)
+    yield
+    patch.undo()
+
+
+@pytest.fixture(scope="session")
+def _git_repo_template(tmp_path_factory):
+    """One initialized repository per session, copied by ``git_repo`` instead of running git four times per test."""
+    repo = tmp_path_factory.mktemp("template") / "proj"
+    repo.mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid", "GIT_CONFIG_GLOBAL": os.devnull}
+    for args in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "init"]):
+        if args[0] == "add":
+            (repo / "README.md").write_text("hello\n")
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env)
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Keep every test away from the real ~/.config, ~/coding/.kankan and skills."""
@@ -24,6 +48,9 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.invalid")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("KANKAN_SKIP_PREFLIGHT", "1")  # tests/test_doctor.py unsets it where it matters
+    # launchers started by tests (real processes in private tmux servers) step every 0.5 s instead of 1 s;
+    # tests/test_e2e.py::test_card_goes_from_backlog_to_done keeps the real pace
+    monkeypatch.setenv("KANKAN_SCREEN_POLL", "0.5")
     from kankan import trello
     monkeypatch.setattr(trello._BUCKET, "limit", 10 ** 9)
     # `kankan init` waits settle_seconds (3 s) before reading the registry back from the real Trello; the fake
@@ -47,13 +74,11 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def git_repo(tmp_path):
+def git_repo(tmp_path, _git_repo_template):
+    import shutil
     repo = tmp_path / "coding" / "proj"
-    repo.mkdir(parents=True)
-    git(repo, "init", "-q", "-b", "main")
-    (repo / "README.md").write_text("hello\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-q", "-m", "init")
+    repo.parent.mkdir(parents=True)
+    shutil.copytree(_git_repo_template, repo, symlinks=True)
     return repo
 
 

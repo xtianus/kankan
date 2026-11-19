@@ -69,7 +69,7 @@ class FakeTrello:
         handler = self._make_handler()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)  # fast shutdown
         self.thread.start()
         return self
 
@@ -336,9 +336,14 @@ class FakeTrello:
                 else:
                     self.send_header("Content-Length", str(len(raw.content)))
                 self.end_headers()
-                if self._write(raw.content, truncate):
+                # counted before the bytes go out, so a client that has read them all always sees the count;
+                # taken back when the write fails
+                if not truncate:
                     with fake.lock:
                         fake.downloads[raw.att_id] += 1
+                if not self._write(raw.content, truncate) and not truncate:
+                    with fake.lock:
+                        fake.downloads[raw.att_id] -= 1
 
             def _write(self, data, truncate):
                 """Send ``data`` (only its first half and close, if ``truncate``); True when all was sent."""
