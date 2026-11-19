@@ -310,15 +310,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     The link is removed at the end, except with --keep while agents are still running on it."""
     args = _parser().parse_args(argv)
     link = Path(os.path.expanduser("~")) / ".local" / "bin" / "kankan"
-    if not args.clean_only:
-        try:
-            if es.ensure_kankan_link():
-                say(f"linked {link} to this checkout's kankan for the run")
-        except es.LinkError as err:
-            say(str(err))
-            return 2
-        if str(link.parent) not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = f"{link.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    try:
+        if es.ensure_kankan_link():
+            say(f"linked {link} to this checkout's kankan for the run")
+    except es.LinkError as err:
+        say(str(err))
+        return 2
+    if str(link.parent) not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = f"{link.parent}{os.pathsep}{os.environ.get('PATH', '')}"
     state = {"agents_started": False}
     try:
         return _main(args, state)
