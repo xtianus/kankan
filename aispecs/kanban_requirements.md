@@ -116,6 +116,7 @@ Files and links the user attaches to a card are task inputs for the agent ([spec
 - **UI:** users create and reorder cards, create extra lists, add and remove labels, link cards, attach files and links, and write comments from a web or mobile UI. kankan provides no UI of its own.
 - **Visibility:** the UI shows labels, comments and list membership on the card front or in the card detail.
 - **Data model:** each card is in exactly one list at a time.
+- **Description editor:** a Markdown heading typed or pasted in a card's description editor is stored as Markdown source (`## agent: claude review`) in the description the API returns, and lines copied from a rendered code block keep their `#` characters. kankan reads agent sections from the description this way ([card instructions §2](cardinstructions_spec_functional.md#2-agent-sections), observed on Trello: [technical §12](cardinstructions_spec_technical.md#12-observed-trello-behaviour)).
 - **Free tier:** the use case (one board per project, a few dozen lists, low thousands of cards) should fit a free or low-cost plan, as it does on Trello.
 
 ## 12. Adapter checklist

@@ -131,3 +131,16 @@ def test_invalid_model_adapter_rejected(git_repo, change):
     atomic_write_json(paths.kankan_dir / 'agents.json', {'claude': change})
     with pytest.raises(KankanError):
         load_adapter(paths, 'claude', read_only=True)
+
+
+def test_adapter_named_all_refused(git_repo, isolated_home):
+    from kankan.adapters import adapter_types
+    from kankan.errors import KankanError, Status
+    paths = Paths.discover(git_repo)
+    paths.kankan_dir.mkdir(parents=True, exist_ok=True)
+    (paths.kankan_dir / "agents.json").write_text(json.dumps({"all": {"command": ["x"]}}))
+    with pytest.raises(KankanError) as err:
+        adapter_types(paths)
+    assert err.value.status == Status.CONFIG_ERROR
+    with pytest.raises(KankanError):
+        load_adapter(paths, "all")

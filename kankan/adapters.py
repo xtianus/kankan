@@ -82,6 +82,11 @@ class Classification:
     resume_at: Optional[datetime] = None
 
 
+# ``all`` names every agent type in card agent headings (card instructions T§2).
+RESERVED_TYPE = "all"
+RESERVED_MESSAGE = "the adapter type `all` is reserved"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
@@ -113,6 +118,8 @@ def adapter_types(paths=None) -> list[str]:
     data = json.loads(resources.files("kankan").joinpath("adapters_default.json").read_text())
     for path in _sources(paths):
         data.update(_read(path))
+    if RESERVED_TYPE in data:
+        raise KankanError(Status.CONFIG_ERROR, RESERVED_MESSAGE)
     return [key for key in data if not key.startswith("_")]
 
 
@@ -148,6 +155,8 @@ def _template(argv, allowed, required=()):
 
 def load_adapter(paths, agent_type: str, *, read_only: bool = False) -> Adapter:
     """Load local configuration and an already prepared catalog; never run discovery here."""
+    if agent_type == RESERVED_TYPE:
+        raise KankanError(Status.CONFIG_ERROR, RESERVED_MESSAGE)
     data = json.loads(resources.files("kankan").joinpath("adapters_default.json").read_text())
     merged = data.get(agent_type, {})
     explicit_models = False
