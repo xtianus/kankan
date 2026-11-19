@@ -25,7 +25,9 @@ The feature applies to implementation cards (merge-request cards included) and t
 - `<phase>` is `implementation` or `review`; without it, the section applies to both phases;
 - case and extra spaces are ignored: `## Agent:  Claude  Review` is the same heading as `## agent: claude review`.
 
-Other headings (`## Tests`, `### Style`) are ordinary text of the part they are in. A heading inside a fenced code block is never an agent heading.
+Write the heading on its own line, with up to three leading spaces and a space or tab after the hashes. A whitespace-separated run of closing hashes is optional.
+
+Other headings (`## Tests`, `### Style`) are ordinary text of the part they are in. A heading inside a fenced code block is never an agent heading; a code block left unclosed runs to the end of the description, as Trello renders it, so the agent headings after it are ordinary text of the specification and reach every agent.
 
 **Which sections reach a seat.** A seat of type *T* working in phase *P* gets the sections whose heading is `all`, `all P`, `T` or `T P`, in the order they appear in the description. Sections for other types or the other phase never reach it.
 
@@ -43,20 +45,22 @@ A Claude reviewer gets the specification and the advisor line; a Codex reviewer 
 
 `kankan task --json` of an `impl` or `review` task returns:
 - `desc`: the specification only, without any agent section;
-- **`card_instructions`**: the sections that reach the seat ([§2](#2-agent-sections)), each with its heading line, separated by a blank line; `null` when none does.
+- **`card_instructions`**: the sections that reach the seat ([§2](#2-agent-sections)), each with its heading line, separated by a blank line; `null` when none does;
+- **`card_instructions_error`**: `null`, or the problems when the headings are invalid (below).
 
-The description is read at every `task` call, as before: an edit made while the task runs reaches the agent the next time it reads the task. When a description edited during the task has invalid agent headings, `task` does not fail: it returns the whole description as `desc`, `card_instructions: null` and `card_instructions_error` with the problem; the agent goes on with the specification and notes the problem with `kankan note`. kankan sets no `Error` during a task for this; the check of [§4](#4-errors) happens at the next claim.
+The description is read at every `task` call, as before: an edit made while the task runs reaches the agent the next time it reads the task. When a description edited during the task has invalid agent headings, `task` does not fail: it returns only the text before the first agent heading candidate (valid or invalid) as `desc`, `card_instructions: null` and `card_instructions_error` with the problem; the agent goes on with the specification and notes the problem with `kankan note`. kankan sets no `Error` during a task for this; the check of [§4](#4-errors) happens at the next claim.
 
 `hold_wip` tasks are unchanged. The pasted prompt stays the fixed one-liner of [initial §13.1](initial_spec_functional.md#131-skill).
 
 ## 4. Errors
 
 kankan checks the agent headings of a card when it is about to claim it, for implementation or for review. Invalid:
+- a heading with no target, such as `## agent:`;
 - a heading `agent: …` whose target is neither a configured agent type nor `all` (a misspelt type, e.g. `## agent: cluade`);
 - a phase other than `implementation` and `review`, or extra words after the phase;
 - two headings with the same target and phase (`## agent: claude` twice, or `## agent: Claude review` and `## agent: claude review`).
 
-An invalid card is **not claimed**: it gets `Error` and a comment, with a mention ([initial §14.2](initial_spec_functional.md#142-notifications)), naming every problem and listing the valid headings for the configured agents, e.g. "kankan: this card is not started: `cluade` in `## agent: cluade review` is not an agent type (valid targets: claude, codex, all; phases: implementation, review). Fix the heading; see the `Instructions` card in the `kankan` list." The card stays where it is (`Backlog`, or the implementer's `Implemented` list); the other cards go on. Each wrong version of the description is reported once.
+An invalid card is **not claimed**: it gets `Error` (unless it already has one: then kankan only comments) and a comment, with a mention ([initial §14.2](initial_spec_functional.md#142-notifications)), naming every problem and listing the valid headings for the configured agents, e.g. "kankan: this card is not started: `cluade` in `## agent: cluade review` is not an agent type (valid targets: claude, codex, all; phases: implementation, review). Fix the heading; see the `Instructions` card in the `kankan` list." The card stays where it is (`Backlog`, or the implementer's `Implemented` list); the other cards go on. Each wrong version of the description is reported once, whichever seat finds it.
 
 When the user fixes the description, kankan removes the `Error` it set at its next board read, and the card can be claimed again. kankan never removes an `Error` it did not set for this reason.
 
@@ -95,7 +99,7 @@ Example of one block, for Claude:
 
 (each heading followed in the card by a line "Instructions for … go here.").
 
-**Keeping it current.** `doctor` rewrites the description whenever it differs from the text kankan generates for the configured agent types: after an agent type is added or removed, after a kankan upgrade that changes the text, or after a user edit. It prints "Instructions card updated (agent types: claude, codex)". `doctor --no-fix` only reports that the card is outdated. Launchers never write the card. A deleted, archived or moved-out card is recreated by the next `doctor`; a card moved to another list becomes an ordinary card there, as for setting cards.
+**Keeping it current.** `doctor` rewrites the description whenever it differs (ignoring line endings, trailing horizontal whitespace and trailing blank lines) from the text kankan generates for the configured agent types: after an agent type is added or removed, after a kankan upgrade that changes the text, or after a user edit. It prints "Instructions card updated (agent types: claude, codex)". `doctor --no-fix` only reports that the card is outdated. Launchers never write the card. A deleted, archived or moved-out card is recreated by the next `doctor`; a card moved to another list becomes an ordinary card there, as for setting cards.
 
 ## 7. Changes to the initial specification
 
@@ -133,11 +137,18 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 4. `## agent: cluade review`: the card is not claimed, `Error` and one comment listing the valid targets; the next card in the `Backlog` is claimed; after the fix, `Error` is removed at the next board read and the card is claimed.
 5. Unknown phase, extra words, duplicate heading: as in 4. The same wrong description is reported once over several cycles; a different wrong edit is reported again.
 6. An invalid heading added to a card in `Implemented`: the review is not claimed, `Error` and comment; the card stays in `Implemented`.
-7. An invalid heading added during a running task: the next `task` returns the whole description, `card_instructions: null` and `card_instructions_error`; no `Error`.
+7. An invalid heading added during a running task: the next `task` returns only the specification prefix, `card_instructions: null` and `card_instructions_error`; no `Error`.
 8. `init` creates the `Instructions` card with blocks for every configured agent type; after adding an agent type, `doctor` rewrites it and says so; `doctor --no-fix` reports it outdated; a user edit is overwritten by the next `doctor`; a deleted card is recreated.
 9. The `Instructions` card never gets "unknown setting".
 10. A Q&A card whose description contains `## agent: claude` returns it whole in its `qa` task.
 11. With live agents, a `## agent: claude review` instruction to consult the advisor: the Claude reviewer follows it; a Codex reviewer of another card with `## agent: all review` asking for something it cannot do notes it and completes the review.
+12. `desc` keeps the specification exactly as written: trailing spaces, line endings and the final newline.
+13. A description that starts with an agent heading has an empty specification: `desc` is the empty string.
+14. A matching section with an empty body is delivered as its heading alone.
+15. During a resumed task, an invalid heading is inserted above a section for another seat: `task` returns `desc` without the body of the invalid section or of the section after it, `card_instructions: null` and the problem in `card_instructions_error`; after the fix, `task` returns the seat's sections again and `card_instructions_error: null`.
+16. Two seats find the same invalid description: the card gets one comment and one `Error` for that version. The seat that reported it stops; after the fix, another seat's launcher removes the `Error`. An `Error` that was on the card before the check (set by the user) stays after the fix.
+17. Two open `Instructions` cards both get the duplicate-title `Error`; after one is removed, the next `doctor` updates the other.
+18. A code block left unclosed before an agent heading: the heading is ordinary text of the specification, and every agent gets it in `desc`.
 
 ## 10. Out of scope
 
