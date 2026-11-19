@@ -109,3 +109,8 @@ def test_fingerprint():
     assert fingerprint("a\r\nb", TYPES) == fingerprint("a\nb", TYPES) == fingerprint("a\rb", ("codex", "claude"))
     assert fingerprint("a\nb", TYPES) != fingerprint("a\nb", ("claude",))
     assert len(fingerprint("x", TYPES)) == 12
+
+
+def test_long_token_quoted_short():
+    parsed = parse("S\n## agent: " + "x" * 2000 + "\n", TYPES)
+    assert len(parsed.problems[0].reason) < 80 and "…" in parsed.problems[0].reason

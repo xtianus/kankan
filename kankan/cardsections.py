@@ -52,6 +52,11 @@ def _render(heading: str, body_lines: list) -> str:
     return "\n".join([heading] + body_lines)
 
 
+def _quote(word: str, limit: int = 40) -> str:
+    """A token as quoted in a problem: problems stay short whatever the user wrote."""
+    return f"`{word if len(word) <= limit else word[:limit - 1] + '…'}`"
+
+
 def _target_phase(rest: str, types: set):
     """The (target, phase) of a candidate's text after ``agent:``, or the reason it is invalid."""
     rest = _CLOSING_HASHES.sub("", rest.rstrip())
@@ -59,9 +64,9 @@ def _target_phase(rest: str, types: set):
     if not words:
         return None, "no target after `agent:`"
     if words[0] not in types | {RESERVED}:
-        return None, f"`{words[0]}` is not an agent type"
+        return None, f"{_quote(words[0])} is not an agent type"
     if len(words) > 1 and words[1] not in PHASES:
-        return None, f"`{words[1]}` is not a phase"
+        return None, f"{_quote(words[1])} is not a phase"
     if len(words) > 2:
         return None, "unexpected words after the phase"
     return (words[0], words[1] if len(words) > 1 else None), None

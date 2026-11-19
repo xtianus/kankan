@@ -157,3 +157,7 @@ QA_SUSPEND = ("kankan: this Q&A conversation has ended (the card left Q&A, was a
               "Post nothing more and run `kankan yield --json`.")
 QA_NO_SIGNAL = ("kankan: agent stopped without a signal (no answer/handoff/fail/yield); it needs a look. "
                 "A new comment wakes it up.")
+
+# card instructions F§4: a card refused for its agent headings
+SECTIONS_INVALID = ("kankan: this card is not started: {problems} (valid targets: {targets}; phases: implementation, review). "
+                    "Fix the heading; see the `Instructions` card in the `kankan` list.")
