@@ -27,7 +27,7 @@ The feature applies to implementation cards (merge-request cards included) and t
 
 Write the heading on its own line, with up to three leading spaces and a space or tab after the hashes. A whitespace-separated run of closing hashes is optional.
 
-Other headings (`## Tests`, `### Style`) are ordinary text of the part they are in. A heading inside a fenced code block is never an agent heading; a code block left unclosed runs to the end of the description, as Trello renders it, so the agent headings after it are ordinary text of the specification and reach every agent.
+Other headings (`## Tests`, `### Style`) are ordinary text of the part they are in. A heading inside a fenced code block is never an agent heading; a code block left unclosed runs to the end of the description, as in Markdown (not yet observed in Trello's rendering), so the agent headings after it are ordinary text of the specification and reach every agent.
 
 **Which sections reach a seat.** A seat of type *T* working in phase *P* gets the sections whose heading is `all`, `all P`, `T` or `T P`, in the order they appear in the description. Sections for other types or the other phase never reach it.
 

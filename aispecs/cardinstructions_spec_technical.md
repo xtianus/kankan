@@ -18,7 +18,7 @@ A new module, `kankan/cardsections.py`, standard library only, with pure functio
 
 - `parse(desc, agent_types) -> Parsed`: `Parsed` holds `spec` (the exact source prefix before the first candidate, or the complete input if there is none), `sections` (a list of `(target, phase, heading_line, body)` in description order, `phase` `None` for both) and `problems` (a list of messages; empty when valid).
 - `for_seat(parsed, agent_type, phase) -> Optional[str]`: the sections matching `all`, `all P`, `T`, `T P`, or `None` when none matches. They are rendered in source order with LF line endings, each as its original heading line followed by its body with the original indentation and without leading and trailing blank lines (an empty body contributes its heading alone), and joined with one blank line, as in [functional §3](cardinstructions_spec_functional.md#3-delivery-to-the-agent).
-- `fingerprint(desc) -> str`: the first 12 hex digits of the SHA-1 of the description with line endings normalized to LF; it identifies a version of the description in op-ids and in the local record ([§3](#3-check-at-claim)).
+- `fingerprint(desc, agent_types) -> str`: the first 12 hex digits of the SHA-1 of the description with line endings normalized to LF, followed by the sorted agent types; it identifies what was checked in op-ids and in the local record ([§3](#3-check-at-claim)), so an adapter change that changes the problems is reported again.
 - `help_text(agent_types) -> str`: the description of the `Instructions` card ([§6](#6-the-instructions-card)).
 
 Rules of `parse`:
@@ -40,20 +40,26 @@ Rules of `parse`:
 
 The agent types are `adapter_types(paths)`, the same list the model and effort cards use.
 
-**Local record, `<gcd>/kankan/card-sections.json`.** No seat holds a refused card, so, as for the setting cards ([boardsettings T§2](boardsettings_spec_technical.md#2-board-settings), "`Error` causes"), the feedback is recorded per project, not in a seat state, and every launcher sees it. Written atomically under the project lock like the other state files. Per card ID: the `fingerprint` of the version reported, whether kankan added `Error` for it (`owns_error`), and the pending Trello actions (comment, add label, remove label). The `sections` cause is never recorded in seat states.
+**Local record, `<gcd>/kankan/card-sections.json`.** No seat holds a refused card, so, as for the setting cards ([boardsettings T§2](boardsettings_spec_technical.md#2-board-settings), "`Error` causes"), the feedback is recorded per project, not in a seat state, and every launcher sees it. Written atomically under the project lock like the other state files. Per card ID: the `fingerprint` of the version reported and the time it was recorded (`at`); `owned_error`, `error_write_started` and `error_confirmed`, with the meaning they have in `board-settings.json`; and the pending actions (`comment`, `add_error`, `remove_error`), each with an ID. The `sections` cause is never recorded in seat states.
 
-**Feedback on an invalid version.** Under the project lock, with the description and labels of the board read that triggered the check:
-- record already at this fingerprint: nothing to do (no Trello read or write), so every seat and every cycle after the first finds the version reported;
-- otherwise: record the fingerprint and, as pending actions, the comment `messages.SECTIONS_INVALID` (the problems and the valid targets and phases, with a mention) with op-id `sections-<card id>-<fingerprint>`, and, when the card has no `Error` in that read, the label with `owns_error` set; when it already has one (set by the user or for another cause) `owns_error` stays as recorded for an earlier version, or false, and kankan only comments.
+**Feedback on an invalid version.** Under the project lock, with the description of the board read that triggered the check: when the record is already at this fingerprint, nothing more happens, so every later cycle and every other seat finds the version reported without any Trello read or write. Otherwise kankan records the fingerprint, `at`, and the pending actions `comment` (`messages.SECTIONS_INVALID`: the problems and the valid targets and phases, with a mention; its ID is the op-id `sections-<card id>-<fingerprint>`) and `add_error`.
 
-The lock is released, then the pending actions are performed and each is cleared under the lock when it succeeded; a failed one is retried at the next board read of any launcher. The op-id makes a comment retried after a timeout find the one already posted ([initial T§15.1](initial_spec_technical.md#151-principles)).
+**Performing pending actions.** Like the setting cards' actions (`boardsettings.apply_read`): one action at a time, each under the project lock, rereading the record and the card (C1) first, so two launchers never perform the same action and a crash leaves the action pending:
+- `comment`: posted only when the card's comments (M2) hold no comment by kankan's account ending with its marker; so a launcher that finds the action pending after another posted it, or after a timeout, does not post it again, while a later version, even one equal to an earlier one (A→B→A, a new record), gets its own comment because its record and pending action are new;
+- `add_error`: when the card already has `Error` and neither `error_write_started` nor `error_confirmed` is set, the label belongs to someone else: `owned_error` is false and kankan only comments. Otherwise `error_write_started` is saved, the label is added (T3), then `error_confirmed` and `owned_error` are saved;
+- `remove_error`: the label is removed only when `owned_error` and (`error_write_started` or `error_confirmed`) are set, and unless a seat state records another cause for `Error` on that card ([initial §14.1](initial_spec_functional.md#141-labels)); the record is dropped only after the removal succeeded, or at once when there was nothing to remove.
 
-**Clearing.** On every board read of its cycle (`workflow.tick` after convergence, and `periodic_board_check` while busy) and at a valid claim, a launcher takes the project lock and, for each recorded card, compares it with that read:
-- description now valid, or card no longer in `Backlog` or a seat's `Implemented` list (moved, archived): when `owns_error` and the read still shows `Error`, removes the label (pending action, as above), unless a seat state records another cause for `Error` on that card ([initial §14.1](initial_spec_functional.md#141-labels)); then drops the record;
-- card deleted (absent from the read and a C1 read answers 404): drops the record without Trello writes;
-- description still invalid at another fingerprint: handled as a new invalid version at the next claim attempt.
+A failed action stays pending and is retried at the next board read of any launcher. The op-id also lets a comment retried after a timeout find the one already posted ([initial T§15.1](initial_spec_technical.md#151-principles)).
 
-When the card reaches `Done`, `clear_kankan_labels` removes kankan's labels as before, and the record is dropped at the next read. A lost or corrupted record is rebuilt empty: an invalid card is reported again at its next claim attempt, and an `Error` kankan set before the loss is no longer known as its own, so the user removes it.
+**Clearing.** On every board read of its cycle (`workflow.tick` after convergence, and `periodic_board_check` while busy) and at a valid claim, a launcher compares each recorded card with that read, under the project lock:
+- card in the read, in `Backlog` or a seat's `Implemented` list, with a description valid at the current agent types: kankan adds the pending action `remove_error`, dropping any pending `comment` and `add_error` of that record;
+- card in the read but in another list: the same;
+- card absent from the read (B3 returns only open cards): a C1 read decides; archived: the same as above; deleted (404): the record is dropped without Trello writes;
+- description invalid at another fingerprint: nothing here; it is a new invalid version at the next claim attempt.
+
+When the card reaches `Done`, `clear_kankan_labels` removes kankan's labels as before; the record is then cleared as a card in another list. A lost or corrupted record is rebuilt empty: an invalid card is reported again at its next claim attempt, and an `Error` kankan set before the loss is no longer known as its own, so the user removes it.
+
+**`reconcile`.** The check of old `Error` and `Question` labels ([initial §15.3](initial_spec_functional.md#153-kankan-reconcile---fix)) also reads `card-sections.json`: a record with `owned_error` older than the threshold is reported as `old_label` with cause `sections`.
 
 ## 4. Delivery
 
@@ -98,7 +104,7 @@ New capability, added to [`kanban_requirements.md`](kanban_requirements.md) in t
 |---|---|---|---|
 | C9 | SHOULD | Update a card's description. Used by `doctor` to keep the `Instructions` card of the `kankan` list current. Without it, the user deletes the card and `doctor` recreates it. | `PUT /1/cards/{id}` (`desc`) |
 
-Everything else uses the reads and writes already listed: B3 (descriptions on every cycle), L6 and C6 (the `kankan` list and card creation), T3 and M1 (`Error` and its comment).
+Everything else uses the reads and writes already listed: B3 (descriptions on every cycle), C1 (the card before each pending action, and archived cards), L6 and C6 (the `kankan` list and card creation), T3, M1 and M2 (`Error`, its comment and the check for a comment already posted).
 
 The same commit adds to [`kanban_requirements.md`](kanban_requirements.md) §11 (requirements outside the API) the editor behaviour of [§12](#12-observed-trello-behaviour): a heading typed or pasted in the description editor is stored as Markdown source (`## agent: …`) in the description the API returns, and lines copied from a rendered code block keep their `##`.
 
@@ -111,6 +117,8 @@ How this feature changes [`initial_spec_technical.md`](initial_spec_technical.md
 **§8.5 Cycle and signals.** Add: on each board read the launcher performs the pending feedback of invalid agent headings and clears the `Error` kankan set for them on cards now valid or no longer claimable, from the project-level record `card-sections.json` ([card instructions T§3](cardinstructions_spec_technical.md#3-check-at-claim)).
 
 **§8.7 Adapters.** Add: the adapter type `all` is reserved and refused with `config_error`.
+
+**§15 Errors and recovery (`reconcile`).** Add: the check of old labels also reads `card-sections.json` ([card instructions T§3](cardinstructions_spec_technical.md#3-check-at-claim)).
 
 **§17 Security.** Add after "Text forwarded to the agent comes only from board members …":
 
@@ -125,7 +133,7 @@ How this feature changes [`boardsettings_spec_technical.md`](boardsettings_spec_
 ## 11. Tests
 
 - Unit (`cardsections`): spec before the first heading; every target and phase combination; case and spacing; other headings kept as text; fenced blocks skipped; unknown target, unknown phase, extra words and duplicates, all reported together; `for_seat` order and filtering; `help_text` deterministic and containing every agent type.
-- `workflow`: an invalid card is labelled and commented once per description version, by whichever seat finds it first, and skipped while the next card is claimed; later cycles and other seats make no Trello read or write for that version; after a fix any launcher clears the `Error` kankan set, at its next board read or at the claim; an `Error` already on the card is left in place and only the comment is posted; a failed comment or label write is retried at the next read; the review claim behaves the same; no ref is written for a refused card; a lost record is rebuilt empty.
+- `workflow`: an invalid card is labelled and commented once per description version, by whichever seat finds it first, and skipped while the next card is claimed; later cycles and other seats make no Trello read or write for that version; after a fix any launcher clears the `Error` kankan set, at its next board read or at the claim; an `Error` already on the card is left in place and only the comment is posted; a failed comment or label write is retried at the next read; two launchers performing pending actions post one comment; a failed removal keeps the record; an archived card's record is cleared after a C1 read; an adapter change reports an unchanged invalid description again; `reconcile` reports an old `sections` `Error`; the review claim behaves the same; no ref is written for a refused card; a lost record is rebuilt empty.
 - `agentcmds.task`: `desc` and `card_instructions` per agent type and phase; `card_instructions_error` for a description broken mid-task; Q&A and `hold_wip` unchanged.
 - `settings_setup` / `doctor` against the fake Trello: creation, rewrite after an agent type is added, no rewrite when unchanged, `--no-fix` report, recreation after deletion, no write with duplicates; `boardconfig.evaluate` ignores one `Instructions` card.
 - Adapters: a type named `all` is refused.
