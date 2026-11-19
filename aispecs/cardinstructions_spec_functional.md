@@ -50,7 +50,7 @@ A Claude reviewer gets the specification and the advisor line; a Codex reviewer 
 
 The description is read at every `task` call, as before: an edit made while the task runs reaches the agent the next time it reads the task. When a description edited during the task has invalid agent headings, `task` does not fail: it returns only the text before the first agent heading candidate (valid or invalid) as `desc`, `card_instructions: null` and `card_instructions_error` with the problem; the agent goes on with the specification and notes the problem with `kankan note`. kankan sets no `Error` during a task for this; the check of [§4](#4-errors) happens at the next claim.
 
-`hold_wip` tasks are unchanged. The pasted prompt stays the fixed one-liner of [initial §13.1](initial_spec_functional.md#131-skill).
+A `hold_wip` task (commit the work in progress and yield) gets the same `desc`, without agent sections, and no `card_instructions`. The pasted prompt stays the fixed one-liner of [initial §13.1](initial_spec_functional.md#131-skill).
 
 ## 4. Errors
 
