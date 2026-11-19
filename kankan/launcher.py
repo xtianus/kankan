@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from kankan import boardconfig, boardsettings, cards, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
+from kankan import boardconfig, boardsettings, cards, cardsections_feedback, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
 from kankan.adapters import Adapter, Classification, ModelEffort, classify, load_adapter, start_command
 from kankan.config import check_lists, check_registry
 from kankan.errors import KankanError, Status
@@ -808,6 +808,11 @@ class Launcher:
             self.request_suspend("hold")
         if self.state in ("working", "suspending", "limited", "waiting_human"):
             self.check_user_move(snap)
+        try:  # card instructions T§3; after HOLD and user moves, which a failure here must never skip
+            cardsections_feedback.sweep(self.project, snap)
+            cardsections_feedback.drain(self.project)
+        except KankanError as err:
+            self.log("sections_action_failed", error=err.message)
 
     def check_user_move(self, snap) -> None:
         """§14.6: an in-progress card moved out of the seat's lists, archived or deleted by the user."""

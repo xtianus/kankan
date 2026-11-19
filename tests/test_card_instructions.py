@@ -107,3 +107,130 @@ def test_qa_task_returns_description_whole(conv):
     data = agentcmds.task(conv.ctx)
     assert data["card"]["desc"] == desc
     assert "card_instructions" not in data
+
+
+# ---------------------------------------------------------------- check at claim (F§4, T§3)
+
+from kankan import cardsections_feedback as feedback  # noqa: E402
+from kankan.refstore import card_ref  # noqa: E402
+
+BAD = "spec\n## agent: cluade review\nx\n"
+
+
+def _sections_comments(project, card_id):
+    return [c for c in project.trello.comments(card_id) if "kankan:sections-" in c.text]
+
+
+def _has_error(project, fake, card_id):
+    return project.cfg.label_error in fake.state["cards"][card_id]["idLabels"]
+
+
+def test_invalid_card_skipped_next_claimed(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    bad = fake.add_card(project.cfg.backlog, "bad", desc=BAD, pos=1)
+    good = fake.add_card(project.cfg.backlog, "good", pos=2)
+    first = seats.acquire(project, "claude")
+    assert workflow.tick(project, first)["card"] == good["id"]
+    assert _has_error(project, fake, bad["id"]) and len(_sections_comments(project, bad["id"])) == 1
+    assert "cluade" in _sections_comments(project, bad["id"])[0].text
+    assert project.refs.read(card_ref(bad["id"])) is None
+    fake.state["cards"][bad["id"]]["desc"] = "spec\n## agent: claude review\nx\n"
+    second = seats.acquire(project, "codex")
+    project.reload_config()
+    assert workflow.tick(project, second)["card"] == bad["id"]
+    assert not _has_error(project, fake, bad["id"])
+    assert feedback.load(project.paths)["cards"] == {}
+
+
+def test_reported_once_across_cycles_and_seats(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    bad = fake.add_card(project.cfg.backlog, "bad", desc=BAD, pos=1)
+    user = fake.add_card(project.cfg.backlog, "user", desc=BAD, pos=2)
+    fake.user_label(user["id"], project.cfg.label_error)
+    leases = [seats.acquire(project, "claude"), seats.acquire(project, "codex")]
+    project.reload_config()
+    for _ in range(3):
+        for lease in leases:
+            assert workflow.tick(project, lease) is None
+    assert len(_sections_comments(project, bad["id"])) == 1 and len(_sections_comments(project, user["id"])) == 1
+    fake.state["cards"][bad["id"]]["desc"] = "spec\n## agent: claude deploy\nx\n"
+    workflow.tick(project, leases[1])
+    assert len(_sections_comments(project, bad["id"])) == 2
+    for card in (bad, user):
+        fake.state["cards"][card["id"]]["desc"] = "fixed spec\n"
+    workflow.tick(project, leases[1])  # claims the top card, clearing its label in the claim
+    workflow.tick(project, leases[0])
+    assert not _has_error(project, fake, bad["id"])
+    assert _has_error(project, fake, user["id"])  # the user's own Error stays
+
+
+def test_review_claim_refused(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    claude = seats.acquire(project, "claude")
+    codex = seats.acquire(project, "codex")
+    project.reload_config()
+    card = implement(project, fake, claude, "feature")
+    implemented = fake.state["cards"][card["id"]]["idList"]
+    fake.state["cards"][card["id"]]["desc"] = BAD
+    assert workflow.tick(project, codex) is None
+    assert _has_error(project, fake, card["id"]) and len(_sections_comments(project, card["id"])) == 1
+    assert fake.state["cards"][card["id"]]["idList"] == implemented
+    assert project.refs.read(card_ref(card["id"])).meta["phase"] == "implemented"
+
+
+def test_edit_between_reads_clears_in_claim(kproject, fake_trello, monkeypatch):
+    project, fake = kproject, fake_trello
+    card = fake.add_card(project.cfg.backlog, "c", desc=BAD)
+    lease = seats.acquire(project, "claude")
+    assert workflow.tick(project, lease) is None
+    assert _has_error(project, fake, card["id"])
+    original = type(project.trello).snapshot
+    calls = []
+    def snapshot(self, board_id):
+        calls.append(1)
+        if len(calls) == 2:  # the claim's in-lock read sees the fix
+            fake.state["cards"][card["id"]]["desc"] = "fixed\n"
+        return original(self, board_id)
+    monkeypatch.setattr(type(project.trello), "snapshot", snapshot)
+    task = workflow.tick(project, lease)
+    assert task["card"] == card["id"]
+    assert not _has_error(project, fake, card["id"])
+
+
+def test_adapter_change_reports_again(kproject, fake_trello, monkeypatch):
+    project, fake = kproject, fake_trello
+    card = fake.add_card(project.cfg.backlog, "c", desc=BAD)
+    lease = seats.acquire(project, "claude")
+    workflow.tick(project, lease)
+    monkeypatch.setattr(workflow, "adapter_types", lambda paths=None: ["claude", "codex", "gemini"])
+    workflow.tick(project, lease)
+    assert len(_sections_comments(project, card["id"])) == 2
+
+
+def test_periodic_board_check_clears_and_survives_failures(kproject, fake_trello):
+    from tests.test_ask import FakeTmux, make_launcher
+    project, fake = kproject, fake_trello
+    bad = fake.add_card(project.cfg.backlog, "bad", desc=BAD, pos=1)
+    work = fake.add_card(project.cfg.backlog, "work", pos=2)
+    lease = seats.acquire(project, "claude")
+    task = workflow.tick(project, lease)
+    assert task["card"] == work["id"] and _has_error(project, fake, bad["id"])
+    launcher = make_launcher(project, lease, FakeTmux(), task)
+    fake.state["cards"][bad["id"]]["desc"] = "fixed\n"
+    launcher.next_board_check = 0.0
+    launcher.periodic_board_check()
+    assert not _has_error(project, fake, bad["id"])
+    fake.state["cards"][bad["id"]]["desc"] = BAD
+    with project_lock_ctx(project):
+        feedback.record_invalid_locked(project, project.trello.card(bad["id"]), "zz", ())
+    fake.inject("GET", r"/1/cards/" + bad["id"], "500", times=100)
+    fake.user_label(work["id"], project.cfg.label_hold)
+    launcher.next_board_check = 0.0
+    launcher.periodic_board_check()
+    from kankan.seatstate import load_state
+    assert load_state(project.paths, lease.seat).suspend_requested["reason"] == "hold"
+
+
+def project_lock_ctx(project):
+    from kankan.config import project_lock
+    return project_lock(project.paths)

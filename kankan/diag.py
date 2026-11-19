@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from kankan import boardconfig, boardsettings, clock, messages, modelcheck, seats, workflow
-from kankan.adapters import ModelEffort
+from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, seats, workflow
+from kankan.adapters import ModelEffort, adapter_types
 from kankan.config import qa_list_open
 from kankan.seatstate import load_state
 
@@ -43,6 +43,10 @@ def status(project) -> dict:
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
     waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
                 "reason": reason} for card_id, reason in sorted(reasons.items(), key=lambda i: snap.cards[i[0]].pos)]
+    for row in waiting:
+        if row["reason"] == "invalid_headings":  # card instructions T§3
+            parsed = cardsections.parse(snap.cards[row["card"]].desc, adapter_types(project.paths))
+            row["problems"] = cardsections.problems_text(parsed.problems)
     adapters = boardsettings.adapters_for(project.paths)
     state = boardconfig.load(project.paths)
     values = boardconfig._values(state, boardconfig.schema(adapters, boardconfig.roles(project.paths)))
@@ -135,7 +139,8 @@ def status_text(data: dict) -> str:
     if not data["waiting"]:
         lines.append("  (none)")
     for row in data["waiting"]:
-        lines.append(f"  {row['short']}  {row['reason']:<16} {row['title']}")
+        problems = f": {row['problems']}" if row.get("problems") else ""
+        lines.append(f"  {row['short']}  {row['reason']:<16} {row['title']}{problems}")
     if data.get('settings'):
         lines.append(messages.STATUS_SETTINGS)
         for role, record in data['settings'].items():
@@ -318,6 +323,9 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
             for label_id, entry in causes.items():
                 if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
+    for card_id, record in cardsections_feedback.load(project.paths)["cards"].items():
+        if record.get("owned_error") and _age(record.get("at", "")) > limit:
+            issues.append(Issue("old_label", card_id, f"sections since {record.get('at')}"))
     # push failures
     if cfg.push_main:
         remote_main = gitutil.rev(project.paths.repo, f"refs/remotes/origin/{cfg.integration_branch}")

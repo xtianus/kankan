@@ -6,7 +6,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
-from kankan import boardconfig, boardsettings, gitutil, labels, messages, modelcheck, qa, worktrees
+from kankan import (boardconfig, boardsettings, cardsections, cardsections_feedback, gitutil, labels, messages, modelcheck,
+                    qa, worktrees)
+from kankan.adapters import adapter_types
 from kankan.cards import CardMeta, Phase, converge, parse_refs, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
@@ -122,9 +124,23 @@ def choose(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue], ski
     return None
 
 
+def _check_sections(project, card: Card) -> None:
+    """card instructions T§3: refuse a card whose agent headings are invalid; clear a fixed card's report.
+
+    Runs inside the project lock of the claim, on the card of the claim's fresh board read."""
+    types = adapter_types(project.paths)
+    parsed = cardsections.parse(card.desc, types)
+    if not parsed.valid:
+        cardsections_feedback.record_invalid_locked(project, card, cardsections.fingerprint(card.desc, types), parsed.problems)
+        raise KankanError(Status.INELIGIBLE, f"card {card.short} has invalid agent headings")
+    if card.id in cardsections_feedback.load(project.paths)["cards"]:
+        cardsections_feedback.clear_at_claim_locked(project, card)
+
+
 def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Claimed]:
     """Claim a Backlog card: branch check, ref transition, HOLD recheck, branch checkout."""
     card = choice.card
+    _check_sections(project, card)
     repo = project.paths.repo
     worktree = project.paths.seat_worktree(lease.seat)
     try:
@@ -196,6 +212,7 @@ def _free_branch_for_review(project, lease: Lease, card: Card, value: RefValue) 
 def claim_review(project, lease: Lease, choice: Choice, pair=None) -> Optional[Claimed]:
     """Claim a card in an Implemented list for review (§9.2, §11)."""
     card, value = choice.card, choice.ref
+    _check_sections(project, card)
     worktree = project.paths.seat_worktree(lease.seat)
     if worktrees.dirty_files(worktree):
         raise KankanError(Status.NEEDS_RECONCILIATION, f"worktree {worktree} is not clean; cannot start a review")
@@ -249,6 +266,8 @@ def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[d
     adapters = boardsettings.adapters_for(project.paths)
     boardsettings.apply_read(project, boardsettings.from_snapshot(project, snap), adapters)
     boardsettings.drain_actions(project)
+    cardsections_feedback.sweep(project, snap)
+    cardsections_feedback.drain(project)
     refs = card_refs(project)
     skip: Set[str] = set()
     while True:
@@ -288,6 +307,7 @@ def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[d
         except KankanError as err:
             if err.status in (Status.ALREADY_CLAIMED, Status.INELIGIBLE):
                 project.log("claim_skipped", card=choice.card.id, reason=err.message)
+                cardsections_feedback.drain(project)  # the report of invalid headings, in the same cycle
                 refs = card_refs(project)
                 continue
             raise
@@ -457,6 +477,11 @@ def waiting_reasons(project, snap: Snapshot, refs: Dict[str, RefValue], types: O
     implemented_lists = {sc.implemented for sc in project.cfg.work_seats().values()}
     types = active_types(project) if types is None else types
     qa_alive = None
+    known = []
+    def heading_types():
+        if not known:
+            known.append(adapter_types(project.paths))
+        return known[0]
     for card in snap.cards.values():
         value = refs.get(card.id)
         phase = value.meta.get("phase") if value else None
@@ -479,6 +504,8 @@ def waiting_reasons(project, snap: Snapshot, refs: Dict[str, RefValue], types: O
                 reasons[card.id] = "hold"
             elif phase not in (None, Phase.PARKED.value):
                 reasons[card.id] = "ineligible_phase"
+            elif not cardsections.parse(card.desc, heading_types()).valid:
+                reasons[card.id] = "invalid_headings"
             elif not deps_satisfied(project, snap, card):
                 reasons[card.id] = "deps"
         elif card.list_id in implemented_lists:
@@ -486,6 +513,8 @@ def waiting_reasons(project, snap: Snapshot, refs: Dict[str, RefValue], types: O
                 reasons[card.id] = "hold"
             elif phase not in (Phase.IMPLEMENTED.value, Phase.PARKED.value) or not (value and value.meta.get("implementer")):
                 reasons[card.id] = "ineligible_phase"
+            elif not cardsections.parse(card.desc, heading_types()).valid:
+                reasons[card.id] = "invalid_headings"
             elif not (types - {value.meta.get("implementer_type")}):
                 reasons[card.id] = "no_reviewer_type"
     for card in snap.cards.values():

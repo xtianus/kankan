@@ -153,3 +153,15 @@ def test_status_with_only_a_qa_seat_alive_keeps_the_work_reasons(kproject, fake_
     finally:
         seats.release(project, qa_lease)
     assert reasons[card["id"]] == "no_reviewer_type"
+
+
+def test_status_shows_invalid_headings(board, capsys):
+    project, fake, lease, working, held = board
+    bad = fake.add_card(project.cfg.backlog, "Bad headings", desc="spec\n## agent: cluade\nx\n", pos=3)
+    fake.state["cards"][held["id"]]["desc"] = "spec\n## agent: cluade\nx\n"
+    rows = {row["card"]: row for row in diag.status(project)["waiting"]}
+    assert rows[bad["id"]]["reason"] == "invalid_headings" and rows[bad["id"]]["problems"].startswith("line 2: ")
+    assert rows[held["id"]]["reason"] == "hold"
+    assert "line 2: `cluade` is not an agent type" in diag.status_text(diag.status(project))
+    fake.state["cards"][bad["id"]]["desc"] = "fixed\n"
+    assert bad["id"] not in {row["card"] for row in diag.status(project)["waiting"]}

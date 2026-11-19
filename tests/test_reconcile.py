@@ -367,3 +367,14 @@ def test_fix_removes_conversation_dirs_no_ref_names(board):
     fixed = diag.reconcile(project, fix=True)
     assert [i.subject for i in find(fixed, "qa_conversation_dir_deleted")] == [orphan]
     assert qa.conversations(project.paths) == [named]
+
+
+def test_old_sections_error_reported(board):
+    from kankan import cardsections_feedback as feedback
+    project, fake, lease = board
+    old = clock.iso(clock.now() - timedelta(hours=30))
+    feedback.save(project.paths, {"cards": {"c" * 24: {"fingerprint": "f", "report": "r", "at": old, "state": "reported",
+                                                       "owned_error": True, "error_write_started": True,
+                                                       "error_confirmed": True, "pending": []}}})
+    issues = [i for i in diag.reconcile(project) if i.kind == "old_label"]
+    assert any(i.subject == "c" * 24 and "sections" in i.detail for i in issues), issues
