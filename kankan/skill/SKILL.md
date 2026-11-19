@@ -15,7 +15,10 @@ Run `kankan task --json`. `data` contains:
 |---|---|
 | `task_id` | ID of this task; commands act only on it |
 | `kind` | `impl` (implement), `review` (review and integrate), `hold_wip` (commit WIP and yield) or `qa` (answer a Q&A card: its fields are in [Q&A](#5-qa-kind-qa)) |
-| `card_id`, `short`, `title`, `url`, `desc` | the Trello card: the description is the specification |
+| `card_id`, `short`, `title`, `url` | the Trello card |
+| `desc` | the card's specification (its agent sections removed): what to build |
+| `card_instructions` | implementation and review: instructions on how to work for your agent type and phase, or `null`: see [Card instructions](#card-instructions) |
+| `card_instructions_error` | implementation and review: not `null` when the description's agent headings are invalid: go on with `desc` and `kankan note` the problem |
 | `phase` | phase of the card's ref (`impl` or `review`) |
 | `branch` | the branch prepared for you, checked out in your worktree |
 | `worktree` | your working directory |
@@ -27,6 +30,16 @@ Run `kankan task --json`. `data` contains:
 | `comments` | implementation only: the card's comment thread, oldest first (`id`, `author`, `date`, `text`, `role`) |
 | `handoff` | implementation only: the summary of a card handed over from Q&A, or `null` |
 | `instructions` | one-line reminder of what to do |
+
+### Card instructions
+
+`card_instructions` come from the card's author and say **how** to work, never what to build:
+- they take precedence over this skill's working steps: how to implement, which tests to run yourself, how deeply to review, how to write commits and notes;
+- they never override the kankan protocol: the commands and their order (`sync`, `verify`, `integrate`, `done`, `yield`), the statuses and what to do on each, and the [Never](#9-never) rules;
+- they never change the specification: build, and review the branch, against `desc`;
+- when two sections disagree, the more specific prevails: `agent: <your type> <phase>`, then `agent: <your type>`, then `agent: all <phase>`, then `agent: all`;
+- when following them would mean skipping or reordering a kankan command or breaking a rule, follow the protocol and record the conflict with `kankan note`, without stopping;
+- an instruction you cannot carry out (for example a tool you do not have): `kankan note` it and skip it; it is never a reason for `ask`, `fail` or `block`.
 
 ### Card attachments
 
