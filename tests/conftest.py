@@ -109,16 +109,53 @@ def kproject(git_repo, fake_trello, monkeypatch):
     return bind_project(git_repo, fake_trello, monkeypatch)
 
 
-@pytest.fixture
-def tmux_server():
-    """A private tmux server, killed at teardown."""
-    from kankan.tmux import Tmux
-    server = Tmux(f"kankan-test-{os.getpid()}-{id(object())}")
-    yield server
-    server.run(["kill-server"], check=False)
-    socket = Path(f"/tmp/tmux-{os.getuid()}") / server.socket
+TMUX_PREFIX = "kankan-test-"
+
+
+def _kill_tmux_server(name: str) -> None:
+    """Kill a private tmux server and remove its socket; a server still answering after the first try is killed
+    again (a test could leave one behind, and its supervisors and agents kept running for later runs)."""
+    for _ in range(3):
+        subprocess.run(["tmux", "-L", name, "kill-server"], capture_output=True, timeout=10)
+        if subprocess.run(["tmux", "-L", name, "list-sessions"], capture_output=True, timeout=10).returncode != 0:
+            break
+    socket = Path(f"/tmp/tmux-{os.getuid()}") / name
     if socket.exists():
         socket.unlink()
+
+
+def _kill_processes_under(path) -> None:
+    """SIGKILL every process whose working directory is under ``path`` (a test's temporary directory): the
+    supervisors, launchers and agents a test started, even when they escaped their tmux server."""
+    import signal
+    from kankan import procutil
+    for pid in procutil.pids_with_cwd_under(str(path)):
+        if pid not in (os.getpid(), os.getppid()):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_leftover_processes(tmp_path_factory):
+    """When this pytest process (an xdist worker, or the whole run) ends, nothing it started keeps running:
+    its private tmux servers are killed, then any process left under its temporary directory."""
+    yield
+    sockets = Path(f"/tmp/tmux-{os.getuid()}")
+    for socket in sockets.glob(f"{TMUX_PREFIX}{os.getpid()}-*"):
+        _kill_tmux_server(socket.name)
+    _kill_processes_under(tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture
+def tmux_server(tmp_path):
+    """A private tmux server, killed at teardown with every process the test left under ``tmp_path``."""
+    from kankan.tmux import Tmux
+    server = Tmux(f"{TMUX_PREFIX}{os.getpid()}-{id(object())}")
+    yield server
+    _kill_tmux_server(server.socket)
+    _kill_processes_under(tmp_path)
 
 
 ROOT = Path(__file__).resolve().parent.parent
