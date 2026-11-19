@@ -166,11 +166,11 @@ Expected: PASS.
 
 - [ ] **Step 5: Revise `kanban_requirements.md`** rows C1 (the card reread before each pending action, archived cards) and M2 (the check for a comment already posted), and commit with message `Card instructions: project-level feedback record for invalid headings`.
 
-### Task 4: Claim check, cycle integration and `reconcile`
+### Task 4: Claim check, cycle integration, `status` and `reconcile`
 
 **Files:**
-- Modify: `kankan/workflow.py` (`claim_impl` line 125, `claim_review` line 196, `tick` line 238), `kankan/launcher.py` (`periodic_board_check` line 790), `kankan/diag.py` (old-label check around line 316)
-- Test: `tests/test_card_instructions.py`, `tests/test_reconcile.py`
+- Modify: `kankan/workflow.py` (`claim_impl` line 125, `claim_review` line 196, `tick` line 238), `kankan/launcher.py` (`periodic_board_check` line 790), `kankan/diag.py` (old-label check around line 316; `status` and `status_text`), `workflow.waiting_reasons` (line 453)
+- Test: `tests/test_card_instructions.py`, `tests/test_reconcile.py`, `tests/test_status.py`
 
 **Interfaces:**
 - Consumes: `cardsections.parse`, `fingerprint` (Task 1); `load`, `record_invalid_locked`, `clear_at_claim_locked`, `sweep`, `drain` (Task 3).
@@ -183,6 +183,7 @@ Expected: PASS.
   - `test_edit_between_reads_clears_in_claim`: the card is reported invalid; the description is fixed after the tick's first snapshot and before the in-lock one (patch `TrelloClient.snapshot` to edit the fake between calls): the claim happens and the label is removed before the ref transition.
   - `test_adapter_change_reports_again`: an override adding an agent type re-reports an unchanged invalid description.
   - `test_periodic_board_check_clears_and_survives_failures`: a busy launcher (`tests/launcher_helpers.py`) clears a fixed card's label at `periodic_board_check`; with C1 failing, the HOLD check still runs.
+  - In `tests/test_status.py`, `test_status_shows_invalid_headings`: F§9 test 19: an invalid Backlog card never tried appears in `diag.status(project)["waiting"]` with `reason == "invalid_headings"` and `problems` naming the line; still there after the label is removed by hand; gone after the fix; `status_text` prints the problems; a card on `HOLD` keeps reason `hold`.
   - In `tests/test_reconcile.py`, `test_old_sections_error_reported`: a record with `owned_error` and `at` older than `LABEL_AGE_HOURS` gives an `old_label` issue for that card.
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -194,11 +195,12 @@ Expected: FAIL (the invalid card is claimed).
   - `_check_sections`: parse with `adapter_types(project.paths)`; invalid → `record_invalid_locked(project, card, fingerprint(card.desc, types), parsed.problems)` then raise; valid and the card is in `load(project.paths)["cards"]` → `clear_at_claim_locked(project, card)`.
   - `tick`: after `boardsettings.drain_actions(project)`, call `cardsections_feedback.sweep(project, snap)` and `drain(project)`; in the `except KankanError` branch for `INELIGIBLE` (outside the lock), call `drain(project)` so the comment and label appear in the same cycle.
   - `periodic_board_check`: after the HOLD and user-move checks, in their own `try`, `sweep(project, snap)` and `drain`.
+  - `waiting_reasons`: for Backlog cards after the `hold` and phase checks and before `deps`, and for Implemented cards after the `hold` and phase checks and before `no_reviewer_type`, `invalid_headings` when `parse(card.desc, adapter_types(project.paths))` is invalid; `diag.status` adds `problems` (`problems_text`) to those rows; `status_text` appends it after the title.
   - `diag.reconcile`: after the seat-state loop, each record with `owned_error` and `at` older than the threshold gives `Issue("old_label", card_id, f"sections since {at}")`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest -q tests/test_card_instructions.py tests/test_workflow.py tests/test_review_claim.py tests/test_launcher_loop.py tests/test_reconcile.py`
+Run: `.venv/bin/python -m pytest -q tests/test_card_instructions.py tests/test_workflow.py tests/test_review_claim.py tests/test_launcher_loop.py tests/test_reconcile.py tests/test_status.py`
 Expected: PASS.
 
 - [ ] **Step 5: Commit** with message `Card instructions: refuse invalid headings at claim, clear after a fix`.

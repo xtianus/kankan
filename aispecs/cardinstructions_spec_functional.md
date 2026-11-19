@@ -66,6 +66,8 @@ When the user fixes the description, kankan removes the `Error` it set at its ne
 
 A configured agent type removed later makes the cards that name it invalid at their next claim, with the same comment.
 
+**`kankan status`** lists every card in the `Backlog` or a seat's `Implemented` list whose agent headings are invalid among the waiting cards, with reason `invalid_headings` and its problems (line numbers and reasons), whether or not `Error` is still on the card: a user who removed the label by hand, or a card not yet tried by any seat, still shows why it waits.
+
 ## 5. Precedence
 
 The skill tells the agent that `card_instructions` come from the card's author and:
@@ -149,6 +151,7 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 16. Two seats find the same invalid description: the card gets one comment and one `Error` for that version. The seat that reported it stops; after the fix, another seat's launcher removes the `Error`. An `Error` that was on the card before the check (set by the user) stays after the fix.
 17. Two open `Instructions` cards both get the duplicate-title `Error`; after one is removed, the next `doctor` updates the other.
 18. A code block left unclosed before an agent heading: the heading is ordinary text of the specification, and every agent gets it in `desc`.
+19. `kankan status` shows `invalid_headings` with the problems for an invalid card in the `Backlog` before any claim attempt, and still after the user removed its `Error`; a fixed card leaves the list.
 
 ## 10. Out of scope
 

@@ -72,6 +72,8 @@ When the card reaches `Done`, `clear_kankan_labels` removes kankan's labels as b
 
 **Accepted limitation.** `labels.set_label` adds a label before recording its cause in the seat state, and some callers run outside the project lock. A seat setting `Error` for another cause on the same card in the instant between kankan's cause check and its removal loses that label, while its cause stays recorded in the seat state. The window is one Trello request; the branch-conflict label is set again at the card's next claim attempt, while one-shot labels (`fail`, inactivity) are not, so `reconcile` reports the recorded cause without its label.
 
+**`kankan status`.** `workflow.waiting_reasons` parses the description of each card in `Backlog` or a seat's `Implemented` list (after the `hold` and phase checks, before `deps` and the reviewer and model checks) and gives reason `invalid_headings` to an invalid one; `diag.status` adds to that waiting row `problems`, the `problems_text` of the parse, and `status_text` prints it after the title. The check reads only the board read `status` already makes and never the local record, so it holds after a lost record or a label removed by hand.
+
 **`reconcile`.** The check of old `Error` and `Question` labels ([initial §15.3](initial_spec_functional.md#153-kankan-reconcile---fix)) also reads `card-sections.json`: a record with `owned_error` older than the threshold is reported as `old_label` with cause `sections`.
 
 ## 4. Delivery
