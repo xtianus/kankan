@@ -91,6 +91,8 @@ To turn lingering off, run `sudo loginctl disable-linger "$USER"` ([loginctl ref
 
 ## 2. Installation
 
+If you already have kankan installed, see [section 10.1, Updating kankan](#101-updating-kankan).
+
 First clone the kankan repository. You can put the clone in any writable folder; no specific location or folder name is required. For example, to use `~/tools/kankan`:
 
 ```bash
@@ -107,8 +109,6 @@ kankan doctor                          # checks git, tmux, the agents and their 
 ```
 
 Replace `~/tools/kankan` with your chosen clone path if different. This is the source of the kankan tool, separate from the project repository you want the agents to work on. That project can also live anywhere; run `kankan init` inside its clone (for example `~/coding/myproject`, as in [section 3.2](#32-kankan-init)).
-
-`pipx install` builds a **copy** of kankan: later changes to `~/tools/kankan` have no effect until you reinstall it (`pipx install --force ~/tools/kankan`). Restart the agents after reinstalling: an agent's kankan commands refuse to run when kankan changed since its launcher started.
 
 `kankan doctor` is the first thing to run when something does not start: it fixes what is safe (skill links, the `pre-push` hook, missing labels, the PATH of a generated autostart unit) and prints numbered manual steps for the rest (exit 14 while any remain). `kankan up` and `kankan agent` refuse to start an agent type whose CLI is missing; they create a missing skill link but never change an existing one; a failed login check is only a warning.
 
@@ -149,18 +149,36 @@ kankan init <trelloBoard> [--credentials <file.properties>]
 - checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`; `kankan` holds the setting cards, see below) and the labels `HOLD`, `Question`, `Error`;
-- asks for the project's **test command**, the shell command that runs your project's tests (see below);
+- asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 3.3](#33-the-test-command));
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
-- installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out;
 - asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the setting cards in the `kankan` list: `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
-
-**The test command** is what the reviewer agent runs before it integrates a card: for example `pytest -q`, `npm test` or `./gradlew test`. kankan runs it with `bash -c` in the reviewer's worktree, at the exact commit to be integrated; exit code 0 means the tests passed. A failure, or a run longer than 30 minutes (`test_timeout` in `<git dir>/kankan/config.json`, in seconds), stops the integration: the reviewer must fix the problem, commit and verify again.
-Leave the test command empty if the project has no automated tests or they cannot run unattended: the agents still run the project's tests themselves giving a weaker guarantee. 
-Running `init` again shows the current command in brackets; press Enter to keep it or type a new one. To clear it, edit `test_command` in `<git dir>/kankan/config.json`.
 
 `init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.1](#121-moving-a-board-to-another-clone).
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`, except the `Q&A` list: without it only the Q&A agent stops (after its current turn), `kankan status` warns and `kankan doctor` restores it.
+
+### 3.3 The test command
+
+The test command is an optional quality step: it ensures that all tests are run before a change is integrated. If you omit it, agents will run the tests of their choice with no deterministic assurance that any test actually run. If you use it, the test will always be run.
+When not sure, don't provide a test command at initialization time: it can easily be provided later (see below).
+
+- **Without a test command**, the agents choose. kankan tells the implementer and the reviewer to run the project's tests, but each agent picks which tests to run and how. kankan does not check that they ran or that they passed.
+- **With a test command**, the run is deterministic. kankan itself runs the same command on the exact commit it is about to integrate, and refuses to integrate unless it passes. The agents still run tests of their own as well.
+
+The test command is the shell command that runs your project's automated tests, for example `pytest -q`, `npm test`, `./gradlew test` or `make test`. `kankan init` saves it as `test_command` in `<git dir>/kankan/config.json`. It stays in your clone and cannot be set from the board.
+
+Leave it empty if the project has no automated tests, or if they cannot run unattended, or if running them is too expensive. Setting it has a cost: the whole command runs on every card, whatever the card changed. A long suite makes every integration wait for it, even after a one-line change, and the agents may already have run some of the same tests.
+
+**How to write it.**
+
+- It runs unattended: no prompts, no watch mode (for example `vitest run`, not `vitest`), no GUI.
+- Its exit code must be non-zero when any test fails. Chain steps with `&&`, not `;`, so an earlier failure is not hidden.
+- It runs from the root of a fresh worktree: use relative paths, and do not rely on untracked files in your main checkout (such as a local `.env`). Install dependencies in the command if needed (for example `npm ci && npm test`).
+- Any file it writes (build output, coverage, caches) must be ignored by `.gitignore`. Otherwise the worktree is no longer clean and the result is not recorded.
+- It must finish within `test_timeout`, and it must not rely on background services outliving it: start and stop them inside the command.
+- For anything complex, put the steps in a script in the repository and use that as the command (for example `sh check.sh`).
+
+**Changing it later.** Run `kankan init` again: it shows the current command in brackets. Press Enter to keep it, or type a new one. An empty answer keeps the old value, so to clear the command, set `test_command` to `""` in `<git dir>/kankan/config.json`.
 
 ## 4. Starting agents
 
@@ -352,6 +370,42 @@ kankan purge-remote [--remote origin]  # delete refs/agent-* pushed by mistake
 
 All of these are recorded in the audit log. A command started before them (for example an `integrate`) can no longer change anything (`not_owner`).
 
+### 10.1 Updating kankan
+
+1. **Pull the latest code and compare versions.** Use the kankan source clone you installed from. Pulling updates that clone while your agents continue using the copy installed by pipx.
+
+   ```bash
+   git -C ~/tools/kankan pull --ff-only
+   cat ~/tools/kankan/kankan/VERSION
+   kankan --version
+   ```
+
+   After the pull succeeds, compare the number in the `VERSION` file with the number printed by the installed command. **If they match, you’re done.** If they differ, or your installed kankan reports that `--version` is an unknown option, continue below.
+
+2. **Pause each project that has running agents or autostart enabled.** In each such project clone, run the following commands, substituting its path. Confirm the stop and wait for it to finish before reinstalling. Agents finish their current work, and kankan records the settings it needs to restart them.
+
+   ```bash
+   cd ~/coding/myproject
+   kankan stop --graceful
+   ```
+
+3. **Reinstall once and verify the installed version.** Run these commands from any directory. Plain `pipx install` skips an existing installation, so use `--force` to install the copy you just pulled.
+
+   ```bash
+   pipx install --force ~/tools/kankan
+   kankan --version
+   ```
+
+   Check that the installed version now matches the file from step 1.
+
+4. **Resume each project you paused in step 2.** Return to its project clone and run the commands below. `kankan start` restores the agents and re-enables autostart if it was enabled. Check that the expected agents appear in the status output.
+
+   ```bash
+   cd ~/coding/myproject
+   kankan start
+   kankan status
+   ```
+
 ## 11. Adapters
 
 How kankan reads each agent's screen (ready, working, usage limit, trust window, known dialogs) is defined by adapters. Override only what changes in `~/.config/kankan/agents.json` (user) or `<git dir>/kankan/agents.json` (project), for example:
@@ -395,3 +449,140 @@ After a takeover that left cards behind, run `kankan reconcile --fix` in the new
 - Human changes to a card's list are honoured on a best-effort basis; `reconcile` reports leftovers.
 - If the agents integrate into a branch you have checked out (the old `main` setup), your files fall behind when it advances.
 - Exclusion between two clones bound to the same board relies on the registry check; it is not absolute.
+
+## Appendix A. Command reference
+
+The commands you run yourself, in the project clone unless stated otherwise. The commands the agents run (`task`, `done`, `sync`, `verify`, `integrate`, `note`, `ask`, `fail`, `block`, `yield` and the Q&A answer commands) are left out: the agents learn them from the kankan skill.
+
+Every command accepts `--json`, which prints the result as the envelope `{"ok", "status", "message", "data"}` instead of text; the exit codes are listed in [section 9](#9-diagnostics). `kankan --help` and `kankan <command> --help` print the same options.
+
+### Setup
+
+**`kankan skill install [--force]`**: links the shared kankan skill into `~/.claude/skills` and `~/.codex/skills` ([section 2](#2-installation)). Can be run from any folder. A link to another location is replaced; a real file or folder in its place is left alone with a warning.
+- `--force`: recreate the links even when they are already correct.
+
+**`kankan init [<board-url>] [--credentials <file>] [--reauth] [--takeover]`**: binds this clone to a Trello board ([section 3.2](#32-kankan-init)). Safe to run again: it keeps what is already set up and offers to change the test command ([section 3.3](#33-the-test-command)).
+- `<board-url>`: the board's URL, `https://trello.com/b/<shortLink>/<name>`. Required the first time; afterwards it defaults to the board already bound. A different board is refused.
+- `--credentials <file>`: a `.properties` file holding the Trello key and token (`kankan.trello.key`, `kankan.trello.token`); kankan writes newly entered credentials there too.
+- `--reauth`: only ask for new credentials, changing nothing else.
+- `--takeover`: bind a board that is bound to another clone; the other clone's agents stop ([section 12.1](#121-moving-a-board-to-another-clone)).
+
+**`kankan doctor [--no-fix] [--offline]`**: checks the installation and the project, fixes what is safe and prints numbered manual steps for the rest (exit 14 while any remain) ([section 2](#2-installation)).
+- `--no-fix`: only report, change nothing.
+- `--offline`: skip the checks that need Trello.
+
+### Agents
+
+In these commands `<type>` is `claude` or `codex`.
+
+**`kankan up <type>=<n>... [qa=<type>]`**: makes sure that `<n>` agents of each type run, starting only the missing ones ([section 4](#4-starting-agents)). For example `kankan up claude=2 codex=1 qa=claude`.
+- `qa=<type>`: also run the Q&A agent, of that type ([section 6.2](#62-questions-qa-cards)).
+
+**`kankan agent <type> [--seat <seat>] [--qa] [--attach]`**: starts one agent in its own tmux session.
+- `--seat <seat>`: the seat to use (for example `claude-2`); by default kankan picks one.
+- `--qa`: start the Q&A agent, in the seat `<type>-qa`.
+- `--attach`: attach your terminal to the agent's tmux session.
+
+**`kankan autostart enable <type>=<n>... [qa=<type>]`**: installs and enables the systemd user service `kankan-up@<project>.service`, which runs `kankan up` with these arguments at boot.
+
+**`kankan autostart disable`**: disables that service.
+
+**`kankan stop [<seat>] [--graceful] [--yes]`**: without a seat, stops every agent of the project, the Q&A agent included, and disables autostart, after showing what it will stop and asking for confirmation ([section 4](#4-starting-agents)).
+- `<seat>`: stop only this agent, after its current task; autostart is not changed.
+- `--graceful`: wait for each agent to finish its current task instead of quitting it immediately.
+- `--yes`: do not ask for confirmation (required in scripts).
+
+**`kankan start`**: starts again the agents and the autostart that the last `kankan stop` stopped.
+
+### Working with the agents
+
+**`kankan merge-request [<branch>] [--remote] [--bottom]`**: creates a card asking the agents to merge one of your branches into their integration branch ([section 4.1](#41-working-alongside-the-agents)).
+- `<branch>`: your branch; default `user_branch` from the configuration (normally `main`).
+- `--remote`: take the branch from `origin`, fetched now (for work pushed from another clone).
+- `--bottom`: put the card at the bottom of `Backlog` instead of the top.
+
+**`kankan resolve <shortLink> [--done]`**: resolves a card in `Blocked` by hand ([section 8](#8-blocked-cards)). `<shortLink>` is the card's short link from its URL.
+- without `--done`: lists the conflicts and opens the tmux session `kankan-resolve-<project>-<shortLink>` in the blocked worktree;
+- `--done`: checks the merge, removes the worktree and sends the card back to review.
+
+### Diagnostics
+
+**`kankan status`**: seats (alive, free, dead, unavailable), launcher states, current tasks, waiting cards and the Q&A agent ([section 9](#9-diagnostics)).
+
+**`kankan claims`**: card refs with their phase, holder, age and branch.
+
+**`kankan reconcile [--fix]`**: reports inconsistencies between the board, the refs and the worktrees.
+- `--fix`: also repair the cases where the fix is certain, including moving stranded cards back to `Backlog` and removing leftover attachment directories.
+
+**`kankan adapter check <seat> | <file> [--type <type>]`**: shows how kankan reads an agent's screen ([section 11](#11-adapters)).
+- `<seat>`: a running agent's seat, for example `claude-1`;
+- `<file>`: a file holding a saved screen;
+- `--type <type>`: the agent type for a screen file (by default `codex` if the file name contains `codex`, else `claude`).
+
+### Administration
+
+These are recorded in the audit log ([section 10](#10-administration)).
+
+**`kankan release <card> --force`**: parks a card's ref, overriding its holder; the card stays where it is on the board. `--force` is required.
+
+**`kankan seat recover <seat> [--kill]`**: frees a seat that is alive but stuck: its session loses the seat, and the cards it held get a comment.
+- `--kill`: first terminate the seat's tmux session and its processes.
+
+**`kankan seat remove <seat>`**: deletes a seat. Only if it is free, holds no cards and its lists are empty; a Q&A seat only if it is free (its conversation ends).
+
+**`kankan purge-remote [--remote <name>]`**: deletes the `refs/agent-*` refs pushed to a remote by mistake.
+- `--remote <name>`: the remote, default `origin`.
+
+## Appendix B. Configuration reference
+
+kankan keeps each clone's configuration in `<git dir>/kankan/config.json`; `kankan init` creates it. `<git dir>` is usually `.git` in the project clone. The file stays in the clone and is never on the board or on `origin`. Policy settings that can change while agents run (agent, model and effort) are set on the board instead ([section 6.1](#61-model-and-effort)).
+
+Edit the file only with no agent running (`kankan stop`, edit, `kankan start`): every agent reads it when it starts. Keep the JSON valid, and give numbers as numbers, not strings. A malformed file or value stops every command with `config_error` and the reason. A key you leave out takes its default value.
+
+### Settings you may edit
+
+**Tests** ([section 3.3](#33-the-test-command))
+
+- `test_command` (text, default `""`): the shell command run before each integration; `""` means none.
+- `test_timeout` (seconds, default `1800`): the longest a test run may last before it counts as failed.
+
+**Agents and seats**
+
+- `seat_cap` (number, default `4`): the maximum number of seats per agent type ([section 4](#4-starting-agents)).
+- `idle_ready_minutes` (minutes, default `10`): how long an agent may sit idle with a task, or show a screen kankan cannot read, before kankan puts the `Error` label on the card. A Q&A agent that sits idle this long gets a fresh session; the card's conversation continues later from its comments.
+- `idle_exit_minutes` (minutes, default none): if set, an agent with nothing to do exits after this long, freeing its seat. Leave unset to keep agents waiting for work.
+- `write_quiet_seconds` (seconds, default `20`): how long you must have stopped typing in an agent's pane before kankan types into it.
+- `tail_lines` (number, default `30`): how many lines at the bottom of an agent's screen kankan reads to tell its state. Raise it only if `kankan adapter check` shows it misreads the screen ([section 11](#11-adapters)).
+
+**Board polling**
+
+- `poll_seconds` (seconds, default `120`): how often an idle agent checks the board for work and comments. Lower means faster reactions and more Trello requests.
+- `qa_poll_seconds` (seconds, default `30`): the same for the Q&A agent ([section 6.2](#62-questions-qa-cards)).
+- `settings_poll_seconds` (seconds, default `30`): how often the board's setting cards are read ([section 6.1](#61-model-and-effort)).
+- `trello_timeout` (seconds, default `5.0`): how long one Trello request may take before it counts as a network error.
+
+**Branches and integration**
+
+- `push_main` (`true`/`false`, default `false`): push the integration branch to `origin` after each integration, so other clones can pull it ([section 4.1](#41-working-alongside-the-agents)).
+- `user_branch` (text, default `main`): your own main branch, used as the default branch of `kankan merge-request`. kankan never changes it.
+- `main_moved_retries` (number, default `5`): how many times a reviewer may find the integration branch moved during an integration before kankan puts the `Error` label on the card; the reviewer keeps retrying, but you are told.
+
+Change `integration_branch` (default `kankan-agents`) with `kankan init`, never in the file: `init` creates the new branch and refuses while seats hold cards.
+
+**Attachments**
+
+- `attachment_max_bytes` (bytes, default `26214400`, 25 MiB): card attachments larger than this are listed but not downloaded ([section 6](#6-the-workflow)).
+
+**Names and paths**
+
+- `project_name` (text, default the clone's folder name): the name used in tmux session names (`ai-<project>-<seat>`) and in the worktree path. Set it when two clones share a folder name: `kankan up` and `kankan agent` refuse to start and tell you to set it. Change it only when the project has no seats in use: existing worktrees are not moved.
+- `worktree_root` (path, default `~/coding/.kankan/<project>`): where the seats' worktrees are created. The same caution applies.
+
+**Credentials** ([section 3.1](#31-a-trello-account-for-kankan))
+
+- `credentials_path` (path, default `~/.config/kankan/credentials`): the `.properties` file holding the Trello key and token; `kankan init --credentials <file>` sets it.
+- `credentials_keys` (two texts, default `["kankan.trello.key", "kankan.trello.token"]`): the property names of the key and the token in that file. Change them only if the file already uses other names.
+
+### Settings not to edit
+
+kankan writes the rest itself, and a wrong value breaks the binding to the board: `board_id`, `board_short` and `registry_id`; the list and label IDs (`backlog`, `done`, `blocked`, `qa_list`, `settings_list`, `label_hold`, `label_question`, `label_error`); `seats`; `kankan_member_id` and `kankan_username`; `new_conversation`; and the test settings `trello_base_url` and `settle_seconds`. To repair them run `kankan doctor`, or `kankan init` again.
