@@ -139,7 +139,10 @@ def test_init_prompts_directly_when_credentials_are_missing(git_repo, env, monke
     run_init(git_repo, board, prompt=prompt, say=events.append)
 
     assert events[0].startswith("Trello API key")
-    assert any(event.startswith("Trello token") for event in events)
+    assert events[1] == (
+        "Trello Token (if needed, get it from https://trello.com/1/authorize?"
+        f"expiration=never&scope=read,write&response_type=token&name=kankan&key={KEY}): "
+    )
 
 
 def test_init_preserves_properties(git_repo, tmp_path, env, monkeypatch):

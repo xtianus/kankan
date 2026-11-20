@@ -146,7 +146,7 @@ kankan init <trelloBoard>
 ```
 
 - connects to the Trello board specified by `<trelloBoard>`. This is the board that you use to interact with the agents. The parameter is a URL in the format `https://trello.com/b/<shortLink>/<name>`. Just copy it from the browser address bar when you open the board. Example: `https://trello.com/b/Vz4CZ6ZS/myprojectboard`. 
-- checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 1.4](#14-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. 
+- checks the Trello credentials and asks for the bot's API key and token if credentials are missing or invalid. The token prompt includes an authorization URL with the minimal scope for users who need to obtain a token ([section 1.4](#14-a-trello-account-for-kankan)).
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`; `kankan` holds the setting cards, see below) and the labels `HOLD`, `Question`, `Error`;
 - asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 3.2](#32-the-test-command));

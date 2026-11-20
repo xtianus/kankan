@@ -64,8 +64,7 @@ def acquire_credentials(paths: Paths, cfg: Config, base_url: str, prompt: Callab
                 raise
             say(f"Invalid Trello credentials: {err.message}")
     key = prompt("Trello API key (from https://trello.com/apps/admin, logged in as kankan's own Trello account): ").strip()
-    say("Open this URL, allow access and copy the token:\n  " + AUTH_URL.format(key=key))
-    token = prompt("Trello token: ").strip()
+    token = prompt(f"Trello Token (if needed, get it from {AUTH_URL.format(key=key)}): ").strip()
     client = TrelloClient(key, token, base_url=base_url, timeout=cfg.trello_timeout)
     me = client.me()
     target = Path(cfg.credentials_path) if cfg.credentials_path else user_credentials_path()

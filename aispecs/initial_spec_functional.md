@@ -81,7 +81,7 @@ Lookup order:
 2. the `.properties` file given with `init --credentials <path>` (e.g. the project secrets file in `/srv/<acroenv>/bin/`), keys `kankan.trello.key` and `kankan.trello.token` (configurable names). The path is saved in the configuration; kankan must not know about the acroenv;
 3. `~/.config/kankan/credentials` (permissions 600).
 
-If they are missing or invalid, `init` guides the user: asks for the API key (from `trello.com/apps/admin`, logged in as kankan's own Trello account: app, key and token belong to a dedicated bot account invited to the user's boards, so that kankan's mentions notify the user), prints the authorization URL (scope `read,write`, expiration `never`), asks for the token, verifies it with `GET /1/members/me` and saves it.
+If credentials are missing or invalid, `init` asks for the API key and token. The user obtains the key from [Trello's Power-Up admin page](https://trello.com/apps/admin) while signed in as kankan's own Trello account. The app, key and token belong to a dedicated bot account invited to the user's boards so that kankan's mentions notify the user. The token prompt includes an authorization URL for users who need to obtain a token. The URL uses the entered API key, scope `read,write` and expiration `never`. `init` verifies the supplied token with `GET /1/members/me` and saves the credentials.
 
 Trello's rate limit applies per token: projects using the same token share it.
 
