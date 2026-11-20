@@ -5,6 +5,8 @@ kankan turns a Trello board into a team of AI coding agents. You write tasks as 
 ![A kankan board: the Backlog, Done, Blocked and Q&A lists, the kankan settings list, and the lists of two agents, claude-1 and codex-1](docs/images/board.png)
 *A project board while the agents work. Cards wait in `Backlog`, each agent has its own `In Progress`, `Implemented` and `Review` lists, and finished cards end up in `Done`.*
 
+kankan is most useful when you have a development sandbox in a linux server that runs overnight. Your agents may use the API or a subscription, in which case an external "resumer" process should also be running so that work resumes at the usage limit reset time.
+
 ## How it works
 
 1. **You write a card.** Its title and description say what you want, like a ticket for a colleague. The order of the `Backlog` is the order of the work.

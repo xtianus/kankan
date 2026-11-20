@@ -208,6 +208,10 @@ def user_credentials_path() -> Path:
     return Path(os.path.expanduser("~")) / ".config" / "kankan" / "credentials"
 
 
+class CredentialsNotFound(KankanError):
+    """No complete Trello credential pair was found."""
+
+
 def load_credentials(paths: Paths, cfg: Optional[Config]) -> Tuple[str, str]:
     """Credentials lookup (spec §6.2): environment, configured .properties file, user file."""
     key, token = os.environ.get("KANKAN_TRELLO_KEY"), os.environ.get("KANKAN_TRELLO_TOKEN")
@@ -224,7 +228,7 @@ def load_credentials(paths: Paths, cfg: Optional[Config]) -> Tuple[str, str]:
             key, token = props.get(key_name), props.get(token_name)
             if key and token:
                 return key, token
-    raise KankanError(Status.CONFIG_ERROR, "Trello credentials not found: run `kankan init --reauth`")
+    raise CredentialsNotFound(Status.CONFIG_ERROR, "Trello credentials not found: run `kankan init --reauth`")
 
 
 _LOCK_DEPTH: Dict[str, list] = {}

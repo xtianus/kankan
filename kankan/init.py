@@ -14,7 +14,7 @@ from typing import Callable, List, Optional, Tuple
 
 from kankan import auditlog, clock, gitutil, seats, worktrees
 from kankan.refstore import CARD_PREFIX, RefStore
-from kankan.config import (Config, Paths, load_config, load_credentials, project_lock, registry_block, save_config,
+from kankan.config import (Config, CredentialsNotFound, Paths, load_config, load_credentials, project_lock, registry_block, save_config,
                            user_credentials_path, write_registry_block)
 from kankan.errors import KankanError, Status
 from kankan.properties import PropertiesFile
@@ -57,10 +57,12 @@ def acquire_credentials(paths: Paths, cfg: Config, base_url: str, prompt: Callab
             key, token = load_credentials(paths, cfg)
             client = TrelloClient(key, token, base_url=base_url, timeout=cfg.trello_timeout)
             return client, client.me(), warnings
+        except CredentialsNotFound:
+            pass
         except KankanError as err:
             if err.status != Status.CONFIG_ERROR:
                 raise
-            say(f"Trello credentials missing or invalid: {err.message}")
+            say(f"Invalid Trello credentials: {err.message}")
     key = prompt("Trello API key (from https://trello.com/apps/admin, logged in as kankan's own Trello account): ").strip()
     say("Open this URL, allow access and copy the token:\n  " + AUTH_URL.format(key=key))
     token = prompt("Trello token: ").strip()

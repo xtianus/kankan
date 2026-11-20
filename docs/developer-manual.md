@@ -29,7 +29,7 @@ The default adapters are in `kankan/adapters_default.json`; the screens they wer
 
 The `trello_live` tests (`tests/live/`) create, move and delete lists, cards and labels on a real board ([spec §18.2](../aispecs/initial_spec_technical.md#182-test-board)). Use a **dedicated** board: never point them at a board with real work.
 
-Two Trello accounts take part, as in real use: **yours**, which owns the test board, and **the kankan bot account**, a separate Trello account that kankan acts as. Create the bot account as described in [user manual §3.1](user-manual.md#31-a-trello-account-for-kankan) (with an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake); the sections below say which account does what.
+Two Trello accounts take part, as in real use: **yours**, which owns the test board, and **the kankan bot account**, a separate Trello account that kankan acts as. Create the bot account as described in [user manual §1.4](user-manual.md#14-a-trello-account-for-kankan) (with an uncommon username such as `kankan-<you>-<random>`, so nobody invites it, or a look-alike, by mistake); the sections below say which account does what.
 
 ### 3.1 Create the board
 

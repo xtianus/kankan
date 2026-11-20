@@ -125,6 +125,23 @@ def test_archived_workflow_list_config_error(git_repo, env):
     assert exc.value.status == Status.CONFIG_ERROR
 
 
+def test_init_prompts_directly_when_credentials_are_missing(git_repo, env, monkeypatch):
+    _, board = env
+    monkeypatch.delenv("KANKAN_TRELLO_KEY")
+    monkeypatch.delenv("KANKAN_TRELLO_TOKEN")
+    events = []
+    respond = answers(KEY, TOKEN)
+
+    def prompt(question):
+        events.append(question)
+        return respond(question)
+
+    run_init(git_repo, board, prompt=prompt, say=events.append)
+
+    assert events[0].startswith("Trello API key")
+    assert any(event.startswith("Trello token") for event in events)
+
+
 def test_init_preserves_properties(git_repo, tmp_path, env, monkeypatch):
     fake, board = env
     monkeypatch.delenv("KANKAN_TRELLO_KEY")
