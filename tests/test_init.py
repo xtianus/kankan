@@ -1,11 +1,13 @@
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from kankan import seats, workflow
+from kankan import seats, seeds, workflow
 from kankan.config import Paths, load_config, registry_block
 from kankan.errors import KankanError, Status
 from kankan.init import init, parse_board_url
@@ -91,6 +93,29 @@ def test_init_adopts_existing_lists_when_confirmed(git_repo, env):
     cfg, _ = run_init(git_repo, board, prompt=answers("y", "n", "", ""))
     assert cfg.backlog == backlog["id"]
     assert cfg.done != done["id"]
+
+
+def test_init_announces_board_population_after_seed_selection(git_repo, env, isolated_home, monkeypatch):
+    fake, board = env
+    overrides = isolated_home / ".config/kankan/agents.json"
+    data = json.loads(overrides.read_text())
+    del data["claude"]["seed"]["review"]
+    overrides.write_text(json.dumps(data))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(seeds, "read_key", lambda: "1")
+    said = []
+
+    def say(message):
+        if message == "Populating board...":
+            assert any("seed saved in" in line for line in said)
+            assert not fake.list_by_name(board["id"], "kankan")
+        said.append(message)
+
+    run_init(git_repo, board, say=say)
+
+    assert said.count("Populating board...") == 1
+    assert fake.list_by_name(board["id"], "kankan")
 
 
 def test_pre_push_blocks_agent_refs(git_repo, tmp_path, env):

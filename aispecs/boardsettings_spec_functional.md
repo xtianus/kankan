@@ -80,7 +80,7 @@ How this feature changes the initial behaviour described in [`initial_spec_funct
 **§6.1 `kankan init <board-url>`.** Replace the text starting “11. warns if the integration branch is checked out in any wo…” with:
 
 11. warns if the integration branch is checked out in any worktree ([initial §12.5](initial_spec_functional.md#125-integration-branch-and-user-branches));
-12. asks for the missing model and effort seeds, then creates a card for every known setting that has none in the `kankan` list ([§2](#2-board-settings)) and prints the model and effort it ticked and where they come from ([§3](#3-model-and-effort)).
+12. asks for the missing model and effort seeds, then prints `Populating board...` before setting up the `kankan` list and its cards. It creates a card for every known setting that has none in the list ([§2](#2-board-settings)) and prints the model and effort it ticked and where they come from ([§3](#3-model-and-effort)).
 
 **§14.1 Labels.** Replace the text starting “| `Error` | kankan (`fail`, protocol, inactivity, unknown sc…” with:
 

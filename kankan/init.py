@@ -12,7 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from kankan import auditlog, clock, gitutil, seats, worktrees
+from kankan import auditlog, clock, gitutil, messages, seats, worktrees
 from kankan.refstore import CARD_PREFIX, RefStore
 from kankan.config import (Config, CredentialsNotFound, Paths, load_config, load_credentials, project_lock, registry_block, save_config,
                            user_credentials_path, write_registry_block)
@@ -191,6 +191,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
     for agent_type in types:
         model_catalog.refresh(paths, agent_type)
     adapters = seeds.ensure(paths, types, interactive=True, say=say, roles=boardconfig.roles(paths))
+    say(messages.INIT_POPULATING_BOARD)
     project = Project.open(paths.repo)
     if not project.cfg.settings_list:
         snapshot = client.snapshot(cfg.board_id)

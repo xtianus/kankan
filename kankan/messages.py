@@ -79,6 +79,7 @@ STOP_ALL_WAITING = ("Waiting for the agents to stop gracefully, each after its c
 STOP_FORCED = "kankan: `kankan stop` stopped seat {seat} in the middle of its work; the seat keeps this card and work resumes at its next start."
 
 # Board settings and model selection.
+INIT_POPULATING_BOARD = 'Populating board...'
 SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set the {type} {role} seed in ~/.config/kankan/agents.json.'
 SEEDS_INVALID = 'Invalid {type} {role} seed; choose one of the adapter model/effort combinations.'
 SEEDS_QUESTION = 'Choose the {type} {role} model and effort (one key):'
