@@ -1,3 +1,5 @@
 """kankan: coordinates AI coding agents on one Git repository through a Trello board."""
 
-__version__ = "0.1.0"
+from importlib.resources import files
+
+__version__ = files(__name__).joinpath("VERSION").read_text(encoding="ascii").strip()

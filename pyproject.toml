@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kankan"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Coordinates Claude Code and Codex agents working in parallel on one Git repository through a Trello board"
 readme = "README.md"
 license = { text = "MIT" }
@@ -20,8 +20,11 @@ kankan = "kankan.cli:main"
 [tool.setuptools]
 packages = ["kankan"]
 
+[tool.setuptools.dynamic]
+version = { file = "kankan/VERSION" }
+
 [tool.setuptools.package-data]
-kankan = ["adapters_default.json", "skill/SKILL.md", "hooks/pre-push", "systemd/*.service"]
+kankan = ["VERSION", "adapters_default.json", "skill/SKILL.md", "hooks/pre-push", "systemd/*.service"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

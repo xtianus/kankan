@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from kankan import auditlog
+from kankan import __version__, auditlog
 from kankan.errors import KankanError, Status, envelope
 
 HIDDEN = argparse.SUPPRESS
@@ -40,6 +40,7 @@ def command(name: str):
 def build_parser() -> argparse.ArgumentParser:
     common = _common()
     parser = _Parser(prog="kankan", description="Coordinate AI coding agents through a Trello board.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", parser_class=_Parser, metavar="<command>")
 
     def add(name, help_text, hidden=False):

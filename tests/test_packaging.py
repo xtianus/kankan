@@ -24,6 +24,13 @@ def test_wheel_installs_and_runs_outside_source_tree(tmp_path):
                              capture_output=True, text=True, cwd=tmp_path)
     assert install.returncode == 0, install.stderr
     kankan = env_dir / "bin" / "kankan"
+    version_out = subprocess.run([str(kankan), "--version"], capture_output=True, text=True, cwd=tmp_path)
+    assert version_out.returncode == 0, version_out.stderr
+    version = (ROOT / "kankan" / "VERSION").read_text().strip()
+    assert version_out.stdout == f"kankan {version}\n"
+    metadata = subprocess.check_output([str(python), "-c", "from importlib.metadata import version; "
+                                        "print(version('kankan'))"], text=True, cwd=tmp_path)
+    assert metadata.strip() == version
     help_out = subprocess.run([str(kankan), "--help"], capture_output=True, text=True, cwd=tmp_path)
     assert help_out.returncode == 0 and "init" in help_out.stdout and "supervisor" not in help_out.stdout
     screen = ROOT / "tests" / "fixtures" / "screens" / "ready__codex_ready.txt"
