@@ -239,3 +239,45 @@ def test_init_creates_the_qa_list_right_after_blocked(git_repo, env):
                    key=lambda l: l["pos"])
     names = [l["name"] for l in lists]
     assert names[names.index("Blocked") + 1] == "Q&A" and names.index("Ideas") > names.index("Q&A")
+
+
+# ---------------------------------------------------------------------- takeover check (takeover F§2)
+def _bound_twice(git_repo, tmp_path, board):
+    run_init(git_repo, board)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(git_repo), str(other))
+    git(git_repo, "branch", "-f", "kankan-agents", "main")  # origin (git_repo) has the integration branch
+    return Project.open(git_repo), other
+
+
+def test_takeover_lists_stranded_cards_and_can_be_declined(git_repo, tmp_path, env):
+    fake, board = env
+    project, other = _bound_twice(git_repo, tmp_path, board)
+    implemented = fake.add_list(board["id"], "claude-1 · Implemented")
+    card = fake.add_card(implemented["id"], "half done")
+    desc = fake.state["boards"][board["id"]]["desc"]
+    said = []
+    with pytest.raises(KankanError) as exc:
+        run_init(other, board, takeover=True, prompt=answers("n"), say=said.append)
+    assert exc.value.status == Status.NEEDS_ACTION
+    assert fake.state["boards"][board["id"]]["desc"] == desc
+    assert card["shortLink"] in "\n".join(said) and "claude-1 · Implemented" in "\n".join(said)
+    _, warnings = run_init(other, board, takeover=True, prompt=answers("y"))
+    assert any("reconcile --fix" in w for w in warnings)
+
+
+def test_takeover_with_nothing_stranded_asks_nothing(git_repo, tmp_path, env):
+    fake, board = env
+    _, other = _bound_twice(git_repo, tmp_path, board)
+    asked = []
+    run_init(other, board, takeover=True, prompt=lambda q: asked.append(q) or "")
+    assert not [q for q in asked if "Take over" in q]
+
+
+def test_takeover_warns_when_origin_lacks_the_integration_branch(git_repo, tmp_path, env):
+    fake, board = env
+    _, other = _bound_twice(git_repo, tmp_path, board)
+    git(other, "remote", "remove", "origin")
+    said = []
+    run_init(other, board, takeover=True, prompt=answers("y"), say=said.append)
+    assert any("origin has no branch kankan-agents" in line for line in said)

@@ -71,6 +71,12 @@ FAIL = "kankan: {seat} needs help: {text}"
 
 ADMIN_RELEASED = "kankan: an administrator released this card (`kankan release --force`); it stays where it is."
 ADMIN_SEAT_RECOVERED = "kankan: an administrator recovered seat {seat} (`kankan seat recover`); the seat keeps this card."
+STRANDED_MOVED = ("kankan: this card was in {list} without a claim in this clone (its work was in another clone, "
+                  "or lost); moved back to Backlog to be implemented again.")
+STOP_ALL_WAITING = ("Waiting for the agents to stop gracefully, each after its current task (a Q&A agent after its "
+                    "current answer). Run `kankan stop` without --graceful to quit all agents immediately; Ctrl-C stops "
+                    "waiting, and the agents still stop after their task.")
+STOP_FORCED = "kankan: `kankan stop` stopped seat {seat} in the middle of its work; the seat keeps this card and work resumes at its next start."
 
 # Board settings and model selection.
 SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set the {type} {role} seed in ~/.config/kankan/agents.json.'

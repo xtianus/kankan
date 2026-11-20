@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
@@ -156,7 +157,10 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
         if cfg_old is not None and cfg_old.board_id and cfg_old.board_id != board["id"]:
             raise KankanError(Status.CONFIG_ERROR, "this clone is already bound to another board")
         cfg.board_id, cfg.board_short = board["id"], board.get("shortLink", short)
-        _bind_registry(paths, cfg, client, board, takeover, say)
+        stranded = _bind_registry(paths, cfg, client, board, takeover, say, prompt, cfg_old)
+        if stranded:
+            warnings.append(f"{stranded} card(s) were left without a claim by the other clone: run "
+                            "`kankan reconcile --fix` to move them back to Backlog")
         snap = client.snapshot(cfg.board_id)
         _ensure_lists(cfg, cfg_old, client, snap, prompt)
         ensure_qa_list(cfg, client, snap, prompt)
@@ -275,16 +279,64 @@ def set_hook_branch(paths: Paths, cfg: Config) -> None:
         gitutil.run(paths.repo, ["config", "--unset", "kankan.integrationBranch"], check=False)
 
 
+def takeover_problems(paths: Paths, cfg_old: Optional[Config], snap) -> Tuple[List[str], int]:
+    """What a takeover would strand (takeover F§2): text lines and the number of stranded cards."""
+    from kankan.diag import SEAT_LIST_RE
+    lines: List[str] = []
+    count = 0
+    blocked_ids = {cfg_old.blocked} if cfg_old is not None and cfg_old.blocked else \
+        {lst.id for lst in snap.lists.values() if lst.name == "Blocked"}
+    for lst in sorted(snap.lists.values(), key=lambda l: l.pos):
+        if lst.closed or not (SEAT_LIST_RE.match(lst.name) or lst.id in blocked_ids):
+            continue
+        open_cards = [c for c in snap.cards.values() if c.list_id == lst.id and not c.closed]
+        if open_cards:
+            count += len(open_cards)
+            lines.append(f"  {len(open_cards)} card(s) in {lst.name}: " + ", ".join(c.short for c in open_cards))
+    if lines:
+        lines.insert(0, "Cards held by the other clone's agents: their work and claims stay in that clone "
+                        "(finish them first with `kankan stop --graceful` there):")
+    branch = cfg_old.integration_branch if cfg_old is not None and cfg_old.integration_branch else "kankan-agents"
+    remotes = gitutil.out(paths.repo, ["remote"], check=False).split()
+    code = 2  # git ls-remote --exit-code: 2 = no such branch
+    if "origin" in remotes:
+        try:
+            code = gitutil.run(paths.repo, ["ls-remote", "--exit-code", "--heads", "origin", branch], check=False,
+                               env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=30).returncode
+        except subprocess.TimeoutExpired:
+            code = -1
+    if code == 2:
+        lines.append(f"origin has no branch {branch}: the cards the other clone integrated would be missing here "
+                     f"(push its {branch} to origin first)")
+    elif code != 0:
+        lines.append(f"could not check whether origin has the branch {branch}: if it does not, the cards the other "
+                     f"clone integrated would be missing here (push its {branch} to origin first)")
+    return lines, count
+
+
 def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict, takeover: bool,
-                   say: Callable[[str], None]) -> None:
+                   say: Callable[[str], None], prompt: Callable[[str], str] = input,
+                   cfg_old: Optional[Config] = None) -> int:
+    """Bind the board to this clone; returns the number of stranded cards a takeover accepted."""
     block = registry_block(board.get("desc", ""))
     if block and block.get("registry-id") == cfg.registry_id and cfg.registry_id:
-        return
+        return 0
     if block and block.get("registry-id") and not takeover:
         raise KankanError(Status.CONFIG_ERROR,
                           f"the board is already bound to another kankan registry (host {block.get('host')}, "
                           f"path {block.get('path')}); stop that clone's agents, then use --takeover",
                           {"registry": block.get("registry-id")})
+    stranded = 0
+    if block and block.get("registry-id"):
+        lines, stranded = takeover_problems(paths, cfg_old, client.snapshot(cfg.board_id))
+        if lines:
+            say("\n".join(lines))
+            try:
+                answer = prompt("Take over anyway? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in ("y", "yes"):
+                raise KankanError(Status.NEEDS_ACTION, "takeover cancelled: the board is unchanged")
     cfg.registry_id = secrets.token_hex(8)
     fields = {"registry-id": cfg.registry_id, "host": socket.gethostname(), "path": str(paths.repo)}
     client.set_board_desc(cfg.board_id, write_registry_block(board.get("desc", ""), fields))
@@ -295,6 +347,7 @@ def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict,
         raise KankanError(Status.CONFIG_ERROR, "another kankan init wrote the board registry at the same time; "
                           "stop the other clone and retry")
     say(f"Board bound to this clone (registry {cfg.registry_id})")
+    return stranded
 
 
 def _ensure_lists(cfg: Config, cfg_old: Optional[Config], client: TrelloClient, snap, prompt) -> None:

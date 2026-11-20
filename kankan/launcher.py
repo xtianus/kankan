@@ -147,6 +147,9 @@ class Launcher:
         pids = {"launcher": os.getpid(), "supervisor": _supervisor_pid(), "sid": seats.pane_sid()}
         self.lease = self.acquire(pids)
         self.project.reload_config()
+        # A stale stop of a previous run is cleared before `starting` is published: a stop requested once the seat
+        # shows `starting` must never be erased (`kankan stop <seat>` during startup).
+        update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
         self.set_state('starting')
         if main_wts:
             self.log("main_checked_out", paths=[str(p) for p in main_wts])
@@ -163,7 +166,6 @@ class Launcher:
             self.session = wanted
             self.tmux.set_option(wanted, "@kankan_repo", str(self.project.paths.repo))
         self._drop_interrupted_forward()
-        update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
         update_state(self.project.paths, self.lease.seat, lambda state: (
             setattr(state, 'planned_restart', None), setattr(state, 'running_selection', None)))
         self.check_start_deadline = clock.monotonic() + self.adapter.model_check_timeout_seconds

@@ -213,8 +213,8 @@ def remove_kankan_link(link: Optional[Path]) -> bool:
 
 
 def _answer(question: str) -> str:
-    if "adopt it?" in question:
-        return "y"
+    if "adopt it?" in question or question.startswith("Take over anyway?"):
+        return "y"  # the run takes the test board over on purpose (takeover F§2)
     if question.startswith("Test command"):
         return TEST_COMMAND
     return ""

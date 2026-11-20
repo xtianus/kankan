@@ -1,6 +1,7 @@
 # kankan user manual
 
 kankan lets several AI coding agents (Claude Code and Codex CLI) work in parallel on one Git repository, taking tasks from a Trello board. One agent implements a card; an agent of the **other** type reviews it, integrates it into the agents' branch `kankan-agents` and closes it. Your `main` and your other branches stay yours ([section 4.1](#41-working-alongside-the-agents)). You create and order the cards, start the agents and step in only when an agent asks or when you want to stop a card. You can also ask an agent questions about the code on `Q&A` cards and talk with it through their comments ([section 6.2](#62-questions-qa-cards)).
+One installation of kankan can be used on many different projects, provided that each project has its own git clone and Trello board.
 
 ## 1. Requirements
 
@@ -141,20 +142,23 @@ Who gets notified: kankan mentions the person who created the card; for cards ka
 Run once in the project clone (for example `~/coding/myproject`):
 
 ```bash
-kankan init https://trello.com/b/<shortLink>/<name> [--credentials <file.properties>]
+kankan init <trelloBoard> [--credentials <file.properties>]
 ```
 
-`init`:
-
+- connects to the Trello board specified by `<trelloBoard>`. This is the board that you use to interact with the agents. The parameter is a URL in the format `https://trello.com/b/<shortLink>/<name>`. Just copy it from the browser address bar when you open the board. Example: `https://trello.com/b/Vz4CZ6ZS/myprojectboard`. 
 - checks the Trello credentials, and if they are missing asks for the bot's API key and token ([section 3.1](#31-a-trello-account-for-kankan)); for the token it also prints an authorization URL with the minimal scope. Credentials are looked up in this order: `KANKAN_TRELLO_KEY`/`KANKAN_TRELLO_TOKEN`; the `.properties` file given with `--credentials` (keys `kankan.trello.key`, `kankan.trello.token`); `~/.config/kankan/credentials` (mode 600). kankan edits a properties file in place: comments, order and other keys are kept;
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
-- finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`) and the labels `HOLD`, `Question`, `Error`;
-- asks for the project's **test command** (run by `kankan verify`; may be empty);
+- finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`; `kankan` holds the setting cards, see below) and the labels `HOLD`, `Question`, `Error`;
+- asks for the project's **test command**, the shell command that runs your project's tests (see below);
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
 - installs a `pre-push` hook that refuses to push `refs/agent-*` and to push the agents' branch (only kankan does that), and warns if the agents' branch is checked out;
-- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the `kankan` list with the setting cards `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
+- asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the setting cards in the `kankan` list: `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 
-`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another clone is refused; `--takeover` binds it to this clone — use it **only after stopping the other clone's agents**: they stop at their next cycle.
+**The test command** is what the reviewer agent runs before it integrates a card: for example `pytest -q`, `npm test` or `./gradlew test`. kankan runs it with `bash -c` in the reviewer's worktree, at the exact commit to be integrated; exit code 0 means the tests passed. A failure, or a run longer than 30 minutes (`test_timeout` in `<git dir>/kankan/config.json`, in seconds), stops the integration: the reviewer must fix the problem, commit and verify again.
+Leave the test command empty if the project has no automated tests or they cannot run unattended: the agents still run the project's tests themselves giving a weaker guarantee. 
+Running `init` again shows the current command in brackets; press Enter to keep it or type a new one. To clear it, edit `test_command` in `<git dir>/kankan/config.json`.
+
+`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.1](#121-moving-a-board-to-another-clone).
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`, except the `Q&A` list: without it only the Q&A agent stops (after its current turn), `kankan status` warns and `kankan doctor` restores it.
 
@@ -166,9 +170,15 @@ kankan agent claude [--seat claude-1] [--attach]
 kankan autostart enable claude=2 codex=1   # systemd user service kankan-up@<project>.service
 kankan autostart disable
 kankan stop claude-1              # the agent exits after its current task
+kankan stop [--graceful]          # every agent of the project, and autostart disabled (asks first)
+kankan start                      # start again what the last `kankan stop` stopped
 ```
 
 Each agent gets a **seat** (`claude-1`, `codex-2`…) with three lists on the board (`<seat> · In Progress`, `· Implemented`, `· Review`) and a worktree in `~/coding/.kankan/<project>/<seat>`. Seats are reused; at most 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
+
+`kankan stop` without a seat stops **all** the project's agents, the Q&A agent included, and disables autostart. It shows what it will stop and asks for confirmation (`--yes` skips the question and is required from a script). By default it quits the agents **immediately**, as `kankan seat recover --kill` would: each interrupted card stays with its seat, gets a comment and is resumed at the next start. With `--graceful` it instead waits for each agent to finish its current task (a Q&A agent its current answer), showing what each one is doing; that can take long, and Ctrl-C only stops the waiting (the agents still stop after their task). At the end kankan checks that no agent runs, no tmux session of the project is open and autostart is off, and lists anything left with what to do (exit 14). Running `kankan stop` again is harmless: what is already stopped or disabled is reported as such.
+
+`kankan start` resumes everything that `kankan stop` stopped: the same agents (`kankan up` with the same counts) and autostart if it was enabled. Without a stop record it prints the commands to run instead: `kankan up …` and `kankan autostart enable …`, preceded by `kankan init` when the clone is not bound to a board yet.
 
 The **Q&A agent** ([section 6.2](#62-questions-qa-cards)) is started by adding `qa=<type>` to `kankan up` or `kankan autostart enable` (for example `kankan up claude=2 codex=1 qa=claude`), or alone with `kankan agent <type> --qa`. It gets the seat `<type>-qa` (`claude-qa`, `codex-qa`), with its own worktree and no lists; there is at most one per project and it does not count towards `seat_cap`. It answers only the cards of the `Q&A` list, and the other agents never take them. Starting a Q&A agent of the other type replaces the existing Q&A seat: kankan refuses while that seat is alive (stop it first with `kankan stop <type>-qa`); otherwise it removes the old seat and the new agent continues the old one's conversation, if any. `kankan stop claude-qa` lets the agent finish its current turn; the conversation is kept and continues at the next start.
 
@@ -360,7 +370,24 @@ Codex normally discovers its account model catalog through the installed CLI, ca
 
 See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the installed agent versions.
 
-## 12. Limits
+## 12. Advanced usage
+
+### 12.1 Moving a board to another clone
+
+A board is bound to one clone at a time ([section 3.2](#32-kankan-init)). `kankan init --takeover` binds it to the clone where you run it instead. The other clone's agents notice it at their next cycle and stop, interrupted wherever they are.
+
+kankan keeps part of its state only in the clone, never on Trello or on `origin`: the card claims (`refs/agent-*`), the implementation branches, the `blocked-…` worktrees of [section 8](#8-blocked-cards) and, unless `push_main` is on, the agents' integration branch. A takeover leaves all of that behind. To move a board without losing work:
+
+1. In the old clone, run `kankan stop --graceful` and wait: each agent finishes its current task ([section 4](#4-starting-agents)). A plain `kankan stop` would interrupt them mid-task.
+2. Let the cards in the seats' `Implemented` lists be reviewed and reach `Done` before stopping, or accept that they are implemented again; resolve the cards in `Blocked` with `kankan resolve` in the old clone, or accept the same.
+3. Push the old clone's integration branch to `origin`: `KANKAN_PUSH=1 git push origin kankan-agents` in the old clone (the variable lets this one push past its `pre-push` hook, which otherwise refuses pushes to the agents' branch). The new clone adopts `origin/kankan-agents` when it creates its integration branch; if the new clone already has its own `kankan-agents` (it was bound before the push), hand the old work to the agents in the new clone instead: `git fetch origin`, `git branch old-agents origin/kankan-agents`, `kankan merge-request old-agents`.
+4. In the new clone, run `kankan init <board-url> --takeover`.
+
+Before binding, `--takeover` checks the board and the remote. When cards are still in seat lists or in `Blocked`, or `origin` has no integration branch, it lists them with what to do and asks `Take over anyway? [y/N]`; declining leaves the board unchanged. When nothing is found it proceeds without asking.
+
+After a takeover that left cards behind, run `kankan reconcile --fix` in the new clone (`kankan doctor` points to it). It moves each card left without a claim, in a seat list whose agent is not running or in `Blocked` without its worktree, back to the **top** of `Backlog` with a comment. The card keeps its description, comments, attachments, labels and dependencies, and is implemented again from scratch: the work done on it in the old clone is lost unless you recover it from there yourself.
+
+## 13. Limits
 
 - The agents run in full-access mode: no permission prompts and no sandbox, with all the rights of the user running kankan. Use a dedicated user or machine (a VM or a container) if that is too much for your environment.
 

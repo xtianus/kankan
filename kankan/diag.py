@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -200,6 +201,71 @@ class Issue:
     fixed: bool = False
 
 
+SEAT_LIST_RE = re.compile(r"^([a-z]+-[0-9]+) · (In Progress|Implemented|Review)$")
+
+
+def stranded_lists(cfg, snap) -> Dict[str, str]:
+    """Open seat lists (registered, or named like one: takeover T§2) by list id, with their seat name."""
+    result = {}
+    for list_id, seat in cfg.seat_lists().items():
+        lst = snap.lists.get(list_id)
+        if lst is not None and not lst.closed:
+            result[list_id] = seat
+    for lst in snap.lists.values():
+        match = SEAT_LIST_RE.match(lst.name)
+        if match and not lst.closed and lst.id not in result:
+            result[lst.id] = match.group(1)
+    return result
+
+
+def _blocked_worktree_shorts(project) -> set:
+    shorts = set()
+    for entry in worktrees.worktree_list(project.paths.repo):
+        name = entry.get("worktree", "").rsplit("/", 1)[-1]
+        if name.startswith("blocked-"):
+            shorts.add(name[len("blocked-"):])
+    return shorts
+
+
+def stranded_cards(project, snap, refs, liveness, *, alive_too: bool = False) -> List[tuple]:
+    """Open cards without a ref left in the list of a seat that is not alive (any seat with ``alive_too``, for the
+    report), or in ``Blocked`` without a ``blocked-`` worktree (takeover F§3): ``(card, list name, issue kind)``."""
+    cfg = project.cfg
+    lists = stranded_lists(cfg, snap)
+    blocked = _blocked_worktree_shorts(project)
+    result = []
+    for card in sorted(snap.cards.values(), key=lambda c: c.pos):
+        if card.closed or card.id in refs:
+            continue
+        if card.list_id in lists:
+            if alive_too or liveness.get(lists[card.list_id]) != "alive":
+                result.append((card, snap.lists[card.list_id].name, "card_without_ref"))
+        elif card.list_id == cfg.blocked and card.short not in blocked:
+            result.append((card, snap.lists[card.list_id].name if card.list_id in snap.lists else "Blocked",
+                           "blocked_without_ref"))
+    return result
+
+
+def _fix_stranded(project) -> List[Issue]:
+    """Move stranded cards to the top of ``Backlog`` with a comment, re-checking refs and seats under the lock."""
+    fixed: List[Issue] = []
+    # called under the project lock: fresh refs (malformed ones count as present) and lock-free liveness probes
+    refs = {ref[len(CARD_PREFIX):]: True for ref in project.refs.list_raw(CARD_PREFIX)}
+    liveness = {name: seats._liveness(project, name) for name in project.reload_config().seats}
+    snap = project.trello.snapshot(project.cfg.board_id)
+    for card, list_name, _ in stranded_cards(project, snap, refs, liveness):
+        try:
+            project.trello.move_card(card.id, project.cfg.backlog, "top")
+            project.trello.add_comment(card.id, messages.STRANDED_MOVED.format(list=list_name),
+                                       f"stranded-{card.id}-{card.list_id}")
+        except KankanError as err:
+            project.log("stranded_move_failed", card=card.id, error=err.message)
+            continue
+        project.log("stranded_card_moved", card=card.id, list=list_name)
+        fixed.append(Issue("stranded_card_moved", card.id, f"{card.short} moved from {list_name} to Backlog", True))
+    return fixed
+
+
 def _mismatch_memory(project) -> dict:
     return read_json(project.paths.kankan_dir / "reconcile.json", {}) or {}
 
@@ -258,10 +324,8 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
                                     f"phase {meta.get('phase')} expects list {target}, card is in {card.list_id}"))
     if record:
         atomic_write_json(project.paths.kankan_dir / "reconcile.json", seen_now)
-    seat_lists = cfg.seat_lists()
-    for card in snap.cards.values():
-        if card.list_id in seat_lists and card.id not in refs:
-            issues.append(Issue("card_without_ref", card.id, f"{card.short} is in a list of {seat_lists[card.list_id]}"))
+    for card, list_name, kind in stranded_cards(project, snap, refs, liveness, alive_too=True):
+        issues.append(Issue(kind, card.id, f"{card.short} is in {list_name} without a claim"))
     # Done cards
     merged = {m["card"] for m in _all_merges(project)}
     qa_cards = qa.recorded(project.paths)
@@ -364,6 +428,7 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
             if meta.get("phase") == "integrated" and card is not None and card.list_id == cfg.done:
                 if cards.delete_integrated_ref(project, f"{CARD_PREFIX}{card_id}", value):
                     fixed.append(Issue("integrated_ref_deleted", card_id, "card already in Done", True))
+        fixed += _fix_stranded(project)
         fixed += _fix_attachment_dirs(project)
         fixed += _fix_qa_record(project, gone)
         fixed += _fix_conversation_dirs(project)
@@ -492,8 +557,10 @@ def release_force(project, card: str) -> dict:
     return {"card": card_id, "phase": "parked"}
 
 
-def seat_recover(project, seat: str, kill: bool) -> dict:
-    """Recover a seat that is alive but stuck: its session loses ownership (and is killed with ``kill``)."""
+def seat_recover(project, seat: str, kill: bool, comment: Optional[str] = None) -> dict:
+    """Recover a seat that is alive but stuck: its session loses ownership (and is killed with ``kill``).
+
+    ``comment`` replaces the default card comment template (``kankan stop --force``: stopall T§5)."""
     validate_seat(seat)
     with project_lock(project.paths):
         value = project.refs.read(seat_ref(seat))
@@ -504,8 +571,8 @@ def seat_recover(project, seat: str, kill: bool) -> dict:
             raise KankanError(Status.INELIGIBLE, f"the ref of {seat} changed meanwhile; retry")
         for card in seats.owned_cards(project, seat, ("impl", "review", "qa")):
             try:
-                project.trello.add_comment(card.meta["card"], messages.ADMIN_SEAT_RECOVERED.format(seat=seat),
-                                           f"admin-recover-{value.oid if value else 'none'}")
+                project.trello.add_comment(card.meta["card"], (comment or messages.ADMIN_SEAT_RECOVERED).format(seat=seat),
+                                           f"{'stop-force' if comment else 'admin-recover'}-{value.oid if value else 'none'}")
             except KankanError as err:
                 project.log("comment_failed", error=err.message)
         project.log("admin_seat_recover", seat=seat, kill=kill)

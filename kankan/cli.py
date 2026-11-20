@@ -87,8 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("skill", "install the shared kankan skill for Claude Code and Codex")
     p.add_argument("action", choices=["install"])
     p.add_argument("--force", action="store_true")
-    p = add("stop", "stop a seat's agent after its current task")
-    p.add_argument("seat")
+    p = add("stop", "stop every agent now and disable autostart (or one seat after its current task)")
+    p.add_argument("seat", nargs="?", help="stop only this seat, after its current task (autostart unchanged)")
+    p.add_argument("--graceful", action="store_true", help="wait for each agent to finish its current task")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    add("start", "start again what the last `kankan stop` stopped (agents and autostart)")
     p = add("adapter", "adapter tools")
     p.add_argument("action", choices=["check"])
     p.add_argument("target", help="a seat (e.g. claude-1) or a file with a saved screen")
@@ -373,6 +376,10 @@ def _cmd_stop(args):
     from kankan import seats
     from kankan.config import Paths, load_config
     from kankan.seatstate import update_state
+    if args.seat is None:
+        return _stop_all(args)
+    if args.graceful or args.yes:
+        raise KankanError(Status.USAGE_ERROR, "--graceful and --yes apply only to `kankan stop` without a seat")
     paths = Paths.discover(os.getcwd())
     cfg = load_config(paths)
     seat = seats.validate_seat(args.seat)
@@ -381,6 +388,44 @@ def _cmd_stop(args):
     update_state(paths, seat, lambda s: setattr(s, "stop_requested", True))
     auditlog.append(paths, "stop_requested", seat=seat)
     return {"seat": seat}, f"{seat} stops after its current task"
+
+
+def _stop_all(args):
+    from kankan import stopall
+    project = _project()
+
+    def confirm(text: str) -> bool:
+        if args.yes:
+            return True
+        if not sys.stdin.isatty():
+            raise KankanError(Status.USAGE_ERROR, "kankan stop asks for confirmation: run it in a terminal or pass --yes")
+        print(text, end="", file=sys.stderr, flush=True)
+        try:
+            return input().strip().lower() in ("y", "yes")
+        except EOFError:
+            return False
+
+    def say(text: str) -> None:
+        print(text, file=sys.stderr, flush=True)
+
+    report = stopall.stop_all(project, graceful=args.graceful, confirm=confirm, say=say)
+    return report, stopall.report_text(report)
+
+
+@command("start")
+def _cmd_start(args):
+    from kankan import agents_cmd, stopall
+    from kankan.config import Paths
+    paths = Paths.discover(os.getcwd())
+    if stopall.load_record(paths) is None:
+        raise KankanError(Status.NEEDS_ACTION, stopall.no_record_help(paths.repo))
+    project = _project()
+    for warning in agents_cmd.warnings_for(project):
+        print(f"warning: {warning}", file=sys.stderr)
+    report = stopall.start_all(project)
+    for warning in report["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
+    return report, stopall.start_text(report)
 
 
 def _project():

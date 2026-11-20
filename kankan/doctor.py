@@ -386,8 +386,13 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
                             "restart the agents (kankan stop <seat>, then kankan up …)"))
     checks += settings_checks(project, fix=fix, online=True)
     issues = diag.reconcile(project, record=fix)
-    checks.append(Check("reconcile", WARN, f"{len(issues)} issue(s)", "kankan reconcile, then kankan reconcile --fix "
-                        "if appropriate") if issues else Check("reconcile", OK, "consistent"))
+    stranded = [i for i in issues if i.kind in ("card_without_ref", "blocked_without_ref")]
+    step = "kankan reconcile, then kankan reconcile --fix if appropriate"
+    if stranded:  # takeover F§3
+        step = (f"kankan reconcile --fix moves the {len(stranded)} card(s) left without a claim back to Backlog; "
+                "kankan reconcile shows the other issues")
+    checks.append(Check("reconcile", WARN, f"{len(issues)} issue(s)", step) if issues
+                  else Check("reconcile", OK, "consistent"))
     return checks
 
 
