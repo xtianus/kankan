@@ -149,36 +149,13 @@ kankan init <trelloBoard>
 - checks the Trello credentials and asks for the bot's API key and token if credentials are missing or invalid. The token prompt includes an authorization URL with the minimal scope for users who need to obtain a token ([section 1.4](#14-a-trello-account-for-kankan)).
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`; `kankan` holds the setting cards, see below) and the labels `HOLD`, `Question`, `Error`;
-- asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 3.2](#32-the-test-command));
+- asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 12.1](#121-the-test-command));
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
 - asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the setting cards in the `kankan` list: `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and **prints the model and effort it ticked on them** for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 
-`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.1](#121-moving-a-board-to-another-clone).
+`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.2](#122-moving-a-board-to-another-clone).
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`, except the `Q&A` list: without it only the Q&A agent stops (after its current turn), `kankan status` warns and `kankan doctor` restores it.
-
-### 3.2 The test command
-
-The test command is an optional quality step: it ensures that all tests are run before a change is integrated. If you omit it, agents will run the tests of their choice with no deterministic assurance that any test actually run. If you use it, the test will always be run.
-When not sure, don't provide a test command at initialization time: it can easily be provided later (see below).
-
-- **Without a test command**, the agents choose. kankan tells the implementer and the reviewer to run the project's tests, but each agent picks which tests to run and how. kankan does not check that they ran or that they passed.
-- **With a test command**, the run is deterministic. kankan itself runs the same command on the exact commit it is about to integrate, and refuses to integrate unless it passes. The agents still run tests of their own as well.
-
-The test command is the shell command that runs your project's automated tests, for example `pytest -q`, `npm test`, `./gradlew test` or `make test`. `kankan init` saves it as `test_command` in `<git dir>/kankan/config.json`. It stays in your clone and cannot be set from the board.
-
-Leave it empty if the project has no automated tests, or if they cannot run unattended, or if running them is too expensive. Setting it has a cost: the whole command runs on every card, whatever the card changed. A long suite makes every integration wait for it, even after a one-line change, and the agents may already have run some of the same tests.
-
-**How to write it.**
-
-- It runs unattended: no prompts, no watch mode (for example `vitest run`, not `vitest`), no GUI.
-- Its exit code must be non-zero when any test fails. Chain steps with `&&`, not `;`, so an earlier failure is not hidden.
-- It runs from the root of a fresh worktree: use relative paths, and do not rely on untracked files in your main checkout (such as a local `.env`). Install dependencies in the command if needed (for example `npm ci && npm test`).
-- Any file it writes (build output, coverage, caches) must be ignored by `.gitignore`. Otherwise the worktree is no longer clean and the result is not recorded.
-- It must finish within `test_timeout`, and it must not rely on background services outliving it: start and stop them inside the command.
-- For anything complex, put the steps in a script in the repository and use that as the command (for example `sh check.sh`).
-
-**Changing it later.** Run `kankan init` again: it shows the current command in brackets. Press Enter to keep it, or type a new one. An empty answer keeps the old value, so to clear the command, set `test_command` to `""` in `<git dir>/kankan/config.json`.
 
 ## 4. Starting agents
 
@@ -426,7 +403,30 @@ See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the ins
 
 ## 12. Advanced usage
 
-### 12.1 Moving a board to another clone
+### 12.1 The test command
+
+The test command is an optional quality step: it ensures that all tests are run before a change is integrated. If you omit it, agents will run the tests of their choice with no deterministic assurance that any test actually run. If you use it, the test will always be run.
+When not sure, don't provide a test command at initialization time: it can easily be provided later (see below).
+
+- **Without a test command**, the agents choose. kankan tells the implementer and the reviewer to run the project's tests, but each agent picks which tests to run and how. kankan does not check that they ran or that they passed.
+- **With a test command**, the run is deterministic. kankan itself runs the same command on the exact commit it is about to integrate, and refuses to integrate unless it passes. The agents still run tests of their own as well.
+
+The test command is the shell command that runs your project's automated tests, for example `pytest -q`, `npm test`, `./gradlew test` or `make test`. `kankan init` saves it as `test_command` in `<git dir>/kankan/config.json`. It stays in your clone and cannot be set from the board.
+
+Leave it empty if the project has no automated tests, or if they cannot run unattended, or if running them is too expensive. Setting it has a cost: the whole command runs on every card, whatever the card changed. A long suite makes every integration wait for it, even after a one-line change, and the agents may already have run some of the same tests.
+
+**How to write it.**
+
+- It runs unattended: no prompts, no watch mode (for example `vitest run`, not `vitest`), no GUI.
+- Its exit code must be non-zero when any test fails. Chain steps with `&&`, not `;`, so an earlier failure is not hidden.
+- It runs from the root of a fresh worktree: use relative paths, and do not rely on untracked files in your main checkout (such as a local `.env`). Install dependencies in the command if needed (for example `npm ci && npm test`).
+- Any file it writes (build output, coverage, caches) must be ignored by `.gitignore`. Otherwise the worktree is no longer clean and the result is not recorded.
+- It must finish within `test_timeout`, and it must not rely on background services outliving it: start and stop them inside the command.
+- For anything complex, put the steps in a script in the repository and use that as the command (for example `sh check.sh`).
+
+**Changing it later.** Run `kankan init` again: it shows the current command in brackets. Press Enter to keep it, or type a new one. An empty answer keeps the old value, so to clear the command, set `test_command` to `""` in `<git dir>/kankan/config.json`.
+
+### 12.2 Moving a board to another clone
 
 A board is bound to one clone at a time ([section 3.1](#31-kankan-init)). `kankan init --takeover` binds it to the clone where you run it instead. The other clone's agents notice it at their next cycle and stop, interrupted wherever they are.
 
@@ -461,7 +461,7 @@ Every command accepts `--json`, which prints the result as the envelope `{"ok", 
 **`kankan skill install [--force]`**: links the shared kankan skill into `~/.claude/skills` and `~/.codex/skills` ([section 2](#2-installation)). Can be run from any folder. A link to another location is replaced; a real file or folder in its place is left alone with a warning.
 - `--force`: recreate the links even when they are already correct.
 
-**`kankan init [<board-url>] [--credentials <file>] [--reauth] [--takeover]`**: binds this clone to a Trello board ([section 3.1](#31-kankan-init)). Safe to run again: it keeps what is already set up and offers to change the test command ([section 3.2](#32-the-test-command)).
+**`kankan init [<board-url>] [--credentials <file>] [--reauth] [--takeover]`**: binds this clone to a Trello board ([section 3.1](#31-kankan-init)). Safe to run again: it keeps what is already set up and offers to change the test command ([section 12.1](#121-the-test-command)).
 - `<board-url>`: the board's URL, `https://trello.com/b/<shortLink>/<name>`. Required the first time; afterwards it defaults to the board already bound. A different board is refused.
 - `--credentials <file>`: a `.properties` file holding the Trello key and token (`kankan.trello.key`, `kankan.trello.token`).
 Credentials are looked up in this order:
@@ -470,7 +470,7 @@ Credentials are looked up in this order:
   - the `~/.config/kankan/credentials` file (mode 600) 
 When credentials are not found, kankan asks for them and stores them in the relevant file. The `<file>` contents are preserved and only the required values are edited or added.
 - `--reauth`: only ask for new credentials, changing nothing else.
-- `--takeover`: bind a board that is bound to another clone; the other clone's agents stop ([section 12.1](#121-moving-a-board-to-another-clone)).
+- `--takeover`: bind a board that is bound to another clone; the other clone's agents stop ([section 12.2](#122-moving-a-board-to-another-clone)).
 
 **`kankan doctor [--no-fix] [--offline]`**: checks the installation and the project, fixes what is safe and prints numbered manual steps for the rest (exit 14 while any remain) ([section 2](#2-installation)).
 - `--no-fix`: only report, change nothing.
@@ -546,7 +546,7 @@ Edit the file only with no agent running (`kankan stop`, edit, `kankan start`): 
 
 ### Settings you may edit
 
-**Tests** ([section 3.2](#32-the-test-command))
+**Tests** ([section 12.1](#121-the-test-command))
 
 - `test_command` (text, default `""`): the shell command run before each integration; `""` means none.
 - `test_timeout` (seconds, default `1800`): the longest a test run may last before it counts as failed.
