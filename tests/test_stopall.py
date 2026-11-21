@@ -1,7 +1,6 @@
 """``kankan stop`` without a seat (stopall spec F§7)."""
 
 import os
-import subprocess
 import sys
 
 import pytest
@@ -10,55 +9,8 @@ from kankan import agents_cmd, cli, seats, stopall
 from kankan.errors import KankanError, Status
 from kankan.refstore import card_ref
 from kankan.seatstate import load_state, update_state
-from tests.conftest import ROOT
-from tests.helpers import bind_project
+from tests.helpers import NoTmux, bind_project, hold
 from tests.launcher_helpers import launcher_state, wait_for
-
-# A seat holder that behaves like a launcher towards stop requests: it clears the request once at start (as
-# Launcher.start does), then exits when it sees one; with "ignore" it never exits by itself.
-HOLDER = """
-import os, sys, time
-sys.path.insert(0, {root!r})
-os.environ["KANKAN_SUPERVISOR_PID"] = str(os.getpid())
-from kankan import seats
-from kankan.project import Project
-from kankan.seatstate import load_state, update_state
-project = Project.open({repo!r})
-lease = seats.acquire(project, {type!r}, seat={seat!r})
-update_state(project.paths, {seat!r}, lambda s: setattr(s, "stop_requested", False))
-print("held", flush=True)
-while True:
-    time.sleep(0.05)
-    if {mode!r} == "obey" and load_state(project.paths, {seat!r}).stop_requested:
-        seats.release(project, lease)
-        sys.exit(0)
-"""
-
-
-class NoTmux:
-    def sessions_with_option(self, option):
-        return {}
-
-    def kill_session(self, name):
-        pass
-
-
-def hold(project, seat, mode="obey"):
-    proc = subprocess.Popen([sys.executable, "-c", HOLDER.format(root=str(ROOT), repo=str(project.paths.repo),
-                                                                type=seats.seat_type(seat), seat=seat, mode=mode)],
-                            start_new_session=True, stdout=subprocess.PIPE, text=True)
-    assert proc.stdout.readline().strip() == "held"
-    return proc
-
-
-@pytest.fixture
-def holders():
-    procs = []
-    yield procs
-    for proc in procs:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
 
 
 @pytest.fixture

@@ -92,12 +92,12 @@ class FakeTrello:
     def _now(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    def add_board(self, name: str = "board", desc: str = "") -> dict:
+    def add_board(self, name: str = "board", desc: str = "", url_slug: str = None) -> dict:
         with self.lock:
             board = {"id": self.new_id(), "name": name, "desc": desc, "shortLink": _short(), "closed": False,
                      "memberships": [{"idMember": self.owner["id"], "memberType": "admin"},
                                      {"idMember": self.me["id"], "memberType": "normal"}]}
-            board["url"] = f"https://trello.com/b/{board['shortLink']}/{name}"
+            board["url"] = f"https://trello.com/b/{board['shortLink']}/{url_slug if url_slug is not None else name}"
             self.state["boards"][board["id"]] = board
             return board
 
@@ -282,7 +282,9 @@ class FakeTrello:
                     time.sleep(fake.timeout_delay)
                     self.close_connection = True
                     return
-                if fault in ("500", "429"):
+                if fault in ("401", "403"):
+                    return self._send(int(fault), "injected")
+                if fault in ("500", "503", "429"):
                     headers = {"Retry-After": "1"} if fault == "429" else {}
                     return self._send(int(fault), {"message": "injected"}, headers)
                 if fault == "404":  # a hostile server echoing the credential in its error body
@@ -435,6 +437,15 @@ class FakeTrello:
                     out.append({"idMember": m["idMember"], "memberType": m["memberType"],
                                 "member": {"id": member["id"], "username": member["username"]}})
                 return 200, out
+            if len(parts) == 4 and parts[2:] == ["cards", "closed"] and method == "GET":
+                rows = sorted((c for c in st["cards"].values() if c["idBoard"] == board["id"] and c["closed"]),
+                              key=lambda c: c["id"])
+                if p.get("before"):
+                    rows = [c for c in rows if c["id"] < p["before"]]
+                rows = rows[-int(p.get("limit", 1000)):]
+                fields = [f for f in p.get("fields", "").split(",") if f]
+                return 200, [{k: v for k, v in self._card_out(c, False, checklists=False).items()
+                              if not fields or k == "id" or k in fields} for c in reversed(rows)]
             if len(parts) == 3 and parts[2] == "labels" and method == "GET":
                 labels = sorted((l for l in st["labels"].values() if l["idBoard"] == board["id"]), key=lambda l: l["id"])
                 if p.get("before"):

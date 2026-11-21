@@ -397,6 +397,63 @@ def _liveness(project, seat: str) -> str:
         _release_fd(fd)
 
 
+RUNNING_LOCK_HELD = messages.RUNNING_LOCK_HELD
+RUNNING_LOCK_UNREADABLE = messages.RUNNING_LOCK_UNREADABLE
+RUNNING_RECORD_UNREADABLE = messages.RUNNING_RECORD_UNREADABLE
+RUNNING_PID_PREFIX = messages.RUNNING_PID_PREFIX
+_ABSENT = object()  # a missing file; JSON null is a malformed record, not an absent one
+
+
+def running(paths, seat: str) -> List[str]:
+    """Why ``seat`` counts as running, empty when it is stopped.
+
+    The reasons are ``RUNNING_LOCK_HELD``, ``"pid <n>"`` and, when liveness cannot be established, the
+    ``*_UNREADABLE`` tokens (never reported as stopped). Meant for destruction gates: it never creates a file
+    (only a missing file counts as absent) and takes no project lock. A recorded process counts only with a
+    start time, the same boot ID and the same start time.
+    """
+    validate_seat(seat)
+    reasons: List[str] = []
+    try:
+        fd = os.open(paths.seats_dir / f"{seat}.lock", os.O_RDWR | os.O_CLOEXEC)
+    except FileNotFoundError:
+        fd = -1
+    except OSError:
+        fd = -1
+        reasons.append(RUNNING_LOCK_UNREADABLE)
+    if fd >= 0:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            reasons.append(RUNNING_LOCK_HELD)
+        except OSError:
+            reasons.append(RUNNING_LOCK_UNREADABLE)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    try:
+        proc = read_json(paths.seats_dir / f"{seat}.proc.json", _ABSENT)
+    except (ValueError, OSError):
+        proc = None
+    if proc is _ABSENT:
+        pass
+    elif not isinstance(proc, dict):
+        reasons.append(RUNNING_RECORD_UNREADABLE)
+    elif proc.get("boot_id") == procutil.boot_id():
+        entries = [proc.get(name) for name in ("supervisor", "launcher", "agent")]
+        entries += proc.get("unavailable") if isinstance(proc.get("unavailable"), list) else []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("start") is None:
+                continue
+            pid = entry.get("pid")
+            reason = f"{RUNNING_PID_PREFIX}{pid}"
+            if isinstance(pid, int) and not isinstance(pid, bool) and procutil.alive(pid, entry["start"]) \
+                    and reason not in reasons:
+                reasons.append(reason)
+    return reasons
+
+
 def verify_owner(project, seat: str, session: str) -> RefValue:
     value = project.refs.read(seat_ref(seat))
     if value is None or value.meta.get("session") != session:

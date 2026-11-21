@@ -88,12 +88,21 @@ def resume_label(project, when) -> str:
     return project.trello.create_label(project.cfg.board_id, name, "orange").id
 
 
-def _resume_time(name: str):
+def resume_time(name: str):
+    """The local time of a label named exactly like ``resume_label_name`` writes it, else None.
+
+    Strict: the literal ``Resume `` prefix and a suffix that formats back to itself (``Resume 2026-1-2 3:04`` and
+    ``Resume hiring`` are not kankan's).
+    """
     from datetime import datetime
+    if not isinstance(name, str) or not name.startswith(RESUME_PREFIX):
+        return None
+    suffix = name[len(RESUME_PREFIX):]
     try:
-        return datetime.strptime(name[len(RESUME_PREFIX):], "%Y-%m-%d %H:%M").astimezone()
+        parsed = datetime.strptime(suffix, "%Y-%m-%d %H:%M")
     except ValueError:
         return None
+    return parsed.astimezone() if parsed.strftime("%Y-%m-%d %H:%M") == suffix else None
 
 
 def gc_resume_labels(project) -> list:
@@ -108,7 +117,7 @@ def gc_resume_labels(project) -> list:
         for label in snap.labels.values():
             if not label.name.startswith(RESUME_PREFIX):
                 continue
-            when = _resume_time(label.name)
+            when = resume_time(label.name)
             if when is None:
                 continue
             if label.id not in used or now - when > timedelta(hours=1):

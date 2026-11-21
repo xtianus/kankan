@@ -30,7 +30,7 @@ class Inventory:
             and "unavailable" not in self.liveness.values()
 
 
-def _sessions(project, tmux: Tmux) -> List[str]:
+def sessions(project, tmux: Tmux) -> List[str]:
     """This clone's tmux sessions, recognised by the ``@kankan_repo`` option (never other projects' or the user's)."""
     mine = str(project.paths.repo)
     return sorted(name for name, owner in tmux.sessions_with_option("@kankan_repo").items() if owner == mine)
@@ -50,7 +50,7 @@ def inventory(project, tmux: Tmux) -> Inventory:
     cfg = project.reload_config()
     liveness = {name: seats.liveness(project, name) for name in sorted(cfg.seats)}
     unit = agents_cmd.unit_path(project).exists()
-    return Inventory(liveness=liveness, sessions=_sessions(project, tmux), unit=unit,
+    return Inventory(liveness=liveness, sessions=sessions(project, tmux), unit=unit,
                      unit_args=_unit_args(project) if unit else None,
                      alive=[name for name, state in liveness.items() if state == "alive"])
 
@@ -99,7 +99,7 @@ def _wait(project, tmux: Tmux, say: Callable[[str], None], poll: float) -> List[
             for seat in [s for s in shown if s not in alive]:
                 del shown[seat]
                 say(f"  {seat}: stopped")
-            starting = [name for name in _sessions(project, tmux) if "-starting-" in name]
+            starting = [name for name in sessions(project, tmux) if "-starting-" in name]
             if not alive and (not starting or clock.monotonic() >= starting_deadline):
                 return []
             clock.sleep(poll)
@@ -111,7 +111,7 @@ def _wait(project, tmux: Tmux, say: Callable[[str], None], poll: float) -> List[
 def _settle(project, tmux: Tmux) -> None:
     """A session closes shortly after its supervisor exits: give the stopped seats' sessions time to go."""
     deadline = clock.monotonic() + SETTLE_SECONDS
-    while _sessions(project, tmux) and clock.monotonic() < deadline:
+    while sessions(project, tmux) and clock.monotonic() < deadline:
         clock.sleep(0.2)
 
 
@@ -124,7 +124,7 @@ def _quit_now(project, tmux: Tmux, alive: List[str], report: dict) -> None:
             report["remaining"].append({"what": f"seat {seat}: {err.message}",
                                         "remedy": f"kankan seat recover {seat} --kill"})
     _settle(project, tmux)
-    for name in _sessions(project, tmux):
+    for name in sessions(project, tmux):
         tmux.kill_session(name)
         report["sessions_closed"].append(name)
 

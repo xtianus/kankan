@@ -109,6 +109,16 @@ def kproject(git_repo, fake_trello, monkeypatch):
     return bind_project(git_repo, fake_trello, monkeypatch)
 
 
+@pytest.fixture
+def holders():
+    procs = []
+    yield procs
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 TMUX_PREFIX = "kankan-test-"
 
 

@@ -34,3 +34,13 @@ def rev(repo: PathLike, name: str) -> Optional[str]:
 
 def is_ancestor(repo: PathLike, ancestor: str, descendant: str) -> bool:
     return run(repo, ["merge-base", "--is-ancestor", ancestor, descendant], check=False).returncode == 0
+
+
+def run_bytes(repo: PathLike, args: List[str], check: bool = True, env: Optional[dict] = None,
+              timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    """Like ``run`` but with raw bytes output (file names that are not UTF-8, or that hold ``\\r``)."""
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env, timeout=timeout)
+    if check and proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", "replace").strip()
+        raise KankanError(Status.INTERNAL_ERROR, f"git {args[0]} failed: {stderr}", {"args": args, "stderr": stderr})
+    return proc

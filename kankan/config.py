@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import fcntl
 import json
 import os
 import re
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -58,7 +60,7 @@ class Paths:
     worktree_root: Path
 
     @classmethod
-    def discover(cls, cwd) -> "Paths":
+    def discover(cls, cwd, raw: Optional[dict] = None) -> "Paths":
         proc = gitutil.run(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], check=False)
         if proc.returncode != 0:
             raise KankanError(Status.CONFIG_ERROR, f"{cwd} is not inside a Git repository")
@@ -66,7 +68,8 @@ class Paths:
         first = gitutil.out(cwd, ["worktree", "list", "--porcelain"]).splitlines()[0]
         repo = Path(first.split(" ", 1)[1]) if first.startswith("worktree ") else gcd.parent
         kankan_dir = gcd / "kankan"
-        raw = read_json(kankan_dir / "config.json", {}) or {}
+        if raw is None:
+            raw = read_json(kankan_dir / "config.json", {}) or {}
         project = raw.get("project_name") or repo.name
         root = raw.get("worktree_root")
         worktree_root = Path(root) if root else Path(os.path.expanduser("~")) / "coding" / ".kankan" / project
@@ -236,8 +239,12 @@ _LOCK_GUARD = threading.Lock()
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, timeout: float = 60, what: str = "lock") -> Iterator[None]:
-    """Exclusive flock with a polling deadline; reentrant within one process. The file is never deleted."""
+def file_lock(path: Path, timeout: float = 60, what: str = "lock", nofollow: bool = False) -> Iterator[None]:
+    """Exclusive flock with a polling deadline; reentrant within one process. The file is never deleted.
+
+    With ``nofollow`` (``kankan destroy``) neither the lock file nor its directory may be a symbolic link and the
+    lock must be a regular file: both are opened with ``O_NOFOLLOW``, the file relative to its directory's
+    descriptor, and anything else raises ``OSError`` before a file is created anywhere."""
     key = str(path)
     with _LOCK_GUARD:
         entry = _LOCK_DEPTH.get(key)
@@ -253,8 +260,11 @@ def file_lock(path: Path, timeout: float = 60, what: str = "lock") -> Iterator[N
             with _LOCK_GUARD:
                 _LOCK_DEPTH[key][2] -= 1
         return
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    if nofollow:
+        fd = open_nofollow(Path(path), os.O_RDWR | os.O_CREAT)
+    else:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     deadline = clock.monotonic() + timeout
     try:
         while True:
@@ -278,8 +288,31 @@ def file_lock(path: Path, timeout: float = 60, what: str = "lock") -> Iterator[N
         os.close(fd)
 
 
-def project_lock(paths: Paths, timeout: float = 60):
-    return file_lock(paths.kankan_dir / "project.lock", timeout, "project lock")
+def open_nofollow(path: Path, flags: int) -> int:
+    """Open ``path`` without following a symbolic link at its last two components: the parent directory is created
+    if absent (never through a link) and opened with ``O_DIRECTORY | O_NOFOLLOW``, the file relative to it with
+    ``O_NOFOLLOW | O_NONBLOCK`` (a FIFO never blocks). Anything but a regular file raises ``OSError``."""
+    path = Path(path)
+    try:
+        os.mkdir(path.parent, 0o700)
+    except FileExistsError:
+        pass
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fd = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def project_lock(paths: Paths, timeout: float = 60, nofollow: bool = False):
+    return file_lock(paths.kankan_dir / "project.lock", timeout, "project lock", nofollow=nofollow)
 
 
 def registry_block(desc: str) -> Optional[dict]:
@@ -308,6 +341,36 @@ def write_registry_block(desc: str, fields: dict) -> str:
     return desc + block + "\n"
 
 
+def registry_state(desc: str) -> Tuple[str, Optional[str]]:
+    """Classify the registry block of a board description: absent, valid (with its registry-id) or malformed."""
+    desc = desc or ""
+    starts, ends = desc.count(REGISTRY_START), desc.count(REGISTRY_END)
+    if starts == 0 and ends == 0:
+        return "absent", None
+    if starts != 1 or ends != 1 or desc.index(REGISTRY_START) > desc.index(REGISTRY_END):
+        return "malformed", None
+    match = re.search(re.escape(REGISTRY_START) + r"\n(.*?)\n?" + re.escape(REGISTRY_END), desc, re.S)
+    ids = [line.split(":", 1)[1].strip() for line in (match.group(1).splitlines() if match else [])
+           if ":" in line and line.split(":", 1)[0].strip() == "registry-id"]
+    # one registry-id line, never two (even equal): a second one makes the owner ambiguous
+    return ("valid", ids[0]) if len(ids) == 1 and ids[0] else ("malformed", None)
+
+
+def remove_registry_block(desc: str) -> str:
+    """Inverse of ``write_registry_block``: drop the block and, for a block at the end, the separator it added.
+
+    A block in the middle is removed alone, leaving the text around it byte for byte.
+    """
+    desc = desc or ""
+    match = re.search(re.escape(REGISTRY_START) + r".*?" + re.escape(REGISTRY_END), desc, re.S)
+    if not match:
+        return desc
+    before, after = desc[:match.start()], desc[match.end():]
+    if after not in ("", "\n"):
+        return before + after
+    return before[:-2] if before.endswith("\n\n") else before
+
+
 def check_registry(cfg: Config, desc: str) -> None:
     block = registry_block(desc)
     if block is None:
@@ -330,3 +393,73 @@ def qa_list_open(cfg: Config, lists: dict) -> bool:
     """Whether ``qa_list`` is configured and open on the board (``lists``: id -> TList)."""
     lst = lists.get(cfg.qa_list) if cfg.qa_list else None
     return lst is not None and not lst.closed
+
+
+def _check_fields(raw: dict) -> None:
+    """Reject wrong types in the fields ``try_load`` consumes before any of them is acted on."""
+    from kankan import messages
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    checks = {"board_id": lambda v: isinstance(v, str), "trello_base_url": lambda v: isinstance(v, str),
+              "trello_timeout": number, "worktree_root": lambda v: v is None or isinstance(v, str),
+              "project_name": lambda v: v is None or isinstance(v, str)}
+    for field, valid in checks.items():
+        if field in raw and not valid(raw[field]):
+            if field == "board_id":
+                raise ValueError(messages.CONFIG_BOARD_ID_TYPE)
+            raise ValueError(messages.CONFIG_FIELD_INVALID.format(field=field))
+    # every list ID destroy deletes cards from or archives (destroy T§3): a string, or absent/null
+    for field in ("backlog", "done", "blocked", "qa_list", "settings_list"):
+        if field in raw and not _optional_str(raw[field]):
+            raise ValueError(messages.CONFIG_FIELD_INVALID.format(field=field))
+    seats = raw.get("seats")
+    if seats is None:
+        return
+    if not isinstance(seats, dict):
+        raise ValueError(messages.CONFIG_FIELD_INVALID.format(field="seats"))
+    for name, seat in seats.items():
+        if not isinstance(seat, dict):
+            raise ValueError(messages.CONFIG_FIELD_INVALID.format(field=f"seats.{name}"))
+        for key in ("in_progress", "implemented", "review", "role"):
+            if key in seat and not _optional_str(seat[key]):
+                raise ValueError(messages.CONFIG_FIELD_INVALID.format(field=f"seats.{name}.{key}"))
+
+
+def _optional_str(value) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def try_load(cwd) -> Tuple[Paths, Optional[Config], Optional[str]]:
+    """Paths and configuration of the repository at ``cwd`` without ever failing on ``config.json``.
+
+    Returns ``(paths, cfg, reason)``: ``cfg`` is None with the reason when the file is missing, unreadable,
+    not an object or malformed; the paths then use their defaults, and the file's ``project_name`` and
+    ``worktree_root`` apply only once the configuration has validated. A configuration without a ``board_id``
+    is returned with the reason ``messages.CONFIG_NO_BOARD``; every other required field keeps the normal
+    loader's requirements. Only a ``cwd`` outside a Git repository raises.
+    """
+    from kankan import messages
+    paths = Paths.discover(cwd, raw={})
+    path = paths.kankan_dir / "config.json"
+    try:
+        raw = read_json(path, None)
+    except (ValueError, OSError) as err:
+        return paths, None, messages.CONFIG_INVALID.format(path=path, error=err)
+    if raw is None:
+        return paths, None, messages.CONFIG_NOT_INITIALIZED
+    try:
+        if not isinstance(raw, dict):
+            raise ValueError(messages.CONFIG_NOT_OBJECT)
+        _check_fields(raw)
+        data = dict(raw)
+        if not data.get("board_id"):
+            required = {f.name: "" for f in dataclasses.fields(Config)
+                        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING}
+            data = {**required, **raw}
+        cfg = Config.from_dict(data)
+        resolved = Paths.discover(cwd, raw=raw)
+    except (ValueError, TypeError, AttributeError, KeyError) as err:
+        return paths, None, messages.CONFIG_INVALID.format(path=path, error=err)
+    return resolved, cfg, None if cfg.board_id else messages.CONFIG_NO_BOARD
