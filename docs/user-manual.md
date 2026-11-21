@@ -145,7 +145,7 @@ This chapter covers starting the agents, choosing their model and effort, pausin
 After the board has been initialized, agent **seats** can be added. A seat is an instance of an agent that works in a tmux session and communicates via three dedicated lists on the board: "In progress", "Implemented", "Review". There can be multiple seats for any agents of the supported type. With more than one agent type, implementation and review are always done by different types.
 
 ```bash
-kankan up claude=2 codex=1        # make sure these agents run; starts only the missing ones
+kankan up claude=2 codex=1 qa=codex        # make sure these agents run; starts only the missing ones
 kankan agent claude [--seat claude-1] [--attach]
 kankan autostart enable claude=2 codex=1   # systemd user service kankan-up@<project>.service
 kankan autostart disable
@@ -324,6 +324,24 @@ kankan adapter check saved-screen.txt --type codex
 `kankan reconcile` does not report a Q&A card in `Done` as missing a merge, unless it was handed over for implementation afterwards.
 
 Every agent command answers with `--json` an envelope `{"ok", "status", "message", "data"}` and an exit code (0 success, 10 no_work, 11 already_claimed, 12 ineligible, 13 main_moved, 14 needs_action, 15 on_hold, 20 network_error, 21 trello_error, 30 needs_reconciliation, 31 not_owner, 40 config_error, 41 usage_error, 50 internal_error). The audit log is `<git dir>/kankan/log.jsonl`.
+
+### 7.1 Troubleshooting
+
+To see what kankan has been doing, read the **audit log** `<git dir>/kankan/log.jsonl` (`.git/kankan/log.jsonl` in an ordinary clone). It is the history of the whole project: the launchers write it, and so do the agent commands, seat recoveries and administration commands. Each line is a JSON object with the time (`ts`), the event name (`event`), the process (`pid`), the seat (`seat`) and the event's own details. The launchers record, for example, their state changes (`launcher_state`), what they type in the agent's pane (`pane_write`) and the dialogs they answer (`dialog_answered`, `trust_answered`), the suspension requests and signals they receive (`suspend_requested`, `signal_received`), their stops (`stop_honoured`, `stop_yield`, `idle_exit`), the loss of their seat or of the board binding (`lease_revoked`, `registry_lost`) and their failures (`tick_failed`, `label_failed`, `settings_refresh_failed`). The Q&A agent's launcher adds `qa_…` events. Reading the log changes nothing.
+
+Run these commands from the project's clone ([jq](https://jqlang.org/) formats and filters the JSON lines):
+
+```bash
+tail -f .git/kankan/log.jsonl | jq -c .                       # follow live
+jq -c 'select(.seat=="claude-1")' .git/kankan/log.jsonl         # one seat
+jq -c 'select(.event=="launcher_state")' .git/kankan/log.jsonl  # state changes only
+```
+
+Some information is not in the audit log:
+
+- **The tmux session.** When a launcher stops because of an error, or the supervisor restarts it ("the launcher exited with code N; restarting…"), the message appears only in the session `ai-<project>-<seat>`: watch it with `tmux attach -t ai-<project>-<seat>`. The message is lost when the session closes.
+- **`kankan status`** shows each seat's current launcher state and task.
+- **Autostart.** When the agents were started at boot by `kankan autostart`, the output of that `kankan up` is in the systemd journal: `journalctl --user -u kankan-up@<project>.service`.
 
 ## 8. Updating kankan
 
