@@ -7,7 +7,7 @@ One installation of kankan can be used on many different projects, provided that
 
 - Linux, Python ≥ 3.10, Git ≥ 2.38, tmux ≥ 3.2 and pipx; Claude Code and/or Codex CLI installed and logged in. Install both agent CLIs for the workflow where an agent of the other type reviews each implementation.
 - A Trello account, an API key and a token (see [section 3](#3-binding-a-project-to-a-board)).
-- On systems using systemd, `KillUserProcesses=no` in logind lets tmux sessions survive logout. Enable lingering if agents must start at boot before you log in (see [section 1.3](#13-session-and-boot-configuration)).
+- On systems using systemd, `KillUserProcesses=no` in logind lets tmux sessions survive logout. Enable lingering if agents must start at boot before you log in (see [section 12.1](#121-keeping-agents-running-after-logout-and-reboot)).
 
 ### 1.1 Install the required software
 
@@ -35,23 +35,28 @@ tmux -V
 pipx --version
 ```
 
-Compare the output with the minimum versions in section 1. If a tool is too old, upgrade it using your distribution's packages or upgrade the distribution before continuing. Check the agent CLIs and sign in, following their browser prompts:
+Compare the output with the minimum versions in section 1. If a tool is too old, upgrade it using your distribution's packages or upgrade the distribution before continuing. Check the agent CLIs and sign in when needed:
 
 ```bash
 claude --version
 codex --version
+claude auth status
+codex login status
+```
+
+Run the corresponding login command to sign in or change accounts.
+
+```bash
 claude auth login
 codex login
 ```
-
-To check authentication later, run `claude auth status` and `codex login status`. Run the corresponding login command again to sign in or change accounts.
 
 ### 1.2 Check and configure the login PATH
 
 For the default per-user installers, `~/.local/bin` must be on your login PATH. After installing kankan in section 2, check it from a login shell:
 
 ```bash
-bash -lc 'command -v kankan; command -v claude; command -v codex'
+bash -lc 'command -v claude; command -v codex'
 ```
 
 Each installed command should print a path. If one is missing, run `pipx ensurepath` again. For a Bash login shell, you can also add the following line to `~/.profile` (or `~/.bash_profile` if that is the startup file you use):
@@ -62,38 +67,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Log out and back in, then repeat the check. Restart any running Codex background service after changing the login PATH so it inherits the updated environment. A PATH change only in the current terminal or in `~/.bashrc` may not reach that service.
 
-### 1.3 Session and boot configuration
+### 1.3 A Trello account for kankan
 
-On systemd systems, check the **running** logind setting and your user's lingering status:
+Give kankan its own Trello account that it will use to operate on the boards:
 
-```bash
-busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses
-loginctl show-user "$USER" -p Linger
-```
-
-The first command should print `b false`, meaning `KillUserProcesses=no`. If it prints `b true`, create a logind configuration override:
-
-```bash
-sudo mkdir -p /etc/systemd/logind.conf.d
-printf '[Login]\nKillUserProcesses=no\n' | sudo tee /etc/systemd/logind.conf.d/99-kankan.conf
-```
-
-Reboot at a convenient time to apply the setting, then repeat the `busctl` check. To inspect the main configuration and overrides together, run `systemd-analyze cat-config systemd/logind.conf` ([logind configuration reference](https://www.freedesktop.org/software/systemd/man/latest/logind.conf.html)).
-
-`Linger=yes` is needed only for starting agents at boot before login. Enable it for your user and check the result:
-
-```bash
-sudo loginctl enable-linger "$USER"
-loginctl show-user "$USER" -p Linger
-```
-
-To turn lingering off, run `sudo loginctl disable-linger "$USER"` ([loginctl reference](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)). Lingering keeps the user service manager available; after binding your project, use `kankan autostart enable` to configure the agents to start ([section 4](#4-starting-agents)).
-
-### 1.4 A Trello account for kankan
-
-Trello never notifies you about your own actions. If kankan uses **your** token, its questions, errors and mentions of you are, for Trello, comments you wrote yourself: you get no notification. Give kankan its own Trello account:
-
-1. Create a second Trello account for kankan. It needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers. Trello gives it a workspace of its own.
+1. Create a new Trello account for kankan. It needs its own email address; a plus-address such as `you+kankan@example.com` works with most providers. Trello gives it a workspace of its own.
    - Give it an **uncommon username**, for example `kankan-<your username>-<a few random letters>` (`kankan-xtian-q7wz`), not a generic `kankanbot`. Board invitations go by username or email: a distinctive name keeps other people from inviting your bot to their boards by mistake, and keeps you from inviting someone else's bot to yours.
 2. From your account, invite the bot to the project's board as a normal member, checking the username before you confirm. The boards stay yours.
 3. Log in **as the bot** (a private browser window is simplest) and create the Trello app that gives kankan its API key:
@@ -112,7 +90,7 @@ Who gets notified: kankan mentions the person who created the card; for cards ka
 
 ## 2. Installation
 
-If you already have kankan installed, see [section 10.1, Updating kankan](#101-updating-kankan).
+If you already have kankan installed, see [section 10.1, Updating kankan](#101-updating-kankan) to get the latest version.
 
 First clone the kankan repository. You can put the clone in any writable folder; no specific location or folder name is required. For example, to use `~/tools/kankan`:
 
@@ -135,7 +113,7 @@ Replace `~/tools/kankan` with your chosen clone path if different. This is the s
 
 ## 3. Binding a project to a board
 
-kankan works on Trello with its own Trello account ([section 1.4](#14-a-trello-account-for-kankan)); then `kankan init` binds the project clone to the board ([section 3.1](#31-kankan-init)).
+kankan works on Trello with its own Trello account ([section 1.3](#13-a-trello-account-for-kankan)); then `kankan init` binds the project clone to the board ([section 3.1](#31-kankan-init)).
 
 ### 3.1 `kankan init`
 
@@ -146,19 +124,21 @@ kankan init <trelloBoard>
 ```
 
 - connects to the Trello board specified by `<trelloBoard>`. This is the board that you use to interact with the agents. The parameter is a URL in the format `https://trello.com/b/<shortLink>/<name>`. Just copy it from the browser address bar when you open the board. Example: `https://trello.com/b/Vz4CZ6ZS/myprojectboard`. 
-- checks the Trello credentials and asks for the bot's API key and token if credentials are missing or invalid. The token prompt includes an authorization URL with the minimal scope for users who need to obtain a token ([section 1.4](#14-a-trello-account-for-kankan)).
+- checks the Trello credentials and asks for the bot's API key and token if credentials are missing or invalid. The token prompt includes an authorization URL with the minimal scope for users who need to obtain a token ([section 1.3](#13-a-trello-account-for-kankan)).
 - writes a `kankan-registry` block into the board description (the rest of the description is yours);
 - finds or creates the lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (asking before adopting existing ones; an adopted `Q&A` list keeps its cards, which become questions; a new `Q&A` list is placed right after `Blocked`; `kankan` holds the setting cards, see below) and the labels `HOLD`, `Question`, `Error`;
-- asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 12.1](#121-the-test-command));
+- asks for the project's **test command**, the optional shell command that kankan runs on every card before integrating it, as an extra quality check ([section 12.2](#122-the-test-command));
 - asks for the **branch where the agents integrate** (default `kankan-agents`) and creates it from `main` (or adopts `origin/kankan-agents` if it exists);
 - asks for the default model and effort per agent type and role if you have not chosen them yet (one keystroke each), then creates the setting cards in the `kankan` list: `Implementation Agents` and `Review Agents` (and `Q&A Agents` once a Q&A agent is configured, [section 6.2](#62-questions-qa-cards)), and prints the model and effort it ticked on them for each agent type, with the file they come from ([section 6.1](#61-model-and-effort)). Check them: they decide the speed and the cost of every task.
 Note: for claude models, the version number is not shown and the latest one will always be used. For example, "opus" may mean "opus 5.5" or a later version.
 
-`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.2](#122-moving-a-board-to-another-clone).
+`init` is idempotent. `kankan init --reauth` only replaces the credentials. A board already bound to another git clone (of this project or any other repository) is refused; to move a board to another clone, see [section 12.3](#123-moving-a-board-to-another-clone).
 
 You may rename and reorder the workflow lists and create your own lists and labels: kankan recognizes its lists and labels by ID. Archiving a workflow list stops kankan with `config_error`, except the `Q&A` list: without it only the Q&A agent stops (after its current turn), `kankan status` warns and `kankan doctor` restores it.
 
 ## 4. Starting agents
+
+After the board has been initialized, agent **seats** can be added. A seat is an instance of an agent that works in a tmux session and communicates via three dedicated lists on the board: "In progress", "Implemented", "Review". There can be multiple seats for any agents of the supported type. With more than one agent type, implementation and review are always done by different types.
 
 ```bash
 kankan up claude=2 codex=1        # make sure these agents run; starts only the missing ones
@@ -170,7 +150,7 @@ kankan stop [--graceful]          # every agent of the project, and autostart di
 kankan start                      # start again what the last `kankan stop` stopped
 ```
 
-Each agent gets a **seat** (`claude-1`, `codex-2`…) with three lists on the board (`<seat> · In Progress`, `· Implemented`, `· Review`) and a worktree in `~/coding/.kankan/<project>/<seat>`. Seats are reused; at most 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
+Each agent gets a seat and a worktree in `~/coding/.kankan/<project>/<seat>`. Seats are reused; at most 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
 
 `kankan stop` without a seat stops **all** the project's agents, the Q&A agent included, and disables autostart. It shows what it will stop and asks for confirmation (`--yes` skips the question and is required from a script). By default it quits the agents **immediately**, as `kankan seat recover --kill` would: each interrupted card stays with its seat, gets a comment and is resumed at the next start. With `--graceful` it instead waits for each agent to finish its current task (a Q&A agent its current answer), showing what each one is doing; that can take long, and Ctrl-C only stops the waiting (the agents still stop after their task). At the end kankan checks that no agent runs, no tmux session of the project is open and autostart is off, and lists anything left with what to do (exit 14). Running `kankan stop` again is harmless: what is already stopped or disabled is reported as such.
 
@@ -404,7 +384,36 @@ See [`docs/adapter-notes.md`](adapter-notes.md) for what was observed on the ins
 
 ## 12. Advanced usage
 
-### 12.1 The test command
+### 12.1 Keeping agents running after logout and reboot
+
+The agents run in tmux sessions of your user. On systemd systems, two settings decide whether they outlive your login session: `KillUserProcesses=no` keeps the sessions alive when you log out, and lingering lets `kankan autostart` start the agents at boot, before you log in.
+
+On systemd systems, check the **running** logind setting and your user's lingering status:
+
+```bash
+busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses
+loginctl show-user "$USER" -p Linger
+```
+
+The first command should print `b false`, meaning `KillUserProcesses=no`. If it prints `b true`, create a logind configuration override:
+
+```bash
+sudo mkdir -p /etc/systemd/logind.conf.d
+printf '[Login]\nKillUserProcesses=no\n' | sudo tee /etc/systemd/logind.conf.d/99-kankan.conf
+```
+
+Reboot at a convenient time to apply the setting, then repeat the `busctl` check. To inspect the main configuration and overrides together, run `systemd-analyze cat-config systemd/logind.conf` ([logind configuration reference](https://www.freedesktop.org/software/systemd/man/latest/logind.conf.html)).
+
+`Linger=yes` is needed only for starting agents at boot before login. Enable it for your user and check the result:
+
+```bash
+sudo loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger
+```
+
+To turn lingering off, run `sudo loginctl disable-linger "$USER"` ([loginctl reference](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)). Lingering keeps the user service manager available; after binding your project, use `kankan autostart enable` to configure the agents to start ([section 4](#4-starting-agents)).
+
+### 12.2 The test command
 
 The test command is an optional quality step: it ensures that all tests are run before a change is integrated. If you omit it, agents will run the tests of their choice with no deterministic assurance that any test actually run. If you use it, the test will always be run.
 When not sure, don't provide a test command at initialization time: it can easily be provided later (see below).
@@ -427,7 +436,7 @@ Leave it empty if the project has no automated tests, or if they cannot run unat
 
 **Changing it later.** Run `kankan init` again: it shows the current command in brackets. Press Enter to keep it, or type a new one. An empty answer keeps the old value, so to clear the command, set `test_command` to `""` in `<git dir>/kankan/config.json`.
 
-### 12.2 Moving a board to another clone
+### 12.3 Moving a board to another clone
 
 A board is bound to one clone at a time ([section 3.1](#31-kankan-init)). `kankan init --takeover` binds it to the clone where you run it instead. The other clone's agents notice it at their next cycle and stop, interrupted wherever they are.
 
@@ -442,7 +451,7 @@ Before binding, `--takeover` checks the board and the remote. When cards are sti
 
 After a takeover that left cards behind, run `kankan reconcile --fix` in the new clone (`kankan doctor` points to it). It moves each card left without a claim, in a seat list whose agent is not running or in `Blocked` without its worktree, back to the **top** of `Backlog` with a comment. The card keeps its description, comments, attachments, labels and dependencies, and is implemented again from scratch: the work done on it in the old clone is lost unless you recover it from there yourself.
 
-### 12.3 Starting over: kankan destroy
+### 12.4 Starting over: kankan destroy
 
 `kankan destroy` brings the project back to the state before `kankan init`, so that you can start again from scratch. It is irreversible: use it only when you really want to throw away everything kankan created for this project.
 
@@ -453,6 +462,7 @@ After a takeover that left cards behind, run `kankan reconcile --fix` in the new
 
 **What it keeps**
 
+- the default agents (seed) in `~/.config/kankan/agents.json` and everything else in the kankan user config folder because these are shared by all user projects. You can delete the folder manually if nothing else uses it.
 - The lists `Backlog`, `Done`, `Blocked`, `Q&A` and `kankan` (empty) and the labels `HOLD`, `Question` and `Error`: the next `kankan init` adopts them by name. If you renamed a list, `init` does not find it and creates a new one unless you rename it back first.
 - Everything on the board that kankan does not know: your own lists, cards and labels, and `Resume…` labels that are not kankan's.
 - A `pre-push` hook in a hooks directory shared with other repositories (a global `core.hooksPath`), even kankan's own: the other repositories may still use it.
@@ -496,7 +506,7 @@ Every command accepts `--json`, which prints the result as the envelope `{"ok", 
 **`kankan skill install [--force]`**: links the shared kankan skill into `~/.claude/skills` and `~/.codex/skills` ([section 2](#2-installation)). Can be run from any folder. A link to another location is replaced; a real file or folder in its place is left alone with a warning.
 - `--force`: recreate the links even when they are already correct.
 
-**`kankan init [<board-url>] [--credentials <file>] [--reauth] [--takeover]`**: binds this clone to a Trello board ([section 3.1](#31-kankan-init)). Safe to run again: it keeps what is already set up and offers to change the test command ([section 12.1](#121-the-test-command)).
+**`kankan init [<board-url>] [--credentials <file>] [--reauth] [--takeover]`**: binds this clone to a Trello board ([section 3.1](#31-kankan-init)). Safe to run again: it keeps what is already set up and offers to change the test command ([section 12.2](#122-the-test-command)).
 - `<board-url>`: the board's URL, `https://trello.com/b/<shortLink>/<name>`. Required the first time; afterwards it defaults to the board already bound. A different board is refused.
 - `--credentials <file>`: a `.properties` file holding the Trello key and token (`kankan.trello.key`, `kankan.trello.token`).
 Credentials are looked up in this order:
@@ -505,7 +515,7 @@ Credentials are looked up in this order:
   - the `~/.config/kankan/credentials` file (mode 600) 
 When credentials are not found, kankan asks for them and stores them in the relevant file. The `<file>` contents are preserved and only the required values are edited or added.
 - `--reauth`: only ask for new credentials, changing nothing else.
-- `--takeover`: bind a board that is bound to another clone; the other clone's agents stop ([section 12.2](#122-moving-a-board-to-another-clone)).
+- `--takeover`: bind a board that is bound to another clone; the other clone's agents stop ([section 12.3](#123-moving-a-board-to-another-clone)).
 
 **`kankan doctor [--no-fix] [--offline]`**: checks the installation and the project, fixes what is safe and prints numbered manual steps for the rest (exit 14 while any remain) ([section 2](#2-installation)).
 - `--no-fix`: only report, change nothing.
@@ -563,7 +573,7 @@ In these commands `<type>` is `claude` or `codex`.
 
 These are recorded in the audit log ([section 10](#10-administration)).
 
-**`kankan destroy [--confirm <phrase>]…`**: removes everything kankan created for the project, on the board and in the clone, so that you can start again with `kankan init` ([section 12.3](#123-starting-over-kankan-destroy)). Irreversible; the agents must be stopped first.
+**`kankan destroy [--confirm <phrase>]…`**: removes everything kankan created for the project, on the board and in the clone, so that you can start again with `kankan init` ([section 12.4](#124-starting-over-kankan-destroy)). Irreversible; the agents must be stopped first.
 - `--confirm <phrase>`: answers a question without a terminal; repeat it for each question (`discard uncommitted work` when work is at risk, then `destroy <board name>` or `remove local kankan state`).
 
 **`kankan release <card> --force`**: parks a card's ref, overriding its holder; the card stays where it is on the board. `--force` is required.
@@ -584,7 +594,7 @@ Edit the file only with no agent running (`kankan stop`, edit, `kankan start`): 
 
 ### Settings you may edit
 
-**Tests** ([section 12.1](#121-the-test-command))
+**Tests** ([section 12.2](#122-the-test-command))
 
 - `test_command` (text, default `""`): the shell command run before each integration; `""` means none.
 - `test_timeout` (seconds, default `1800`): the longest a test run may last before it counts as failed.
@@ -621,7 +631,7 @@ Change `integration_branch` (default `kankan-agents`) with `kankan init`, never 
 - `project_name` (text, default the clone's folder name): the name used in tmux session names (`ai-<project>-<seat>`) and in the worktree path. Set it when two clones share a folder name: `kankan up` and `kankan agent` refuse to start and tell you to set it. Change it only when the project has no seats in use: existing worktrees are not moved.
 - `worktree_root` (path, default `~/coding/.kankan/<project>`): where the seats' worktrees are created. The same caution applies.
 
-**Credentials** ([section 1.4](#14-a-trello-account-for-kankan))
+**Credentials** ([section 1.3](#13-a-trello-account-for-kankan))
 
 - `credentials_path` (path, default `~/.config/kankan/credentials`): the `.properties` file holding the Trello key and token; `kankan init --credentials <file>` sets it.
 - `credentials_keys` (two texts, default `["kankan.trello.key", "kankan.trello.token"]`): the property names of the key and the token in that file. Change them only if the file already uses other names.
