@@ -75,7 +75,7 @@ The project lock is not held while asking: a user typing slowly does not block o
 - `gitutil`: `run_bytes` (git output as bytes, for paths and names that are not UTF-8).
 - `auditlog`: `append(..., follow=False)` opens `log.jsonl` relative to `<gcd>/kankan` opened with `O_DIRECTORY | O_NOFOLLOW` (neither is followed), refuses anything but a regular file with one link and never blocks on a FIFO.
 - `messages`: the texts of the questions, the uncommitted-work commands, the report and the refusals.
-- User manual: `destroy` is described in section 12.3, "Starting over: kankan destroy", and in the command reference.
+- User manual: `destroy` is described in section 9.6, "Starting over: kankan destroy", and in the command reference.
 - `kanban_requirements.md` is revised in the implementation commit as listed in [§6](#6-trello-usage).
 
 ## 8. Tests

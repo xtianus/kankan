@@ -1,6 +1,6 @@
 # Adapter notes
 
-An *adapter* tells kankan how to drive one type of coding agent (`claude`, `codex`) running in a tmux pane: the command that starts it, the regex patterns that classify its screen (ready, working, usage limit, trust window, known dialogs), and the keys and commands kankan sends (trust answer, new conversation, submit key, whether input may be queued while the agent works). See `kankan/adapters.py` and the user manual, [section 11](user-manual.md#11-adapters).
+An *adapter* tells kankan how to drive one type of coding agent (`claude`, `codex`) running in a tmux pane: the command that starts it, the regex patterns that classify its screen (ready, working, usage limit, trust window, known dialogs), and the keys and commands kankan sends (trust answer, new conversation, submit key, whether input may be queued while the agent works). See `kankan/adapters.py` and the user manual, [section 9.7](user-manual.md#97-adapters).
 
 The observations below are the evidence behind the default adapters: the patterns, answers and flags in `kankan/adapters_default.json` were set from them, and the captured screens became the test fixtures that check the screen classification. The *Not verified* section lists what was not observed on a real agent and should be checked when it first happens.
 
