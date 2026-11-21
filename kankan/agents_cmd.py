@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -11,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from kankan import messages, seats, worktrees
+from kankan import build, messages, seats, worktrees
 from kankan.adapters import WORK_ROLES
 from kankan.config import file_lock
 from kankan.errors import KankanError, Status
@@ -72,7 +74,7 @@ def _register_qa_seat(project, agent_type: str) -> None:
 
 
 def supervisor_argv(agent_type: str, seat: Optional[str]) -> List[str]:
-    argv = [sys.executable, "-m", "kankan", "supervisor", f"--type={agent_type}"]
+    argv = build.command("supervisor", f"--type={agent_type}")
     if seat:
         argv.append(f"--seat={seat}")
     return argv
@@ -85,7 +87,7 @@ def agent_path(path: Optional[str], paths) -> str:
     bin_dir = paths.kankan_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     wrapper = bin_dir / "kankan"
-    content = f"#!/bin/sh\nexec '{sys.executable}' -m kankan \"$@\"\n"
+    content = f"#!/bin/sh\nexec {' '.join(shlex.quote(arg) for arg in build.command())} \"$@\"\n"
     if not wrapper.exists() or wrapper.read_text() != content:
         tmp = bin_dir / f".kankan.{os.getpid()}"
         tmp.write_text(content)
@@ -188,12 +190,28 @@ def unit_path(project) -> Path:
     return Path(os.path.expanduser("~")) / ".config" / "systemd" / "user" / unit_name(project)
 
 
+# The ExecStart line of an autostart unit and its arguments; units written before kankan 0.1.7 ran
+# `<python> -m kankan up`, which imports a `kankan/` package of the working directory (the repository).
+UNIT_UP = re.compile(r"^ExecStart=.*?(?: -m kankan| \"[^\"]*\") up (.+)$", re.M)
+
+
+def unit_exec() -> str:
+    """The unit's command before ``up``: this installation's kankan, the bootstrap quoted for systemd."""
+    return f'{sys.executable} -c "{build.BOOTSTRAP}"'
+
+
+def unit_legacy(text: str) -> bool:
+    """The unit starts kankan with ``-m kankan`` (written before 0.1.7)."""
+    match = UNIT_UP.search(text)
+    return match is not None and " -m kankan up " in match.group(0)
+
+
 def unit_content(project, wanted: Dict[str, int], qa: Optional[str] = None) -> str:
     args = " ".join([f"{t}={n}" for t, n in wanted.items()] + ([f"qa={qa}"] if qa else []))
     return (f"[Unit]\nDescription=kankan agents for {project.paths.project}\nAfter=network-online.target\n\n"
             f"[Service]\nType=oneshot\nRemainAfterExit=yes\nWorkingDirectory={project.paths.repo}\n"
             f"Environment=PATH={os.environ.get('PATH', '/usr/bin:/bin')}\n"
-            f"ExecStart={sys.executable} -m kankan up {args}\n\n[Install]\nWantedBy=default.target\n")
+            f"ExecStart={unit_exec()} up {args}\n\n[Install]\nWantedBy=default.target\n")
 
 
 def _systemctl(*args: str) -> None:

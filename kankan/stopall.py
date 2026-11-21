@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -42,7 +41,7 @@ def _unit_args(project) -> Optional[str]:
         text = path.read_text()
     except OSError:
         return None
-    match = re.search(r"^ExecStart=.* -m kankan up (.+)$", text, re.MULTILINE)
+    match = agents_cmd.UNIT_UP.search(text)
     return match.group(1).strip() if match else None
 
 

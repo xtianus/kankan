@@ -109,6 +109,8 @@ Cards belong to the seat, so the new session inherits the work. A seat that is a
 
 ## 8. Processes and launcher
 
+kankan starts its own processes (the supervisor from `kankan agent`/`up`, the launcher from the supervisor, the agents' `kankan` wrapper and the autostart unit's `kankan up`) with its own interpreter and `build.command()`: `python -c` with a bootstrap that removes the current directory from `sys.path` before importing kankan, the effect of `-P` (Python 3.11+). `python -m kankan` would import a `kankan/` package of the working directory, and these processes run in the repository or a seat worktree: in kankan's own repository the launchers would run the checkout and the agent commands their worktree's copy. The launcher writes into `kankan-agent.json` the hash of its package files (`build.code_id()`), its version and its package directory; an agent command with another hash refuses with `config_error`, naming both versions and directories, and both hashes when the versions are equal. Autostart units written before 0.1.7 run `-m kankan up`: `stop`/`start` and `doctor` read both forms, and `doctor` rewrites such a generated unit keeping its `PATH`.
+
 ### 8.2 Supervisor
 
 Starts the launcher as a child. If the launcher terminates abnormally, it writes a message in the pane, waits with increasing delays and starts a new one in the same pane, up to a maximum number of restarts; beyond that, it stops leaving the error visible. If the launcher terminates normally (agent exited, `stop`), the supervisor terminates too and the tmux session closes. The new launcher recovers the seat and resumes work with convergence.

@@ -53,17 +53,22 @@ def context(cwd=None) -> AgentContext:
 
 
 def _check_code(cwd, seat: str, session: str) -> None:
-    """Refuse when this command runs different kankan code than the seat's launcher (an edit or upgrade since)."""
-    from kankan.build import code_id
+    """Refuse when this command runs different kankan code than the seat's launcher (an upgrade or an edit since,
+    or another copy of kankan): the hash compares, the versions and package directories explain."""
+    from kankan.build import identity
     from kankan.seats import read_agent_file
     data = read_agent_file(cwd or os.getcwd()) or {}
-    recorded = data.get("code")
-    if recorded and data.get("session") == session and recorded != code_id():
-        raise KankanError(Status.CONFIG_ERROR,
-                          f"kankan changed since the launcher of {seat} started (launcher code {recorded}, this "
-                          f"command {code_id()}): restart the agents (kill their tmux sessions, then `kankan up`) "
-                          "so that launcher and agent commands run the same kankan", {"launcher": recorded,
-                                                                                     "command": code_id()})
+    recorded, mine = data.get("code"), identity()
+    if not recorded or data.get("session") != session or recorded == mine["code"]:
+        return
+    theirs = {"code": recorded, "version": data.get("version") or "?", "package": data.get("package") or "?"}
+
+    def side(info: dict) -> str:
+        text = messages.CODE_SIDE.format(**info)
+        return text + f" (code {info['code']})" if theirs["version"] == mine["version"] else text
+    raise KankanError(Status.CONFIG_ERROR, messages.CODE_MISMATCH.format(seat=seat, launcher=side(theirs),
+                                                                        command=side(mine)),
+                      {"launcher": theirs, "command": mine})
 
 
 def _card_ref(ctx: AgentContext) -> Optional[RefValue]:

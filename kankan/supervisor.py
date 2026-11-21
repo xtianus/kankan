@@ -6,10 +6,11 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+
+from kankan import build
 
 MAX_RESTARTS = 5
 WINDOW_SECONDS = 600
@@ -39,7 +40,7 @@ def _seat_of_supervisor(cwd: str) -> Optional[str]:
 
 def launcher_argv(agent_type: str, seat: Optional[str]) -> List[str]:
     # The type is passed as --type=<type>: the "=" keeps airesumer from mistaking this process for an agent.
-    argv = [sys.executable, "-m", "kankan", "launcher", f"--type={agent_type}"]
+    argv = build.command("launcher", f"--type={agent_type}")
     if seat:
         argv.append(f"--seat={seat}")
     return argv

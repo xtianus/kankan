@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from kankan import agents_cmd, seats
+from kankan import agents_cmd, build, seats
 from kankan.errors import KankanError, Status
 from kankan.seatstate import load_state
 from tests.conftest import ROOT, git
@@ -80,7 +80,7 @@ def test_autostart_unit_content(project, tmp_path, monkeypatch, isolated_home):
     unit = isolated_home / ".config" / "systemd" / "user" / "kankan-up@proj.service"
     text = unit.read_text()
     assert f"WorkingDirectory={project.paths.repo}" in text
-    assert "-m kankan up claude=2 codex=1" in text and "WantedBy=default.target" in text
+    assert f'-c "{build.BOOTSTRAP}" up claude=2 codex=1\n' in text and "WantedBy=default.target" in text
     assert calls.read_text().splitlines() == ["--user daemon-reload", "--user enable kankan-up@proj.service"]
     assert warnings and "linger" in warnings[0]
     agents_cmd.autostart_disable(project)
@@ -255,7 +255,7 @@ def test_autostart_unit_with_qa(project, tmp_path, monkeypatch, isolated_home):
     monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
     agents_cmd.autostart_enable(project, {"claude": 2}, qa="codex")
     unit = isolated_home / ".config" / "systemd" / "user" / "kankan-up@proj.service"
-    assert "-m kankan up claude=2 qa=codex\n" in unit.read_text()
+    assert f'-c "{build.BOOTSTRAP}" up claude=2 qa=codex\n' in unit.read_text()
 
 
 def _drop_seeds(agent_type, roles):

@@ -277,6 +277,26 @@ def test_preflight_skipped_when_running(kproject, monkeypatch, tmux_server):
     assert agents_cmd.up(kproject, {"claude": 1, "codex": 1}, tmux=tmux_server) == []
 
 
+def test_autostart_legacy_unit_rewritten(bound, fakebin, monkeypatch):
+    """A unit generated before 0.1.7 (`-m kankan up`) is rewritten without -m and keeps its PATH."""
+    fakebin("systemctl", "true")
+    fakebin("claude")
+    unit = agents_cmd.unit_path(bound)
+    unit.parent.mkdir(parents=True)
+    path = f"Environment=PATH={os.environ['PATH']}"
+    legacy = agents_cmd.unit_content(bound, {"claude": 1})  # current PATH: nothing missing
+    legacy = legacy.replace(f"{agents_cmd.unit_exec()} up", f"{sys.executable} -m kankan up")
+    unit.write_text(legacy)
+    check = by_name(doctor.run(bound.paths.repo, fix=False, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.MANUAL and "-m kankan" in check.detail
+    check = by_name(doctor.run(bound.paths.repo, fix=True, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.FIXED and not agents_cmd.unit_legacy(unit.read_text()) and path in unit.read_text()
+    assert by_name(doctor.run(bound.paths.repo, fix=False, online=False, types=("claude",)))["autostart"].status == doctor.OK
+    unit.write_text(legacy + "# mine\n")
+    check = by_name(doctor.run(bound.paths.repo, fix=True, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.MANUAL and "-m kankan" in check.action and unit.read_text().endswith("# mine\n")
+
+
 def test_preflight_custom_adapter(kproject, fakebin):
     fakebin("my-codex")
     (kproject.paths.kankan_dir / "agents.json").write_text(json.dumps({"codex": {"command": ["my-codex"]}}))

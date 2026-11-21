@@ -159,7 +159,22 @@ def test_agent_command_refuses_other_kankan_code(agent, capsys, monkeypatch):
     assert code == 0
     monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
     code, out = run(capsys, "task")
-    assert code == 40 and out["status"] == "config_error" and "restart the agents" in out["message"]
+    assert code == 40 and out["status"] == "config_error" and "Restart the agents" in out["message"]
+    # Same version: the message adds the hashes, the only difference left.
+    assert f"kankan {build.__version__} from {build.PACKAGE}" in out["message"] and "(code 000000000000)" in out["message"]
+    assert out["data"]["command"]["code"] == "0" * 12 and out["data"]["launcher"]["package"] == str(build.PACKAGE)
+
+
+def test_code_mismatch_names_versions_and_directories(agent, capsys, monkeypatch):
+    """A launcher importing another copy of kankan (0.1.6 checkout, 0.1.5 installed): versions and directories."""
+    from kankan import build
+    project, fake, lease, task, wt, card = agent
+    monkeypatch.setattr(build, "identity", lambda: {"code": "1" * 12, "version": "0.1.6", "package": "/repo/kankan"})
+    seats.write_agent_file(project, lease.seat, lease.session, wt)
+    monkeypatch.setattr(build, "identity", lambda: {"code": "2" * 12, "version": "0.1.5", "package": "/site/kankan"})
+    code, out = run(capsys, "task")
+    assert code == 40 and "launcher runs kankan 0.1.6 from /repo/kankan, this command runs kankan 0.1.5 from " \
+        "/site/kankan." in out["message"] and "code 1" not in out["message"]
 
 
 def test_code_id_changes_with_the_code(tmp_path, monkeypatch):
