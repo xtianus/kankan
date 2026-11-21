@@ -23,7 +23,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import BinaryIO, Callable, Dict, List, Optional, Tuple, Union
 
-from kankan import clock
+from kankan import clock, messages
 from kankan.errors import KankanError, Status
 
 MARKER_PREFIX = "kankan:"
@@ -237,6 +237,12 @@ def _card(data: dict) -> Card:
                 checklists=[_checklist(c, data["id"]) for c in data.get("checklists", [])])
 
 
+def _valid_closed_row(row) -> bool:
+    return (isinstance(row, dict) and isinstance(row.get("id"), str) and bool(row["id"])
+            and isinstance(row.get("idList"), str) and bool(row["idList"]) and isinstance(row.get("idLabels"), list)
+            and all(isinstance(label, str) for label in row["idLabels"]))
+
+
 def _checkitem(data: dict) -> CheckItem:
     return CheckItem(data["id"], data.get("name", ""), data.get("state", "incomplete"), data.get("pos", 0))
 
@@ -425,8 +431,8 @@ class TrelloClient:
     def board(self, short_or_id: str) -> dict:
         return self._ok("GET", f"/1/boards/{urllib.parse.quote(short_or_id)}", {"fields": "id,name,desc,shortLink,url"})
 
-    def snapshot(self, board_id: str) -> Snapshot:
-        """One nested board read: description, all lists, open cards with attachments, labels."""
+    def _board_read(self, board_id: str) -> Tuple[object, Optional[datetime]]:
+        """The nested board read behind ``snapshot``, with every label when the first page is full."""
         params = {"fields": "name,desc", "lists": "all", "list_fields": "name,closed,pos", "cards": "open",
                   "card_fields": "name,desc,idBoard,idList,pos,idLabels,url,shortLink,closed,dateLastActivity",
                   "card_attachments": "true", "card_attachment_fields": "url", "labels": "all",
@@ -435,7 +441,18 @@ class TrelloClient:
         if response.status != 200:
             raise KankanError(Status.TRELLO_ERROR, f"Trello board read: HTTP {response.status}")
         data = response.payload
-        snap = Snapshot(board_id=data.get("id", board_id), desc=data.get("desc", ""), response_date=response.response_date)
+        if isinstance(data, dict) and isinstance(data.get("labels"), list) and len(data["labels"]) >= 1000:
+            data = dict(data, labels=self._all_labels(board_id))
+        return data, response.response_date
+
+    def board_payload(self, board_id: str) -> object:
+        """The raw payload of ``snapshot``'s read, undecoded and unvalidated, for callers that check each field."""
+        return self._board_read(board_id)[0]
+
+    def snapshot(self, board_id: str) -> Snapshot:
+        """One nested board read: description, all lists, open cards with attachments, labels."""
+        data, response_date = self._board_read(board_id)
+        snap = Snapshot(board_id=data.get("id", board_id), desc=data.get("desc", ""), response_date=response_date)
         snap.lists = {l["id"]: _tlist(l) for l in data.get("lists", [])}
         snap.cards = {c["id"]: _card(c) for c in data.get("cards", [])}
         for raw in data.get("checklists", []):
@@ -444,11 +461,43 @@ class TrelloClient:
                 card = snap.cards[checklist.card_id]
                 if not any(existing.id == checklist.id for existing in card.checklists):
                     card.checklists.append(checklist)
-        labels = data.get("labels", [])
-        if len(labels) >= 1000:
-            labels = self._all_labels(board_id)
-        snap.labels = {l["id"]: _label(l) for l in labels}
+        snap.labels = {l["id"]: _label(l) for l in data.get("labels", [])}
         return snap
+
+    def closed_cards(self, board_id: str, *, limit: int = 1000) -> List[Card]:
+        """Every archived card of the board, from one request of ``limit`` cards.
+
+        Paging ``/cards/closed`` with ``before`` loses cards on the live service (observed 2026-11-21), so there is
+        no paging: a full page (``limit`` rows or more) may hide more cards, and refuses with ``NEEDS_ACTION``."""
+        params = {"filter": "closed", "limit": str(limit), "fields": "name,idBoard,idList,idLabels,closed"}
+        rows = self._ok("GET", f"/1/boards/{board_id}/cards/closed", params)
+        if not isinstance(rows, list) or not all(_valid_closed_row(row) for row in rows):
+            raise KankanError(Status.TRELLO_ERROR, "Trello archived cards: a malformed page")
+        if len(rows) >= limit:
+            raise KankanError(Status.NEEDS_ACTION, messages.TOO_MANY_ARCHIVED_CARDS.format(limit=limit))
+        seen = {}
+        for row in rows:
+            # compared before deduplicating: two different rows under one ID make the card's place unknown
+            place = (row["idList"], frozenset(row["idLabels"]))
+            if seen.setdefault(row["id"], place) != place:
+                raise KankanError(Status.TRELLO_ERROR, "Trello archived cards: contradictory rows for one card",
+                                  {"conflict": True})
+        return list({row["id"]: _card(row) for row in rows}.values())
+
+    def card_place(self, card_id: str) -> Optional[Tuple[str, bool]]:
+        """``(idList, closed)`` of one card (C1 with ``fields=idList,closed``), ``None`` when it is gone (404).
+
+        ``kankan destroy`` reads it right before deleting the card. Any other answer, a malformed one included,
+        raises ``TRELLO_ERROR`` without the response text."""
+        status, payload = self._request("GET", f"/1/cards/{urllib.parse.quote(card_id)}", {"fields": "idList,closed"})
+        if status == 404:
+            return None
+        if status != 200:
+            raise KankanError(Status.TRELLO_ERROR, f"Trello GET card: HTTP {status}", {"status": status})
+        if not isinstance(payload, dict) or not isinstance(payload.get("idList"), str) or not payload["idList"] \
+                or not isinstance(payload.get("closed"), bool):
+            raise KankanError(Status.TRELLO_ERROR, "Trello GET card: a malformed answer")
+        return payload["idList"], payload["closed"]
 
     def _all_labels(self, board_id: str) -> list:
         result, before = [], None
@@ -722,7 +771,11 @@ class TrelloClient:
         return _card(self._ok("POST", "/1/cards", body=body, retry=False))
 
     def delete_card(self, card_id: str) -> None:
-        self._ok("DELETE", f"/1/cards/{card_id}")
+        """Delete a card; a card already gone (404) counts as deleted."""
+        status, payload = self._request("DELETE", f"/1/cards/{card_id}")
+        if status not in (200, 404):
+            raise KankanError(Status.TRELLO_ERROR, f"Trello DELETE /1/cards/{card_id}: HTTP {status}",
+                              {"status": status})
 
     def attach_link(self, card_id: str, url: str, name: str) -> Attachment:
         """Attach a link to a card (used only by the live test suite)."""

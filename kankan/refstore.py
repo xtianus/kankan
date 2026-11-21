@@ -180,6 +180,18 @@ class RefStore:
     def delete(self, ref: str, old: str) -> bool:
         return self.transaction([Delete(ref, old)])
 
+    def delete_exact(self, refs: Dict[str, str]) -> Optional[str]:
+        """Delete every ref of ``refs`` (name -> expected OID) in one ``update-ref --no-deref --stdin`` transaction:
+        a symbolic ref is never followed, and a ref whose value changed fails the whole transaction. Any name under
+        ``refs/agent-cards/`` or ``refs/agent-seats/`` is accepted (``kankan destroy`` deletes leftovers whose
+        names kankan would not write). Returns git's error text when the transaction fails, else None."""
+        for ref in refs:
+            if not ref.startswith((CARD_PREFIX, SEAT_PREFIX)):
+                raise KankanError(Status.INTERNAL_ERROR, f"not a kankan ref: {ref}")
+        lines = "start\n" + "".join(f"delete {ref} {oid}\n" for ref, oid in sorted(refs.items())) + "prepare\ncommit\n"
+        proc = gitutil.run(self.repo, ["update-ref", "--no-deref", "--stdin"], input=lines, check=False)
+        return None if proc.returncode == 0 else (proc.stderr.strip() or f"exit {proc.returncode}")
+
     def transaction(self, ops: List[Op]) -> bool:
         """Apply all ops atomically; False only on a value mismatch or a locked ref."""
         lines = ["start"]

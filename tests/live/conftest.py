@@ -19,21 +19,35 @@ from kankan.trello import TrelloClient
 MARKER = "kankan-test-board"
 
 
-def live_config():
-    """Return (board_url, key, token) or None. Reads the real HOME (not the isolated one)."""
-    url = os.environ.get("KANKAN_TEST_BOARD_URL")
+def _live_properties():
+    """The live test .properties file, loaded, or None. Reads the real HOME (not the isolated one)."""
     creds = os.environ.get("KANKAN_TEST_CREDENTIALS")
     real_home = os.environ.get("KANKAN_REAL_HOME") or os.path.expanduser("~")
     default = Path(real_home) / ".config" / "kankan" / "test.properties"
     source = Path(creds) if creds else default
-    if not source.exists():
+    return PropertiesFile.load(source) if source.exists() else None
+
+
+def _credentials_of(props):
+    if props is None:
         return None
-    props = PropertiesFile.load(source)
-    url = url or props.get("kankan.test.board.url")
     key, token = props.get("kankan.trello.key"), props.get("kankan.trello.token")
-    if not (url and key and token):
+    return (key, token) if key and token else None
+
+
+def live_credentials():
+    """Return (key, token) or None; needs no test board URL."""
+    return _credentials_of(_live_properties())
+
+
+def live_config():
+    """Return (board_url, key, token) or None. Reads the real HOME (not the isolated one), once."""
+    props = _live_properties()
+    credentials = _credentials_of(props)
+    url = os.environ.get("KANKAN_TEST_BOARD_URL") or (props.get("kankan.test.board.url") if props else None)
+    if not (url and credentials):
         return None
-    return url, key, token
+    return (url, *credentials)
 
 
 _CONFIG = live_config()
@@ -42,6 +56,21 @@ _CONFIG = live_config()
 @pytest.fixture
 def run_prefix():
     return f"kt-{int(time.time())}-{secrets.token_hex(3)}"
+
+
+@pytest.fixture
+def live_client(isolated_home, monkeypatch):
+    """A client for the live account, without selecting the shared test board: for tests that create (and
+    delete) their own disposable board. Skips without credentials. The credentials go only to
+    ``KANKAN_TRELLO_KEY``/``KANKAN_TRELLO_TOKEN`` (for the code under test), never into the fixture value, which
+    pytest prints when a test fails."""
+    credentials = live_credentials()
+    if credentials is None:
+        pytest.skip("no live Trello credentials (KANKAN_TEST_CREDENTIALS or ~/.config/kankan/test.properties)")
+    key, token = credentials
+    monkeypatch.setenv("KANKAN_TRELLO_KEY", key)
+    monkeypatch.setenv("KANKAN_TRELLO_TOKEN", token)
+    return TrelloClient(key, token)
 
 
 @pytest.fixture

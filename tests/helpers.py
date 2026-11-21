@@ -2,16 +2,19 @@
 
 import secrets
 import socket
+import subprocess
+import sys
 
+from kankan import seats
 from kankan.config import Config, Paths, save_config, write_registry_block
 from kankan.project import Project
+from tests.conftest import ROOT
 from tests.fakes.fake_trello import KEY, TOKEN
 
 
 def bind_project(repo, fake, monkeypatch=None, board=None, **cfg_overrides) -> Project:
     """Create board lists/labels on ``fake`` (unless ``board`` given) and write config.json for ``repo``."""
     if monkeypatch is not None:
-        from kankan import seats
         monkeypatch.setattr(seats, "pane_sid", lambda: None)
         monkeypatch.setenv("KANKAN_TRELLO_KEY", KEY)
         monkeypatch.setenv("KANKAN_TRELLO_TOKEN", TOKEN)
@@ -72,3 +75,40 @@ def put_card_ref(project, card_id: str, short: str, **meta):
                                    **meta})
     project.refs.create(card_ref(card_id), oid)
     return project.refs.read(card_ref(card_id))
+
+
+# A seat holder that behaves like a launcher towards stop requests: it clears the request once at start (as
+# Launcher.start does), then exits when it sees one; with "ignore" it never exits by itself.
+HOLDER = """
+import os, sys, time
+sys.path.insert(0, {root!r})
+os.environ["KANKAN_SUPERVISOR_PID"] = str(os.getpid())
+from kankan import seats
+from kankan.project import Project
+from kankan.seatstate import load_state, update_state
+project = Project.open({repo!r})
+lease = seats.acquire(project, {type!r}, seat={seat!r})
+update_state(project.paths, {seat!r}, lambda s: setattr(s, "stop_requested", False))
+print("held", flush=True)
+while True:
+    time.sleep(0.05)
+    if {mode!r} == "obey" and load_state(project.paths, {seat!r}).stop_requested:
+        seats.release(project, lease)
+        sys.exit(0)
+"""
+
+
+class NoTmux:
+    def sessions_with_option(self, option):
+        return {}
+
+    def kill_session(self, name):
+        pass
+
+
+def hold(project, seat, mode="obey"):
+    proc = subprocess.Popen([sys.executable, "-c", HOLDER.format(root=str(ROOT), repo=str(project.paths.repo),
+                                                                type=seats.seat_type(seat), seat=seat, mode=mode)],
+                            start_new_session=True, stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"
+    return proc

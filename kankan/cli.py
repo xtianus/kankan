@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from kankan import __version__, auditlog
+from kankan import __version__, auditlog, messages
 from kankan.errors import KankanError, Status, envelope
 
 HIDDEN = argparse.SUPPRESS
@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--graceful", action="store_true", help="wait for each agent to finish its current task")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     add("start", "start again what the last `kankan stop` stopped (agents and autostart)")
+    p = add("destroy", messages.DESTROY_COMMAND_HELP)
+    p.add_argument("--confirm", action="append", default=[], metavar="PHRASE",
+                   help=messages.DESTROY_CONFIRM_HELP)
     p = add("adapter", "adapter tools")
     p.add_argument("action", choices=["check"])
     p.add_argument("target", help="a seat (e.g. claude-1) or a file with a saved screen")
@@ -163,9 +166,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] in ("supervisor", "launcher"):
         return _internal(argv)
     as_json = "--json" in argv
+    command = None
     try:
         parser = build_parser()
-        args = parser.parse_args(argv)
+        try:
+            args = parser.parse_args(argv)
+        except KankanError as err:
+            if "destroy" in argv and err.status == Status.USAGE_ERROR:
+                # argparse would echo the arguments, and an unquoted --confirm phrase holds the board name
+                raise KankanError(Status.USAGE_ERROR, messages.DESTROY_USAGE) from None
+            raise
+        command = args.command
         if not args.command:
             parser.print_help()
             return Status.USAGE_ERROR.exit_code
@@ -182,7 +193,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         raise
     except Exception as err:  # noqa: BLE001 - every unexpected error becomes internal_error
-        _log_internal(err)
+        if command != "destroy":  # destroy must leave the project untouched until it is confirmed
+            _log_internal(err)
         out = envelope(KankanError(Status.INTERNAL_ERROR, f"internal error: {type(err).__name__}: {err}"))
         code = Status.INTERNAL_ERROR.exit_code
     if as_json:
@@ -427,6 +439,34 @@ def _cmd_start(args):
     for warning in report["warnings"]:
         print(f"warning: {warning}", file=sys.stderr)
     return report, stopall.start_text(report)
+
+
+@command("destroy")
+def _cmd_destroy(args):
+    from kankan import destroy
+    from kankan.tmux import Tmux
+    ctx = destroy.Ctx.open(os.getcwd())
+
+    def ask(prompt: str) -> Optional[str]:
+        if not sys.stdin.isatty():
+            phrases = {
+                messages.DESTROY_ASK_DISCARD.format(phrase=destroy.DISCARD_PHRASE): destroy.DISCARD_PHRASE,
+                messages.DESTROY_ASK_LOCAL.format(phrase=destroy.LOCAL_PHRASE): destroy.LOCAL_PHRASE,
+                messages.DESTROY_ASK_BOARD: messages.DESTROY_QUESTION_BOARD,
+            }
+            raise KankanError(Status.USAGE_ERROR, messages.DESTROY_NEEDS_TERMINAL.format(phrase=phrases[prompt]))
+        print(prompt, end="", file=sys.stderr, flush=True)
+        try:
+            return input()
+        except (KeyboardInterrupt, EOFError):
+            print(file=sys.stderr)
+            return None
+
+    def say(text: str) -> None:
+        print(text, file=sys.stderr, flush=True)
+
+    report = destroy.destroy(ctx, tmux=Tmux(), ask=ask, say=say, confirm=args.confirm)
+    return report, destroy.report_text(report)
 
 
 def _project():
