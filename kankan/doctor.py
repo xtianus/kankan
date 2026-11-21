@@ -351,7 +351,7 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     problems = account_warnings(project.trello, cfg)
     if problems:
         checks.append(Check("notifications", MANUAL, problems[0],
-                            "give kankan its own Trello account (user manual §3.1), invite it to the board, then "
+                            "give kankan its own Trello account (user manual §1.3), invite it to the board, then "
                             "kankan init --reauth"))
     else:
         checks.append(Check("notifications", OK, f"kankan acts as @{cfg.kankan_username}; it mentions each card's "

@@ -221,7 +221,7 @@ def account_warnings(client: TrelloClient, cfg: Config) -> List[str]:
         u = cfg.kankan_username
         return [f"the Trello token belongs to @{u}, an admin of this board: kankan treats every comment of its token's "
                 f"owner as its own, so @{u}'s answers would never reach the agents and @{u} would get no notifications. "
-                "Give kankan its own Trello account (user manual §3.1), then `kankan init --reauth`"]
+                "Give kankan its own Trello account (user manual §1.3), then `kankan init --reauth`"]
     if not admins:
         return ["the board has no admin other than kankan: nobody is notified about the cards kankan creates"]
     return []

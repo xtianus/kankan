@@ -312,8 +312,8 @@ For the old behaviour (agents integrate straight into `main`) answer `main` at `
 ```bash
 kankan status             # seats (alive, free, dead, unavailable), launcher state, current task, waiting cards, the Q&A agent
 kankan claims             # card refs: phase, holder, age, branch
-kankan doctor             # installation and project checks, fixes and manual steps (§15.5); --no-fix, --offline
-kankan reconcile          # report inconsistencies, including attachment directories of cards no longer in progress (§15.3)
+kankan doctor             # installation and project checks, fixes and manual steps; --no-fix, --offline
+kankan reconcile          # report inconsistencies, including attachment directories of cards no longer in progress
 kankan reconcile --fix    # repair only the certain cases; also removes those attachment directories
 kankan adapter check claude-1         # how kankan reads that agent's screen
 kankan adapter check saved-screen.txt --type codex
@@ -403,7 +403,7 @@ kankan seat remove <seat>            # only if free, holding no cards and with e
 kankan purge-remote [--remote origin]  # delete refs/agent-* pushed by mistake
 ```
 
-- **`kankan release <card> --force`** takes a card away from the seat that holds it (its ref is parked), without moving the card. A card with a parked ref can be implemented again when it is in `Backlog` and reviewed again when it is in an `Implemented` list. Use it when `kankan claims` shows a card held by a seat that will not finish it, for example a seat you cannot bring back, and you want other agents to be able to take the card; `kankan reconcile` reports what is left inconsistent.
+- **`kankan release <card> --force`** takes a card away from the seat that holds it (its ref is parked) and leaves the card where it is, with a comment. Use it when `kankan claims` shows a card held by a seat that will not finish it, for example a seat you cannot bring back, and you want other agents to take the card. Nothing moves a released card for you, and since no seat holds it any more the golden rule ([section 5.2](#52-task-cards)) no longer applies to it: move it yourself to `Backlog` to have it implemented again. A released card in an `Implemented` list stays there and can be reviewed again by an agent of the other type.
 - **`kankan seat recover <seat> [--kill]`** frees a seat whose agent is alive but stuck: kankan does not recover such a seat by itself, and the card shows it with `Error` after `idle_ready_minutes` of inactivity. Look at its tmux session first; when the agent cannot be brought back there, recover the seat. Its session loses the seat and the cards it held get a comment; start the agent again (`kankan up` or `kankan agent <type> --seat <seat>`) and it continues them. `--kill` first terminates the seat's tmux session and its processes; use it unless you have closed that session yourself, since `kankan agent --seat` refuses a seat whose tmux session is still open. A dead seat (its tmux session is gone) needs none of this: the next `kankan up` or `kankan agent` recovers it.
 - **`kankan seat remove <seat>`** deletes a seat you no longer need, for example after reducing the number of agents of a type for good: its lists are archived, it is removed from the configuration and its worktree is deleted if clean. Stop its agent and let its lists empty first. For the Q&A seat (`<type>-qa`), use it when you no longer want a Q&A agent; its conversation ends.
 - **`kankan purge-remote [--remote origin]`** deletes the card claims (`refs/agent-*`) from a remote after they were pushed there by mistake, for example with `git push --mirror` or a push of all refs. They belong only in the clone ([section 9.5](#95-moving-a-board-to-another-clone)).
