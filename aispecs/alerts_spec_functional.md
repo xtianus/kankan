@@ -2,7 +2,7 @@
 
 **Status:** specified, not implemented.
 **Date:** 2026-11-22
-**Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md), [`cardinstructions_spec_functional.md`](cardinstructions_spec_functional.md) and [`questions_spec_functional.md`](questions_spec_functional.md); this feature changes them as listed in [§6](#6-changes-to-the-initial-specification), [§7](#7-changes-to-the-board-settings-specification) and [§8](#8-changes-to-the-card-instructions-specification).
+**Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md), [`cardinstructions_spec_functional.md`](cardinstructions_spec_functional.md) and [`questions_spec_functional.md`](questions_spec_functional.md); this feature changes them as listed in [§6](#6-changes-to-the-initial-specification), [§7](#7-changes-to-the-board-settings-specification), [§8](#8-changes-to-the-card-instructions-specification) and [§9](#9-changes-to-the-questions-specification).
 **Companion:** [`alerts_spec_technical.md`](alerts_spec_technical.md) — how kankan implements this feature.
 **Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (revised when the feature is implemented, [technical §8](alerts_spec_technical.md#8-trello-usage)).
 
@@ -48,7 +48,7 @@ Problems of one card are still reported on that card (`Error`, `Question`, `Bloc
 
 **No floods.** A launcher restarted by its supervisor, or an agent that keeps running commands, can meet the same problem many times. The same alert (same alert type, same seat or command, same problem text) is posted **at most once every 24 hours** (`alert_repeat_hours` in the project configuration). A different text is a different alert: for example a different version in A5.
 
-**Never in the way.** Posting an alert never changes what kankan does: the launcher still exits with the same code, the supervisor still restarts it, the agent command still refuses, `kankan up` still fails. When the alert cannot be posted (Trello unreachable, credential refused, `kankan` list missing or archived), it is only recorded in the audit log; it is not posted later. Posting adds at most a few seconds to the exit.
+**Never in the way.** Posting an alert never changes what kankan does: the launcher still exits with the same code, the supervisor still restarts it, the agent command still refuses, `kankan up` still fails. When the alert cannot be posted (Trello unreachable, credential refused, `kankan` list missing or archived), it is only recorded in the audit log; it is not posted later. Posting adds at most 15 seconds to the exit, waiting for another process's post included.
 
 ## 4. What the user does
 
@@ -88,20 +88,26 @@ How this feature changes [`cardinstructions_spec_functional.md`](cardinstruction
 
 **§6 The `Instructions` card.** Replace "kept by kankan as the **first card of the list**, above the setting cards" with "kept by kankan as the **second card of the list**, after the `Alerts` card ([alerts §2](alerts_spec_functional.md#2-the-alerts-card)) and above the setting cards".
 
-## 9. Acceptance tests
+## 9. Changes to the questions specification
+
+How this feature changes [`questions_spec_functional.md`](questions_spec_functional.md). That file is not edited.
+
+**§6, row "`Q&A` list archived or deleted".** Add: "When the Q&A seat stops, alert A1 on the `Alerts` card ([alerts §3](alerts_spec_functional.md#3-alerts)); the other seats post nothing."
+
+## 10. Acceptance tests
 
 1. A launcher stopping on a configuration problem (the `Q&A` list archived under a running Q&A seat) posts A1 on the `Alerts` card, mentioning the board's admins; the launcher's exit code and the supervisor's behaviour are unchanged.
 2. A launcher failing with an internal error posts A2; its supervisor restarts it; the same failure after the restart posts nothing new within 24 hours; a failure with a different message posts again.
 3. After 5 failures in 10 minutes, the supervisor posts A3.
 4. An agent command running a different kankan than its launcher refuses with `config_error` and posts A5 with both versions and directories; a second command with the same mismatch posts nothing new.
 5. With the `Alerts` card archived, the next alert creates a new `Alerts` card at the top of the `kankan` list.
-6. With Trello unreachable, an alert is recorded only in the audit log, and the launcher exits with the code it had without this feature, after at most a few seconds more.
+6. With Trello unreachable, an alert is recorded only in the audit log, and the launcher exits with the code it had without this feature, after at most 15 seconds more.
 7. `kankan doctor` creates a missing `Alerts` card, rewrites an edited description and restores the order `Alerts`, `Instructions`, setting cards; `--no-fix` reports each and writes nothing.
 8. A card named `Alerts` is not an unknown setting; two of them get `Error`.
 9. `kankan up` run without a terminal with a missing agent CLI posts A6; run from a terminal it posts nothing.
 10. After 50 alerts, the oldest of kankan's comments on the card are deleted.
 
-## 10. Out of scope
+## 11. Out of scope
 
 - Alerts while Trello is unreachable or the credential is refused, and posting them later.
 - A "resolved" comment when a problem goes away, or an `Error` label on the `Alerts` card while problems are open.
