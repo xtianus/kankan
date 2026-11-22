@@ -87,6 +87,17 @@ CODE_MISMATCH = ('this command runs a different kankan than the {seat} launcher:
                  'command runs kankan {command}. Restart the agents (`kankan stop`, then `kankan start`) so that they '
                  'run the same kankan')
 CODE_SIDE = '{version} from {package}'
+GRACEFUL_OTHER_CODE = ('kankan was upgraded or changed since these agents started: {seats}; this command runs '
+                       'kankan {command}. Their agents could not finish their current task (this kankan refuses '
+                       'their commands), so --graceful would wait for ever. Nothing was changed. Run '
+                       '`kankan stop` without --graceful: it quits them now and their work resumes at the next start, '
+                       'with `kankan start`')
+GRACEFUL_OTHER_SEAT = '{seat} runs kankan {side}'
+STOP_SEAT_OTHER_CODE = ('kankan was upgraded or changed since this agent started: {seats}; this command runs kankan '
+                        '{command}. The agent could not finish its current task (this kankan refuses its commands), '
+                        'so it would never stop. Nothing was changed. Run `kankan stop` to quit every agent now (their '
+                        'work resumes at the next start, with `kankan start`), or `kankan seat recover <seat> --kill` '
+                        'to quit only this one, then start its agent again')
 SEEDS_STALE = 'The saved {type} {role} seed {model} · {effort} is no longer in the agent\'s model list: choose another.'
 SEEDS_SAVED = '{role}: {type} {pair} (seed saved in {path})'
 SETTINGS_APPLIED = 'applied: `{old}` → `{new}`, from the next task'

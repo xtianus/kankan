@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 from kankan import agents_cmd, clock, messages, seats
 from kankan.config import atomic_write_json, read_json
 from kankan.errors import KankanError, Status
+from kankan.refstore import seat_ref
 from kankan.seatstate import load_state, update_state
 from kankan.tmux import Tmux, session_name
 
@@ -128,6 +129,39 @@ def _quit_now(project, tmux: Tmux, alive: List[str], report: dict) -> None:
         report["sessions_closed"].append(name)
 
 
+def _launcher_code(project, seat: str) -> Optional[dict]:
+    """The kankan code the seat's current launcher records in the seat file; None without a verdict."""
+    value = project.refs.read(seat_ref(seat))
+    try:
+        data = seats.read_agent_file(project.paths.seat_worktree(seat))
+    except (OSError, ValueError):
+        return None
+    if value is None or not isinstance(data, dict) or not data.get("code") \
+            or data.get("session") != value.meta.get("session"):
+        return None  # no agent started yet, or the file of an earlier launcher
+    return {"seat": seat, "code": data["code"], "version": data.get("version") or "?",
+            "package": data.get("package") or "?"}
+
+
+def refuse_other_code(project, alive: List[str], template: str = messages.GRACEFUL_OTHER_CODE) -> None:
+    """A stop that waits for the agents of ``alive`` to finish their task never ends when a different kankan
+    refuses their commands: ``usage_error`` naming those seats (stopall F§1, F§2)."""
+    from kankan.build import identity
+    mine = identity()
+    others = [rec for seat in alive if (rec := _launcher_code(project, seat)) and rec["code"] != mine["code"]]
+    if not others:
+        return
+
+    def side(info: dict, with_code: bool) -> str:  # the hashes only when the versions cannot tell the sides apart
+        text = messages.CODE_SIDE.format(**info)
+        return text + f" (code {info['code']})" if with_code else text
+    seats_text = ", ".join(messages.GRACEFUL_OTHER_SEAT.format(
+        seat=o["seat"], side=side(o, o["version"] == mine["version"])) for o in others)
+    command = side(mine, any(o["version"] == mine["version"] for o in others))
+    raise KankanError(Status.USAGE_ERROR, template.format(seats=seats_text, command=command),
+                      {"seats": others, "command": mine})
+
+
 def describe(project, inv: Inventory, graceful: bool = False) -> str:
     lines = ["kankan stop will:"]
     if inv.alive:
@@ -177,6 +211,8 @@ def stop_all(project, *, graceful: bool = False, confirm: Callable[[str], bool],
     if inv.nothing_to_stop():
         project.log("stop_all", nothing=True)
         return dict(base, nothing_to_stop=True, restart=restart_commands(load_record(project.paths)))
+    if graceful:
+        refuse_other_code(project, inv.alive)
     if not confirm(describe(project, inv, graceful) + "\nProceed? [y/N] "):
         return {"cancelled": True}
     report = dict(base)

@@ -210,3 +210,81 @@ def test_stop_quits_a_working_launcher(tmux_project, fake_trello):
     assert report["stopped"] == ["claude-1"] and report["remaining"] == []
     assert not [s for s in server.sessions() if s.startswith("ai-proj-")]
     assert project.refs.read(card_ref(card["id"])).meta["owner"] == "claude-1"
+
+
+def record_launcher_code(project, seat, session=None):
+    """The seat file a launcher writes when it starts its agent, for the seat ref's session by default."""
+    session = session or project.refs.read(seats.seat_ref(seat)).meta["session"]
+    seats.write_agent_file(project, seat, session, project.paths.seat_worktree(seat))
+
+
+def test_graceful_refuses_agents_of_another_kankan(kproject, holders, systemctl, monkeypatch):
+    """After an upgrade the agents' commands are refused, so they could never finish: --graceful refuses (F§2.2)."""
+    from kankan import build
+    unit = install_unit(kproject)
+    holders += [hold(kproject, "claude-1"), hold(kproject, "codex-1")]
+    record_launcher_code(kproject, "claude-1")
+    monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
+    asked = []
+    with pytest.raises(KankanError) as exc:
+        run(kproject, graceful=True, confirm=lambda text: asked.append(text) or True)
+    assert exc.value.status == Status.USAGE_ERROR and asked == []
+    message = exc.value.message
+    assert "claude-1 runs kankan" in message and "codex-1" not in message  # codex-1 started no agent yet
+    assert "without --graceful" in message and "kankan start" in message
+    assert f"kankan {build.__version__} from {build.PACKAGE} (code 000000000000)" in message
+    assert [seat["seat"] for seat in exc.value.data["seats"]] == ["claude-1"]
+    assert exc.value.data["command"]["code"] == "0" * 12
+    # nothing changed
+    assert unit.exists() and stopall.load_record(kproject.paths) is None
+    assert not load_state(kproject.paths, "claude-1").stop_requested
+    assert seats.liveness(kproject, "claude-1") == "alive"
+    # the immediate stop still works
+    report, _, _ = run(kproject)
+    assert sorted(report["stopped"]) == ["claude-1", "codex-1"]
+
+
+def test_graceful_ignores_the_seat_file_of_an_earlier_launcher(kproject, holders, monkeypatch):
+    from kankan import build
+    holders.append(hold(kproject, "claude-1"))
+    record_launcher_code(kproject, "claude-1", session="earlier-session")
+    monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
+    report, _, _ = run(kproject, graceful=True)
+    assert report["stopped"] == ["claude-1"]
+
+
+def test_graceful_with_the_same_kankan_stops(kproject, holders):
+    holders.append(hold(kproject, "claude-1"))
+    record_launcher_code(kproject, "claude-1")
+    report, _, _ = run(kproject, graceful=True)
+    assert report["stopped"] == ["claude-1"]
+
+
+def test_stop_seat_refuses_an_agent_of_another_kankan(kproject, holders, monkeypatch, capsys):
+    """`kankan stop <seat>` also waits for the task to end: refused when the agent runs another kankan (F§1)."""
+    from kankan import build
+    holders += [hold(kproject, "claude-1", mode="ignore"), hold(kproject, "codex-1", mode="ignore")]
+    record_launcher_code(kproject, "claude-1")
+    record_launcher_code(kproject, "codex-1")
+    monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
+    record_launcher_code(kproject, "codex-1")  # codex-1 was restarted after the upgrade
+    monkeypatch.chdir(kproject.paths.repo)
+    assert cli.main(["stop", "claude-1"]) == Status.USAGE_ERROR.exit_code
+    err = capsys.readouterr().err
+    assert "claude-1 runs kankan" in err and "kankan seat recover claude-1 --kill" in err
+    assert not load_state(kproject.paths, "claude-1").stop_requested
+    assert cli.main(["stop", "codex-1"]) == 0
+    assert load_state(kproject.paths, "codex-1").stop_requested
+
+
+def test_stop_of_a_stopped_seat_is_not_checked(kproject, monkeypatch):
+    from kankan import build
+    holder = hold(kproject, "claude-1")
+    record_launcher_code(kproject, "claude-1")
+    update_state(kproject.paths, "claude-1", lambda s: setattr(s, "stop_requested", True))
+    assert holder.wait(10) == 0
+    monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
+    monkeypatch.chdir(kproject.paths.repo)
+    update_state(kproject.paths, "claude-1", lambda s: setattr(s, "stop_requested", False))
+    assert cli.main(["stop", "claude-1"]) == 0
+    assert load_state(kproject.paths, "claude-1").stop_requested
