@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 from kankan import (boardconfig, boardsettings, cardsections, cardsections_feedback, gitutil, labels, messages, modelcheck,
                     qa, worktrees)
 from kankan.adapters import adapter_types
-from kankan.cards import CardMeta, Phase, converge, parse_refs, target_list_for, transition
+from kankan.cards import CardMeta, Phase, converge, implemented_destination, parse_refs, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import CARD_PREFIX, RefValue
@@ -114,14 +114,22 @@ def backlog_candidates(project, snap: Snapshot, refs: Dict[str, RefValue]) -> Li
 
 def choose(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue], skip: Optional[Set[str]] = None
            ) -> Optional[Choice]:
-    """Priority (§9.1): own work, then review, then Backlog from the top."""
+    """Priority (§9.1): own work, then review, then Backlog from the top; a seat being removed takes only its own
+    work (seat T§5)."""
     skip = skip or set()
-    for group in (_own_choices(project, lease, snap, refs), review_candidates(project, lease, snap, refs),
-                  backlog_candidates(project, snap, refs)):
-        for choice in group:
+    groups = [lambda: _own_choices(project, lease, snap, refs)]
+    if not _removing(project.cfg, lease.seat):
+        groups += [lambda: review_candidates(project, lease, snap, refs), lambda: backlog_candidates(project, snap, refs)]
+    for group in groups:
+        for choice in group():
             if choice.card.id not in skip:
                 return choice
     return None
+
+
+def _removing(cfg, seat: str) -> bool:
+    seat_cfg = cfg.seats.get(seat)
+    return seat_cfg is not None and bool(seat_cfg.removing)
 
 
 def _check_sections(project, card: Card) -> None:
@@ -224,10 +232,12 @@ def claim_review(project, lease: Lease, choice: Choice, pair=None) -> Optional[C
         seat=lease.seat, branch=meta.branch, implementer=meta.implementer) + _claim_selection(lease, pair, "review"))
     fresh = project.trello.card(card.id)
     if fresh is not None and has_hold(project, fresh):
-        back = CardMeta.from_dict(result.ref.meta).evolve(
-            phase=Phase.IMPLEMENTED.value, owner=None, session=None,
-            target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None, meta.implementer))
-        transition(project, lease, card, result.ref, back, messages.HOLD_AFTER_CLAIM_REVIEW)
+        with project_lock(project.paths):  # seat T§3: the destination of this moment
+            phase, target, cause = implemented_destination(project.reload_config(), meta.implementer)
+            back = CardMeta.from_dict(result.ref.meta).evolve(phase=phase, owner=None, session=None, cause=cause,
+                                                               target_list=target)
+            transition(project, lease, card, result.ref, back, messages.HOLD_AFTER_CLAIM_REVIEW
+                       if phase == Phase.IMPLEMENTED.value else messages.HOLD_AFTER_CLAIM_REVIEW_BACKLOG)
         return None
     worktrees.checkout(worktree, meta.branch)
     return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
@@ -294,8 +304,11 @@ def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[d
                 fresh = project.trello.snapshot(cfg.board_id)
                 check_registry(cfg, fresh.desc)
                 current_refs = card_refs(project)
-                # Recheck eligibility after any outside-lock model check.
-                candidates = _own_choices(project, lease, fresh, current_refs) + review_candidates(project, lease, fresh, current_refs) + backlog_candidates(project, fresh, current_refs)
+                # Recheck eligibility after any outside-lock model check; the flag of a removal is written by
+                # another process, so the configuration is read again here (seat T§5).
+                candidates = _own_choices(project, lease, fresh, current_refs)
+                if not _removing(project.reload_config(), lease.seat):
+                    candidates += review_candidates(project, lease, fresh, current_refs) + backlog_candidates(project, fresh, current_refs)
                 updated = next((candidate for candidate in candidates if candidate.card.id == choice.card.id and candidate.kind == choice.kind), None)
                 if updated is None:
                     continue

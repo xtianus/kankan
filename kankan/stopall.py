@@ -61,7 +61,7 @@ def _args_from_seats(project, alive: List[str]) -> str:
     qa = None
     for name in alive:
         seat_cfg = cfg.seats.get(name)
-        if seat_cfg is None:
+        if seat_cfg is None or seat_cfg.removing:  # seat T§5: never restarted for its count
             continue
         if seat_cfg.role == "qa":
             qa = seat_cfg.type

@@ -391,7 +391,7 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
         checks.append(Check("labels", FIXED, f"recreated {', '.join(missing)}"))
         checks.append(Check("labels-restart", WARN, "running launchers read label IDs at startup; a recreated HOLD "
                             "does not restore which cards were held",
-                            "restart the agents (kankan stop <seat>, then kankan up …)"))
+                            "restart the agents (kankan seat stop <seat>, then kankan seat start <seat>)"))
     checks += settings_checks(project, fix=fix, online=True)
     issues = diag.reconcile(project, record=fix)
     stranded = [i for i in issues if i.kind in ("card_without_ref", "blocked_without_ref")]

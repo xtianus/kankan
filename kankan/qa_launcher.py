@@ -61,13 +61,14 @@ class QaLauncher(Launcher):
         self.end_pending: Optional[str] = None  # a handoff/yield signal whose end failed: retried
         self.next_end_retry = 0.0
         self.restart_wording = False  # taken up without a prompt: the next delivery uses QA_RESTART_FOLLOWUP
+        self.clear_before_followup = False  # seat F§4: a silent start could not clear the agent's conversation
 
     # ------------------------------------------------------------------ hooks
     def acquire(self, pids: dict):
         """Complete a replacement of another type's Q&A seat by this one, if one is registered (questions T§2), then
         occupy the seat; a relaunched replaced seat is refused by ``acquire_qa`` (``FATAL_EXIT``)."""
         qa.replace_seat(self.project, self.type, initiate=False)
-        return seats.acquire_qa(self.project, self.type, pids)
+        return seats.acquire_qa(self.project, self.type, pids, create=not seats.existing_only())
 
     def own_roles(self):
         return ('questions',)
@@ -114,7 +115,10 @@ class QaLauncher(Launcher):
             return self.exit_now
         self.track_limit(cls)
         if self.state == "limited":
-            return self.exit_now or (self.stop_requested() and not self.task)
+            return self.exit_now or ((self.stop_requested() or self.removal_drained()) and not self.task)
+        if self.removal_drained():
+            self.log("seat_drained")
+            return True
         if self.state == "idle":
             return self.idle(cls)
         self.periodic_board_check()
@@ -125,6 +129,14 @@ class QaLauncher(Launcher):
         if self.state == "closing":
             self.closing(cls)
         return self.exit_now
+
+    def removal_drained(self) -> bool:
+        """seat T§5: a Q&A seat being removed gracefully exits once no turn runs and no answer is pending; a pending
+        answer is completed first (the take-up of ``idle`` does it), also after a launcher restart."""
+        from kankan import seatremove
+        if self.state not in ("idle", "qa_waiting", "limited") or self.removing_mode() != "graceful":
+            return False
+        return not seatremove.has_work(self.project, self.lease.seat)
 
     # ------------------------------------------------------------------ idle: claim the top card
     def idle(self, cls: Classification) -> bool:
@@ -343,7 +355,10 @@ class QaLauncher(Launcher):
             turn = qa.read_turn(self.project.paths, task["conversation"])
             context = None
             if turn is None and not ref_covered:  # a crash between the claim and the first turn
-                inputs, context = qa.first_turn(self.project, card, comments)
+                inputs, context, answered = qa.first_turn(self.project, card, comments)
+                if answered and not inputs.comments and not inputs.attachments:
+                    self.start_silently(cls, task, context)
+                    return
             else:
                 inputs = qa.uncovered(cands, qa.effective_covered(ref_covered, turn))
             if ref_covered and not inputs.comments and not inputs.attachments:
@@ -354,13 +369,37 @@ class QaLauncher(Launcher):
                 return
             self.pending_writes = [messages.QA_RESTART.format(turn=token)]
         else:
-            inputs, context = qa.first_turn(self.project, card, comments)
+            inputs, context, answered = qa.first_turn(self.project, card, comments)
+            if answered and not inputs.comments and not inputs.attachments:
+                self.start_silently(cls, task, context)
+                return
             token = self.begin_turn(inputs, context)
             if token is None:
                 return
             self.pending_writes = ([] if self.cleared else [self.adapter.new_conversation]) \
                 + [messages.QA_PROMPT.format(turn=token)]
         self.flush_assignment(cls)
+
+    def start_silently(self, cls: Classification, task: dict, context: qa.Inputs) -> None:
+        """seat F§4: a card taken again whose latest answer is complete and has nothing new waits without a
+        prompt, as after a restart; its old thread is recorded as covered, and the agent's previous conversation is
+        cleared now, or before the next follow-up when the pane cannot be written yet."""
+        try:
+            qa.record_covered(self.project, self.lease, task, context)
+        except KankanError as err:
+            self.log("qa_record_covered_failed", status=err.status.value, error=err.message)
+            if err.status == Status.NOT_OWNER:
+                self.end_conversation("ended", turn_running=False)
+            else:
+                self.task = None  # taken up again at the next tick
+            return
+        self.wait_after_restart(task)
+        if not self.cleared:
+            if self.can_write(cls):
+                self.paste(self.adapter.new_conversation)
+                self.cleared = True
+            else:
+                self.clear_before_followup = True
 
     def wait_after_restart(self, task: dict) -> None:
         """A taken-up conversation whose latest answer covers everything: no prompt and no comment; the next
@@ -588,6 +627,10 @@ class QaLauncher(Launcher):
             self.recompute = True
         if settled is not None:
             return  # what was completed changes the follow-ups: recomputed at the next poll, or still posting
+        if self.clear_before_followup:  # seat F§4: the previous card's conversation goes first
+            self.paste(self.adapter.new_conversation)
+            self.clear_before_followup = False
+            return  # the follow-up is delivered at the next poll
         token = self.begin_turn(inputs)
         if token is None:
             return

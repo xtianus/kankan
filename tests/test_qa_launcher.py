@@ -912,7 +912,7 @@ def test_stop_in_qa_waiting_keeps_the_conversation_until_the_next_start(chain, m
     assert wait_for(lambda: with_text(env, card, "first answer") and state(env) == "qa_waiting", timeout=40)
     conversation = ref_meta(env, card)["conversation"]
     monkeypatch.chdir(env.project.paths.repo)
-    assert cli.main(["stop", SEAT]) == 0
+    assert cli.main(["seat", "stop", SEAT]) == 0
     assert wait_for(lambda: not env.tmux.has_session(seat_session(env.project, SEAT)), timeout=30)
     assert ref_meta(env, card)["phase"] == "qa" and ref_meta(env, card)["conversation"] == conversation
     assert load_state(env.project.paths, SEAT).task["conversation"] == conversation
@@ -945,3 +945,159 @@ def test_usage_limit_sets_resume_and_follow_ups_wait_for_the_resumption(chain):
     assert wait_for(lambda: with_text(env, card, "second answer"), timeout=40)
     assert prompts(log)[1] == messages.QA_FOLLOWUP.format(counts="1 comment", turn=tokens(log)[1])
     assert not resume_labels()
+
+
+# ---------------------------------------------------------------------- seat T§5: the Q&A seat removed gracefully
+
+def _mark_removing(env, mode="graceful"):
+    from kankan.config import save_config
+    cfg = env.project.reload_config()
+    cfg.seats[SEAT].removing = mode
+    save_config(env.project.paths, cfg)
+
+
+def test_removal_drained_waits_for_a_pending_answer(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    first = make_launcher(env)
+    task = claimed(env, first, card)
+    token = first.begin_turn(qa.Inputs([], []))
+    env.monkeypatch.setenv("KANKAN_FAULT", "qa_after_chunk")
+    with pytest.raises(faults.SimulatedCrash):
+        qa_answer.answer(agent_ctx(env.project, env.lease, env.monkeypatch), "part one\n\n" + "x" * 20000, token)
+    env.monkeypatch.delenv("KANKAN_FAULT")
+    _mark_removing(env)
+    first.state = "qa_waiting"
+    assert not first.removal_drained()  # the answer is still being posted
+    launcher = restarted(env)  # completes the pending answer first
+    assert not (qa.conversation_dir(env.project.paths, task["conversation"]) / "pending.json").exists()
+    assert launcher.tmux.pasted == []  # the completed answer covers everything: no new prompt
+    launcher.state = "qa_waiting"
+    assert launcher.removal_drained()
+
+
+def test_removal_drained_only_for_a_graceful_removal(unit):
+    env = unit
+    launcher = make_launcher(env)
+    launcher.state = "qa_waiting"
+    assert not launcher.removal_drained()
+    _mark_removing(env)
+    assert launcher.removal_drained()
+    launcher.state = "working"
+    assert not launcher.removal_drained()
+
+
+def test_graceful_removal_exits_after_the_current_turn(chain):
+    from kankan import seatremove
+    env = chain
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    start(env, [answer("first answer")])
+    assert wait_for(lambda: with_text(env, card, "first answer") and state(env) == "qa_waiting", timeout=40)
+    report = seatremove.remove(env.project, SEAT, graceful=True, confirm=lambda text: False, say=lambda text: None,
+                               poll=0.2)
+    assert report["seat"] == SEAT and SEAT not in env.project.reload_config().seats
+    assert ref_meta(env, card) is None and env.fake.card_list(card["id"]) == env.qa_list
+
+
+# ---------------------------------------------------------------------- seat F§4: a card taken again with nothing new
+
+OP = "qa-0123456789abcdef-0123456789abcdef-{n}"
+
+
+def _old_answer(env, card, text="the old answer", n=1):
+    """An answer of an earlier conversation, posted by kankan's account with the answer marker."""
+    return env.project.trello.add_comment(card["id"], text, OP.format(n=n))
+
+
+def test_first_turn_answered_complete(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card)
+    fresh = env.project.trello.card(card["id"])
+    inputs, context, answered = qa.first_turn(env.project, fresh, env.project.trello.comments(card["id"]))
+    assert answered and inputs == qa.Inputs([], [])
+
+
+def test_first_turn_partial_answer_not_answered(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card, "1/3\n\npart one")
+    fresh = env.project.trello.card(card["id"])
+    assert qa.first_turn(env.project, fresh, env.project.trello.comments(card["id"]))[2] is False
+    _old_answer(env, card, "3/3\n\npart three", n=3)
+    assert qa.first_turn(env.project, fresh, env.project.trello.comments(card["id"]))[2] is True
+
+
+def test_first_turn_handoff_counts_as_answered(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    env.project.trello.add_comment(card["id"], "summary", "qh-0123456789abcdef-0123456789abcdef-1")
+    fresh = env.project.trello.card(card["id"])
+    assert qa.first_turn(env.project, fresh, env.project.trello.comments(card["id"]))[2] is True
+
+
+def test_new_conversation_nothing_new_sends_no_prompt(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    question = env.fake.user_comment(card["id"], "and X?")["id"]
+    _old_answer(env, card)
+    launcher = make_launcher(env)
+    claimed(env, launcher, card)
+    launcher.open_conversation(READY)
+    assert not any("Run the current kankan task" in text for text in launcher.tmux.pasted)
+    assert unit_meta(env, card)["covered"]["comment"] == question
+    assert launcher.restart_wording and launcher.state == "qa_waiting"
+
+
+def test_description_only_answered_card_waits(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card)
+    launcher = make_launcher(env)
+    claimed(env, launcher, card)
+    launcher.open_conversation(READY)
+    assert unit_meta(env, card)["covered"] == {"comment": None, "attachments": []}
+    assert launcher.state == "qa_waiting"
+
+
+def test_crash_between_claim_and_first_turn_same_rule(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card)
+    first = make_launcher(env)
+    claimed(env, first, card)  # the launcher dies before its first turn
+    launcher = restarted(env)
+    assert not any("Run the current kankan task" in text for text in launcher.tmux.pasted)
+    assert unit_meta(env, card)["covered"] is not None
+
+
+def test_followup_after_silent_start_is_only_new_input_with_restart_wording(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    env.fake.user_comment(card["id"], "old question")
+    _old_answer(env, card)
+    launcher = make_launcher(env)
+    task = claimed(env, launcher, card)
+    launcher.open_conversation(READY)
+    new = env.fake.user_comment(card["id"], "and now?")["id"]
+    launcher.followups = qa.to_deliver(qa.candidates(env.project, env.project.trello.card(card["id"]),
+                                                     env.project.trello.comments(card["id"])),
+                                       unit_meta(env, card)["covered"], launcher.delivered)
+    assert launcher.followups.comments == [new]
+    launcher.deliver(READY)
+    launcher.deliver(READY)
+    turn = qa.read_turn(env.project.paths, task["conversation"])
+    assert turn["inputs"]["comments"] == [new]
+    assert any(text.startswith(messages.QA_RESTART_FOLLOWUP.split("{")[0]) for text in launcher.tmux.pasted)
+
+
+def test_record_covered_not_owner_ends_conversation(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card)
+    launcher = make_launcher(env)
+    task = claimed(env, launcher, card)
+    env.project.refs.delete(card_ref(card["id"]), env.project.refs.read(card_ref(card["id"])).oid)
+    with pytest.raises(KankanError) as err:
+        qa.record_covered(env.project, env.lease, task, qa.Inputs([], []))
+    assert err.value.status == Status.NOT_OWNER

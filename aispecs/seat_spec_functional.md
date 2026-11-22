@@ -1,6 +1,6 @@
 # kankan seat commands — functional specification
 
-**Status:** specified, not implemented.
+**Status:** implemented locally ([plan](../aiplans/2026-11-22-seat.md)).
 **Date:** 2026-11-22; revised the same day after an independent review (integrated and blocked cards, labels, restart during a removal, unfinished Q&A answers).
 **Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`questions_spec_functional.md`](questions_spec_functional.md) and [`stopall_spec_functional.md`](stopall_spec_functional.md); this feature changes them as listed in [§7](#7-changes-to-other-specifications).
 **Companion:** [`seat_spec_technical.md`](seat_spec_technical.md) — how kankan implements this feature.

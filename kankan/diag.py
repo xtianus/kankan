@@ -33,7 +33,8 @@ def status(project) -> dict:
         state = load_state(project.paths, name)
         seat_rows.append({"seat": name, "type": cfg.seats[name].type, "liveness": seats.liveness(project, name),
                           "launcher_state": state.launcher_state, "task": state.task,
-                          "stop_requested": state.stop_requested, "running_selection": None})
+                          "stop_requested": state.stop_requested, "running_selection": None,
+                          "removing": cfg.seats[name].removing, "remove_error": cfg.seats[name].remove_error})
         # A launcher killed without its shutdown leaves the field behind: only a live seat runs an agent.
         if seat_rows[-1]["liveness"] == "alive":
             seat_rows[-1]["running_selection"] = state.running_selection
@@ -131,7 +132,11 @@ def status_text(data: dict) -> str:
         if running:
             task_text += messages.STATUS_RUNNING.format(**running)
         stop = " (stop requested)" if row["stop_requested"] else ""
+        if row.get("removing"):
+            stop += f" removing ({row['removing']})"
         lines.append(f"  {row['seat']:<10} {row['liveness']:<11} {row['launcher_state']:<13} {task_text}{stop}")
+        if row.get("remove_error"):
+            lines.append(f"    {messages.STATUS_REMOVE_ERROR.format(error=row['remove_error'], seat=row['seat'])}")
     branches = data.get("branches") or {}
     if branches.get("user"):
         lines.append(f"Branches: {branches['integration']} is {branches['ahead']} commits ahead / "
@@ -577,78 +582,6 @@ def seat_recover(project, seat: str, kill: bool, comment: Optional[str] = None) 
                 project.log("comment_failed", error=err.message)
         project.log("admin_seat_recover", seat=seat, kill=kill)
     return {"seat": seat, "killed": kill}
-
-
-def _remove_worktree(project, seat: str) -> bool:
-    return worktrees.remove_if_clean(project.paths.repo, project.paths.seat_worktree(seat))
-
-
-def _qa_seat_remove(project, seat: str) -> dict:
-    """``seat remove <type>-qa`` (questions F§6 §7.1): refused unless the seat is free; its conversation ends
-    (``qa.end_admin``, one project lock hold per conversation); no list is archived."""
-    def check(cfg) -> None:
-        if seat not in cfg.seats:
-            raise KankanError(Status.USAGE_ERROR, messages.UNKNOWN_SEAT.format(seat=seat))
-        state = seats.liveness(project, seat)
-        if state != "free":
-            template = {"dead": messages.QA_SEAT_REMOVE_DEAD,
-                        "unavailable": messages.QA_SEAT_REMOVE_UNAVAILABLE}.get(state, messages.QA_SEAT_REMOVE_RUNNING)
-            raise KankanError(Status.NEEDS_ACTION, template.format(seat=seat, state=state),
-                              {"blockers": [f"the seat is {state}"]})
-    with qa.lifecycle_lock(project.paths):  # never between the stages of a replacement
-        with project_lock(project.paths):
-            check(project.reload_config())
-        qa.end_admin(project, seat)
-        with project_lock(project.paths):
-            cfg = project.reload_config()
-            check(cfg)
-            held = [v.meta.get("short") for v in workflow.card_refs(project).values() if v.meta.get("owner") == seat]
-            if held:  # a conversation changed meanwhile: end_admin ends it at the next run
-                blocker = messages.SEAT_HOLDS_CARDS.format(cards=", ".join(held))
-                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_BLOCKED.format(seat=seat, blockers=blocker),
-                                  {"blockers": [blocker]})
-            del cfg.seats[seat]
-            from kankan.config import save_config
-            save_config(project.paths, cfg)
-            qa.drop_stale_record(project, None)  # a replacement towards this seat can no longer complete
-            removed = _remove_worktree(project, seat)
-            project.log("seat_removed", seat=seat, worktree_removed=removed)
-    return {"seat": seat, "worktree_removed": removed}
-
-
-def seat_remove(project, seat: str) -> dict:
-    validate_seat(seat)
-    if seats.is_qa(seat):
-        return _qa_seat_remove(project, seat)
-    with project_lock(project.paths):
-        cfg = project.reload_config()
-        if seat not in cfg.seats:
-            raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
-        blockers = []
-        state = seats.liveness(project, seat)
-        if state != "free":
-            blockers.append(f"the seat is {state}")
-        held = [v.meta.get("short") for v in workflow.card_refs(project).values()
-                if seat in (v.meta.get("owner"),) or (v.meta.get("implementer") == seat and v.meta.get("phase") == "implemented")]
-        if held:
-            blockers.append("it holds cards: " + ", ".join(held))
-        snap = project.trello.snapshot(cfg.board_id)
-        seat_cfg = cfg.seats[seat]
-        lists = (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review)
-        in_lists = [c.short for c in snap.cards.values() if c.list_id in lists]
-        if in_lists:
-            blockers.append("its lists are not empty: " + ", ".join(in_lists))
-        if blockers:
-            raise KankanError(Status.NEEDS_ACTION, f"cannot remove {seat}: " + "; ".join(blockers),
-                              {"blockers": blockers})
-        for list_id in lists:
-            project.trello.archive_list(list_id)
-        del cfg.seats[seat]
-        from kankan.config import save_config
-        save_config(project.paths, cfg)
-        removed = _remove_worktree(project, seat)
-        project.log("seat_removed", seat=seat, worktree_removed=removed)
-    return {"seat": seat, "worktree_removed": removed}
 
 
 def purge_remote(project, remote: str = "origin") -> dict:

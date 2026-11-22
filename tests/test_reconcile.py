@@ -216,7 +216,7 @@ def test_seat_remove_of_qa_seat_archives_no_list(board):
     add_qa_list(project, fake)
     seats.release(project, seats.acquire_qa(project, "claude", None))
     open_before = {i for i, l in fake.state["lists"].items() if not l["closed"]}
-    diag.seat_remove(project, "claude-qa")
+    remove_seat(project, "claude-qa")
     assert "claude-qa" not in project.reload_config().seats
     assert {i for i, l in fake.state["lists"].items() if not l["closed"]} == open_before
     assert not project.paths.seat_worktree("claude-qa").exists()
@@ -225,7 +225,7 @@ def test_seat_remove_of_qa_seat_archives_no_list(board):
 # ---------------------------------------------------------------------- Q&A (questions T§2, T§3)
 from kankan import qa  # noqa: E402
 from kankan.config import project_lock  # noqa: E402
-from tests.helpers import add_qa_list, put_card_ref  # noqa: E402
+from tests.helpers import add_qa_list, put_card_ref, remove_seat  # noqa: E402
 
 CONV = "0123456789abcdef"
 

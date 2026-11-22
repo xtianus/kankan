@@ -93,6 +93,8 @@ class SeatConfig:
     implemented: str = ""
     review: str = ""
     role: str = "work"  # "work", or "qa" for the Q&A seat (it has no lists)
+    removing: Optional[str] = None  # "graceful" or "immediate" while `kankan seat remove` runs (seat T§5)
+    remove_error: Optional[str] = None  # why the last completion of that removal stopped (seat T§6)
 
 
 @dataclass
@@ -138,6 +140,10 @@ class Config:
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
         data["credentials_keys"] = list(self.credentials_keys)
+        for seat in data["seats"].values():  # only a seat being removed carries these
+            for key in ("removing", "remove_error"):
+                if seat.get(key) is None:
+                    seat.pop(key, None)
         return data
 
     @classmethod
@@ -187,7 +193,10 @@ class Config:
 
     def required_lists(self) -> Dict[str, str]:
         """The workflow lists whose absence is a ``config_error`` (every one except ``Q&A``)."""
-        return {list_id: name for list_id, name in self.workflow_lists().items() if list_id != self.qa_list}
+        removing = {lst for seat in self.work_seats().values() if seat.removing
+                    for lst in (seat.in_progress, seat.implemented, seat.review)}  # archived during a removal
+        return {list_id: name for list_id, name in self.workflow_lists().items()
+                if list_id != self.qa_list and list_id not in removing}
 
 
 def load_config(paths: Paths) -> Config:

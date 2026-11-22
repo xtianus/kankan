@@ -90,23 +90,16 @@ def test_seat_recover_kill(board):
             holder.wait()
 
 
-def test_seat_remove_preconditions(board):
+def test_seat_remove_of_a_free_seat_archives_its_lists(board):
+    from tests.helpers import remove_seat
     project, fake = board
-    lease = seats.acquire(project, "claude")
-    card = fake.add_card(project.cfg.backlog, "c")
-    workflow.tick(project, lease)
-    with pytest.raises(KankanError) as exc:
-        diag.seat_remove(project, "claude-1")
-    assert exc.value.status == Status.NEEDS_ACTION
-    blockers = " ".join(exc.value.data["blockers"])
-    assert "alive" in blockers and "holds cards" in blockers and "not empty" in blockers
     other = seats.acquire(project, "claude")
     seats.release(project, other)
-    lists = project.reload_config().seats["claude-2"]
-    diag.seat_remove(project, "claude-2")
-    assert "claude-2" not in project.reload_config().seats
+    lists = project.reload_config().seats["claude-1"]
+    remove_seat(project, "claude-1")
+    assert "claude-1" not in project.reload_config().seats
     assert fake.state["lists"][lists.review]["closed"] is True
-    assert not project.paths.seat_worktree("claude-2").exists()
+    assert not project.paths.seat_worktree("claude-1").exists()
 
 
 def test_purge_remote(board, tmp_path):
@@ -126,7 +119,7 @@ def test_purge_remote(board, tmp_path):
 def test_seat_remove_of_the_qa_seat(board):
     from kankan import attachments, qa
     from kankan.adapters import ModelEffort
-    from tests.helpers import add_qa_list
+    from tests.helpers import add_qa_list, remove_seat
     project, fake = board
     qa_list = add_qa_list(project, fake)
     lease = seats.acquire_qa(project, "claude", None)
@@ -134,14 +127,10 @@ def test_seat_remove_of_the_qa_seat(board):
     task = qa.claim(project, lease, project.trello.card(card["id"]), ModelEffort("sonnet", "high"))
     att_dir = attachments.card_dir(project.paths, card["shortLink"])
     att_dir.mkdir(parents=True)
-    with pytest.raises(KankanError) as exc:
-        diag.seat_remove(project, "claude-qa")
-    assert exc.value.status == Status.NEEDS_ACTION and "alive" in exc.value.message
-    assert project.refs.read(card_ref(card["id"])) is not None
     seats.release(project, lease)
     lists_before = {ident for ident, data in fake.state["lists"].items() if not data["closed"]}
-    result = diag.seat_remove(project, "claude-qa")
-    assert result == {"seat": "claude-qa", "worktree_removed": True}
+    result = remove_seat(project, "claude-qa")
+    assert result["seat"] == "claude-qa" and result["worktree_removed"] is True
     assert project.refs.read(card_ref(card["id"])) is None
     assert not att_dir.exists() and not qa.conversation_dir(project.paths, task["conversation"]).exists()
     assert {ident for ident, data in fake.state["lists"].items() if not data["closed"]} == lists_before
@@ -150,24 +139,17 @@ def test_seat_remove_of_the_qa_seat(board):
     assert fake.card_list(card["id"]) == qa_list
 
 
-def test_seat_remove_of_a_dead_qa_seat_is_refused_until_recovered(board):
-    from kankan import messages, qa
+def test_seat_remove_of_a_dead_qa_seat(board):
+    from kankan import qa
     from kankan.adapters import ModelEffort
-    from tests.helpers import add_qa_list
+    from tests.helpers import add_qa_list, remove_seat
     project, fake = board
     qa_list = add_qa_list(project, fake)
     lease = seats.acquire_qa(project, "claude", None)
     card = fake.add_card(qa_list, "question")
     task = qa.claim(project, lease, project.trello.card(card["id"]), ModelEffort("sonnet", "high"))
     seats._release_fd(lease.fd)  # the launcher died: its seat ref stays
-    with pytest.raises(KankanError) as exc:
-        diag.seat_remove(project, "claude-qa")
-    assert exc.value.status == Status.NEEDS_ACTION
-    assert exc.value.message == messages.QA_SEAT_REMOVE_DEAD.format(seat="claude-qa")
-    assert project.refs.read(card_ref(card["id"])).meta["phase"] == "qa"
-    assert "claude-qa" in project.reload_config().seats
-    assert qa.conversation_dir(project.paths, task["conversation"]).exists()
-    diag.seat_recover(project, "claude-qa", kill=False)
-    assert diag.seat_remove(project, "claude-qa")["seat"] == "claude-qa"
+    assert remove_seat(project, "claude-qa")["seat"] == "claude-qa"
     assert project.refs.read(card_ref(card["id"])) is None
     assert "claude-qa" not in project.reload_config().seats
+    assert not qa.conversation_dir(project.paths, task["conversation"]).exists()

@@ -218,6 +218,7 @@ class Inputs:
 
 # the marker of an answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``;
 # groups: kind (``qa``/``qh``), conversation, turn, chunk index
+CHUNK_PREFIX = re.compile(r"^([0-9]+)/([0-9]+)\n\n")  # "k/n" before each part of a split answer (T§6)
 QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
 
 
@@ -291,22 +292,29 @@ def _when(value: str) -> Optional[datetime]:
     return result if result.tzinfo is not None else result.replace(tzinfo=timezone.utc)
 
 
-def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, Inputs]:
-    """``(inputs, context)`` of a new conversation's first turn. When an earlier conversation answered the card
-    (a comment by kankan's account carrying an answer or handoff marker), the inputs are the candidates dated
-    after the latest such comment by Trello's dates, never the local clock (an unreadable date counts as
+def _complete(comment: Comment) -> bool:
+    """An answer or handoff comment that is not a part ``k/n`` with ``k < n`` of an answer cut short."""
+    match = CHUNK_PREFIX.match(comment.text)
+    return match is None or match.group(1) == match.group(2)
+
+
+def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, Inputs, bool]:
+    """``(inputs, context, answered)`` of a new conversation's first turn. When an earlier conversation answered
+    the card (a comment by kankan's account carrying an answer or handoff marker), the inputs are the candidates
+    dated after the latest such comment by Trello's dates, never the local clock (an unreadable date counts as
     after), and the others are context: the newest such comment (it covers the older ones) and every such
-    attachment; otherwise every candidate is an input."""
+    attachment; otherwise every candidate is an input. ``answered``: the latest such comment completes its
+    answer (seat F§4: with nothing new, the agent is not prompted)."""
     cands = candidates(project, card, comments)
     me = notify.kankan_member_id(project)
     answers = [c for c in comments if c.member_id == me and QA_MARKER.search(c.text)]
     if not answers:
-        return cands, Inputs()
+        return cands, Inputs(), False
     floor = datetime.min.replace(tzinfo=timezone.utc)
     latest = max(answers, key=lambda c: (_when(c.date) or floor, c.id))
     latest_when = _when(latest.date)
     if latest_when is None:
-        return cands, Inputs()
+        return cands, Inputs(), False
     by_id = {c.id: c for c in comments}
     attachments_by_id = {a.id: a for a in card.attachment_items}
 
@@ -321,7 +329,26 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
     inputs = Inputs([c for c in cands.comments if comment_new(c)], [a for a in cands.attachments if attachment_new(a)])
     newest_old = newest([c for c in cands.comments if c not in inputs.comments])
     context = Inputs([newest_old] if newest_old else [], [a for a in cands.attachments if a not in inputs.attachments])
-    return inputs, context
+    return inputs, context, _complete(latest)
+
+
+def record_covered(project, lease, task: dict, context: Inputs) -> None:
+    """seat T§8: a conversation started without a prompt records its old thread as covered, as an answer would,
+    so later follow-ups are the only new inputs. ``NOT_OWNER`` when the conversation is no longer the seat's."""
+    conversation = task["conversation"]
+    ended = KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
+    with card_conversation_lock(project, task["card"], conversation, CONVERSATION_LOCK_TIMEOUT):
+        with project_lock(project.paths):
+            ref = card_ref(task["card"])
+            value = project.refs.read(ref)
+            if not ours(value, lease.seat, conversation):
+                raise ended
+            covered = coverage(None, Inputs(), context)
+            oid = project.refs.write_blob(CardMeta.from_dict(value.meta).evolve(covered=covered).to_dict())
+            if not project.refs.transaction([Verify(seat_ref(lease.seat), lease.seat_oid), Update(ref, oid, value.oid)]):
+                check_seat(project, lease)
+                raise ended
+            project.log("qa_covered_without_answer", card=task["card"], conversation=conversation, covered=covered)
 
 
 # ---------------------------------------------------------------------- eligibility, claim, take-over (T§2–T§3)
@@ -418,6 +445,10 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
     ref = card_ref(card.id)
     conversation = new_conversation()
     with project_lock(project.paths):
+        seat_cfg = project.reload_config().seats.get(lease.seat)
+        if seat_cfg is not None and seat_cfg.removing:  # seat T§5: a seat being removed takes no new card
+            project.log("qa_claim_skipped", card=card.id, reason="the seat is being removed")
+            return None
         fresh = project.trello.card(card.id)
         if active_ended(cfg, fresh):
             project.log("qa_claim_skipped", card=card.id, reason="card left Q&A, closed or on HOLD")

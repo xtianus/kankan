@@ -52,6 +52,16 @@ def clear_label(project, card_id: str, label_id: str, cause: Optional[str], seat
     return True
 
 
+def clear_causes(project, seat: str, card_id: str, label_ids) -> None:
+    """Remove the labels a seat set on a card (seat T§4.1: its state, which records why, is about to go); a
+    Trello failure is logged. HOLD is never among them: kankan never sets it."""
+    for label_id in label_ids:
+        try:
+            clear_label(project, card_id, label_id, None, seat)
+        except KankanError as err:
+            project.log("label_failed", card=card_id, error=err.message)
+
+
 def kankan_label_ids(project, card, board_labels: Optional[Dict] = None):
     """kankan's own labels on ``card``: Question, Error and Resume ones (never HOLD)."""
     if board_labels is None:
