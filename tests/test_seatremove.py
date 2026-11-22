@@ -782,7 +782,7 @@ def test_up_resumes_removals_once(kproject, fake_trello, starts):
     _removing(project, "claude-1", "graceful")
     _register(project, "claude-2")
     _removing(project, "claude-2", "immediate")
-    assert sorted(agents_cmd.resume_removals(project)) == ["claude-1", "claude-2"]
+    assert sorted(agents_cmd.resume_removals(project)["acted"]) == ["claude-1", "claude-2"]
     assert starts == [("claude", "claude-1", False)] and "claude-2" not in project.reload_config().seats
 
 
@@ -844,3 +844,190 @@ def test_remove_qa_seat_without_conversation_no_question(kproject, fake_trello):
     _qa_seat(project, fake, conversation=False)
     seatremove.remove(project, "claude-qa", graceful=False, confirm=_no, say=lambda t: None)
     assert "claude-qa" not in project.reload_config().seats
+
+
+# ---------------------------------------------------------------------- final review fixes
+
+def test_archived_held_card_does_not_block_completion(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    lease = seats.acquire(project, "claude")
+    card = fake.add_card(project.cfg.backlog, "c", pos=0)
+    workflow.tick(project, lease)
+    seats._release_fd(lease.fd)
+    fake.user_archive(card["id"])
+    seatremove.remove(project, "claude-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    assert "claude-1" not in project.reload_config().seats
+    meta = _meta(project, card)
+    assert meta["phase"] == "parked" and "from_list" not in meta and meta.get("target_list") is None
+
+
+def test_archived_implemented_card_targeting_the_seat_does_not_block(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    claude1 = seats.acquire(project, "claude")
+    card = implement(project, fake, claude1)
+    seats.release(project, claude1)
+    fake.user_archive(card["id"])
+    seatremove.remove(project, "claude-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    assert "claude-1" not in project.reload_config().seats
+    assert _meta(project, card).get("target_list") is None
+
+
+def test_move_done_but_unconfirmed_does_not_block(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    _register(project, "claude-1", "codex-1")
+    card = fake.add_card(project.cfg.blocked, "blocked already")
+    put_card_ref(project, card["id"], card["shortLink"], phase="parked", cause="block", implementer="claude-1",
+                 implementer_type="claude", target_list=project.cfg.blocked,
+                 from_list=project.cfg.seats["codex-1"].review)
+    seatremove.remove(project, "codex-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    assert "codex-1" not in project.reload_config().seats and fake.card_list(card["id"]) == project.cfg.blocked
+
+
+def test_acquire_refuses_a_seat_whose_removal_completes(kproject, fake_trello):
+    project = kproject
+    _register(project, "claude-1")
+    _removing(project, "claude-1", "immediate")
+    with pytest.raises(KankanError):
+        seats.acquire(project, "claude", seat="claude-1", create=False)
+    with pytest.raises(KankanError):
+        seats.acquire(project, "claude", seat="claude-1")
+
+
+def test_completion_marks_a_graceful_seat_immediate_first(kproject, fake_trello, monkeypatch):
+    project = kproject
+    _register(project, "claude-1")
+    _removing(project, "claude-1", "graceful")
+    real, seen = seatremove.drop_worktree, []
+
+    def drop(project_, seat):
+        seen.append(project.reload_config().seats[seat].removing)
+        return real(project_, seat)
+    monkeypatch.setattr(seatremove, "drop_worktree", drop)
+    seatremove.complete(project, "claude-1")
+    assert seen == ["immediate"]
+
+
+def test_closed_lists_of_a_removing_seat_are_never_recreated(kproject, fake_trello):
+    project = kproject
+    _register(project, "claude-1")
+    lists = seatremove.seat_lists(project.cfg, "claude-1")
+    project.trello.archive_list(project.cfg.seats["claude-1"].implemented)
+    _removing(project, "claude-1", "graceful")
+    with pytest.raises(KankanError):
+        seats.acquire(project, "claude", seat="claude-1", create=False)
+    seat = project.reload_config().seats["claude-1"]
+    assert seat.removing == "graceful" and {seat.in_progress, seat.implemented, seat.review} == lists
+
+
+def test_qa_completion_stops_while_a_conversation_is_still_owned(kproject, fake_trello, monkeypatch):
+    from kankan import qa
+    project, fake = kproject, fake_trello
+    qa_list, card = _qa_seat(project, fake)
+    monkeypatch.setattr(qa, "end_admin", lambda project_, seat: False)  # the seat ref was still there
+    _removing(project, "claude-qa", "immediate")
+    with pytest.raises(KankanError) as err:
+        seatremove.complete(project, "claude-qa")
+    assert err.value.status == Status.NEEDS_ACTION and "claude-qa" in project.reload_config().seats
+
+
+def test_escalation_after_the_removal_completed_returns_its_report(kproject, fake_trello):
+    project = kproject
+    _register(project, "claude-1")
+    _removing(project, "claude-1", "graceful")
+
+    def confirm(text):
+        seatremove.complete(project, "claude-1")  # the launcher finished while the question was open
+        return True
+    report = seatremove.remove(project, "claude-1", graceful=False, confirm=confirm, say=lambda t: None)
+    assert report["seat"] == "claude-1" and "claude-1" not in project.reload_config().seats
+
+
+def test_autostart_lowered_before_the_seat_is_marked(kproject, fake_trello, systemctl, monkeypatch):
+    project = kproject
+    _register(project, "claude-1", "claude-2")
+    path = _unit(project, "claude=2")
+    real, seen = seatremove._mark, []
+
+    def mark(project_, seat, mode):
+        seen.append("claude=1" in path.read_text())
+        return real(project_, seat, mode)
+    monkeypatch.setattr(seatremove, "_mark", mark)
+    seatremove.remove(project, "claude-1", graceful=False, confirm=_no, say=lambda t: None)
+    assert seen == [True]
+
+
+def test_interrupted_immediate_removal_repairs_autostart(kproject, fake_trello, systemctl):
+    project = kproject
+    _register(project, "claude-1", "claude-2")
+    path = _unit(project, "claude=2")
+    _removing(project, "claude-1", "immediate")  # crashed before autostart was lowered
+    seatremove.remove(project, "claude-1", graceful=False, confirm=_no, say=lambda t: None)
+    assert "up claude=1" in path.read_text()
+
+
+def test_up_finishes_a_running_seat_whose_immediate_removal_was_interrupted(kproject, fake_trello, holders):
+    project = kproject
+    holders.append(hold(project, "claude-1", mode="ignore"))
+    _removing(project, "claude-1", "immediate")
+    assert agents_cmd.resume_removals(project)["acted"] == ["claude-1"]
+    assert "claude-1" not in project.reload_config().seats
+
+
+def test_resume_reports_failed_restarts(kproject, fake_trello, monkeypatch):
+    from kankan import cli
+    project, fake = kproject, fake_trello
+    _dead_with_card(project, fake)
+    _removing(project, "claude-1", "graceful")
+
+    def agent(*args, **kwargs):
+        raise KankanError(Status.CONFIG_ERROR, "claude CLI missing")
+    monkeypatch.setattr(agents_cmd, "agent", agent)
+    monkeypatch.chdir(project.paths.repo)
+    assert cli.main(["up"]) == Status.NEEDS_ACTION.exit_code
+
+
+def test_malformed_claim_fields_refused_before_destructive_work(kproject, fake_trello):
+    project, fake = kproject, fake_trello
+    _register(project, "claude-1")
+    card = fake.add_card(project.cfg.seats["claude-1"].in_progress, "odd")
+    oid = project.refs.write_blob({"schema": 1, "card": card["id"], "phase": "impl", "owner": "claude-1"})
+    project.refs.create(card_ref(card["id"]), oid)
+    with pytest.raises(KankanError) as err:
+        seatremove.remove(project, "claude-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    assert err.value.status == Status.NEEDS_ACTION
+    assert project.paths.seat_worktree("claude-1").exists()
+
+
+def test_failed_merge_abort_does_not_block_the_removal(kproject, fake_trello, monkeypatch):
+    project, fake = kproject, fake_trello
+    _dead_with_card(project, fake)
+    monkeypatch.setattr(worktrees, "merge_in_progress", lambda path: True)
+    real = seatremove.gitutil.run
+
+    def run(cwd, args, **kwargs):
+        if args[:2] == ["merge", "--abort"]:
+            raise KankanError(Status.INTERNAL_ERROR, "index.lock exists")
+        return real(cwd, args, **kwargs)
+    monkeypatch.setattr(seatremove.gitutil, "run", run)
+    seatremove.remove(project, "claude-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    assert "claude-1" not in project.reload_config().seats
+
+
+def test_interrupted_block_is_finished_before_the_removal(kproject, fake_trello, monkeypatch):
+    from kankan import faults, integrate
+    from tests.test_block_resolve import BRANCH_FILES, advance_main
+    project, fake = kproject, fake_trello
+    card, codex, ctx = review_setup(project, fake, monkeypatch, files=BRANCH_FILES)
+    advance_main(project, {"shared.txt": "main\n", "other.txt": "main other\n"})
+    with pytest.raises(KankanError):
+        integrate.sync(ctx)
+    monkeypatch.setenv("KANKAN_FAULT", "blocked_wt")  # the blocked worktree exists, the claim is not parked yet
+    with pytest.raises(faults.SimulatedCrash):
+        integrate.block(ctx, "stuck")
+    monkeypatch.delenv("KANKAN_FAULT")
+    seats._release_fd(codex.fd)
+    seatremove.remove(project, "codex-1", graceful=False, confirm=lambda t: True, say=lambda t: None)
+    meta = _meta(project, card)
+    assert meta["phase"] == "parked" and meta["cause"] == "block"
+    assert fake.card_list(card["id"]) == project.cfg.blocked
+    assert project.paths.blocked_worktree(card["shortLink"]).exists()

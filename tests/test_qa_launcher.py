@@ -1101,3 +1101,18 @@ def test_record_covered_not_owner_ends_conversation(unit):
     with pytest.raises(KankanError) as err:
         qa.record_covered(env.project, env.lease, task, qa.Inputs([], []))
     assert err.value.status == Status.NOT_OWNER
+
+
+def test_deferred_clear_is_not_taken_for_a_typed_turn(unit):
+    env = unit
+    card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
+    _old_answer(env, card)
+    launcher = make_launcher(env)
+    claimed(env, launcher, card)
+    launcher.clear_before_followup = True
+    launcher.waiting_saw_ready = True
+    launcher.state = "qa_waiting"
+    launcher.followups = qa.Inputs([env.fake.user_comment(card["id"], "next?")["id"]], [])
+    launcher.deliver(READY)
+    assert launcher.tmux.pasted[-1] == launcher.adapter.new_conversation
+    assert launcher.waiting_saw_ready is False

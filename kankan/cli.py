@@ -442,7 +442,8 @@ def _seat_start(project, seat: str, attach: bool):
         print(f"warning: {warning}", file=sys.stderr)
     session = agents_cmd.agent(project, seats.seat_type(seat), seat=seat, attach=attach, tmux=tmux,
                                qa=seats.is_qa(seat), create=False)
-    agents_cmd._wait_started(project, session, seat, lambda: seats.liveness(project, seat) == "alive")
+    from kankan import seatremove
+    seatremove.await_start(project, seat, session)  # a seat being removed may also finish before it is seen running
     return {"seat": seat, "started": True, "session": session}, f"started {seat}"
 
 
@@ -507,7 +508,8 @@ def _cmd_agent(args):
 
 
 def _resume_removals_if_bound() -> List[str]:
-    """Restart or complete the seats being removed of a bound clone; nothing in an unbound one."""
+    """Restart or complete the seats being removed of a bound clone (nothing in an unbound one); a failure is
+    ``needs_action`` naming the seats."""
     from kankan import agents_cmd
     from kankan.config import Paths, load_config
     try:
@@ -516,7 +518,11 @@ def _resume_removals_if_bound() -> List[str]:
         return []
     if not cfg.board_id or not any(seat.removing for seat in cfg.seats.values()):
         return []
-    return agents_cmd.resume_removals(_project())
+    result = agents_cmd.resume_removals(_project())
+    if result["failed"]:
+        raise KankanError(Status.NEEDS_ACTION, messages.UP_RESUME_FAILED.format(
+            failures="; ".join(f"{seat}: {error}" for seat, error in result["failed"].items())), result)
+    return result["acted"]
 
 
 @command("up")

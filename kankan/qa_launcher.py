@@ -630,6 +630,7 @@ class QaLauncher(Launcher):
         if self.clear_before_followup:  # seat F§4: the previous card's conversation goes first
             self.paste(self.adapter.new_conversation)
             self.clear_before_followup = False
+            self.waiting_saw_ready = False  # the pane working on the clear is not the user typing a turn
             return  # the follow-up is delivered at the next poll
         token = self.begin_turn(inputs)
         if token is None:

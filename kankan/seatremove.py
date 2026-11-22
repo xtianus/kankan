@@ -52,10 +52,9 @@ def _row(meta: Optional[dict], card: Optional[Card], lists: Set[str], seat: str,
     closed = card is None or card.closed
     if meta is not None:
         phase, owner, target = meta.get("phase"), meta.get("owner"), meta.get("target_list")
-        if owner == seat and closed:
-            return 8
-        if closed:
-            return 0
+        if closed:  # archived or deleted by the user: its claim must stop naming the seat or its lists
+            tied = owner == seat or target in lists or meta.get("from_list") in lists
+            return 8 if tied and phase != Phase.INTEGRATED.value else 0
         if phase == Phase.INTEGRATED.value:
             return 1
         if phase == Phase.IMPL.value and owner == seat:
@@ -88,6 +87,14 @@ def plan_moves(project, seat: str) -> List[Move]:
                 seat=seat, card=ref[len(CARD_PREFIX):], error=value.message), {"ref": ref})
         refs[ref[len(CARD_PREFIX):]] = value
     snap = project.trello.snapshot(cfg.board_id)
+    for card_id, value in refs.items():  # before anything is changed: a claim missing a field stops the removal
+        meta = value.meta
+        if meta.get("owner") == seat or meta.get("target_list") in lists or meta.get("from_list") in lists:
+            try:
+                CardMeta.from_dict(meta)
+            except TypeError as err:
+                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_MALFORMED.format(
+                    seat=seat, card=card_id, error=str(err)), {"ref": card_ref(card_id)}) from err
     ids = {card.id for card in snap.cards.values() if card.list_id in lists}
     for card_id, value in refs.items():
         meta = value.meta
@@ -161,6 +168,8 @@ def _transition(project, cfg, seat: str, row: int, value: RefValue, card: Option
         card = Card(id=value.meta["card"], short=value.meta.get("short", ""), board_id="", name="", desc="", url="",
                     list_id="", pos=0, label_ids=[], attachments=[], closed=True, last_activity="")
     result = transition(project, ACTOR, card, value, new, None)
+    if row == 8 and result.ref is not None:  # no move to confirm: drop the source list transition() recorded
+        confirm_move(project, card_ref(card.id), result.ref)
     return result.moved or row == 8
 
 
@@ -245,22 +254,32 @@ def last_report(project, seat: str) -> Optional[dict]:
 
 
 def stop_seat(project, seat: str, *, kill_alive: bool) -> None:
-    """Terminate the seat's processes and free it (as ``seat recover --kill``, without its comment). A running
+    """Terminate the seat's processes and free it (as ``seat recover --kill``, without its comment), then mark its
+    removal ``immediate`` under the same lock, so no launcher occupies it while the completion runs. A running
     seat is refused unless ``kill_alive``; survivors stop the removal before anything moves."""
     with project_lock(project.paths):
         state = seats._liveness(project, seat)
         if state == "alive" and not kill_alive:
             raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_ALIVE.format(seat=seat))
-        if state == "free":
-            return
-        survivors = seats.recover_dead(project, seat, kill_alive=True)
-        if survivors:
-            raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_SURVIVORS.format(seat=seat, pids=survivors),
-                              {"pids": survivors})
-        value = project.refs.read(seat_ref(seat))
-        if value is not None:
-            project.refs.delete(seat_ref(seat), value.oid)
-        project.log("seat_remove_stopped", seat=seat, liveness=state)
+        if state != "free":
+            _kill(project, seat, state)
+        cfg = project.reload_config()
+        if seat in cfg.seats and cfg.seats[seat].removing != "immediate":
+            cfg.seats[seat].removing = "immediate"
+            save_config(project.paths, cfg)
+            project.reload_config()
+
+
+def _kill(project, seat: str, state: str) -> None:
+    """Under the project lock: terminate the seat's recorded processes and delete its seat ref."""
+    survivors = seats.recover_dead(project, seat, kill_alive=True)
+    if survivors:
+        raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_SURVIVORS.format(seat=seat, pids=survivors),
+                          {"pids": survivors})
+    value = project.refs.read(seat_ref(seat))
+    if value is not None:
+        project.refs.delete(seat_ref(seat), value.oid)
+    project.log("seat_remove_stopped", seat=seat, liveness=state)
 
 
 def drop_worktree(project, seat: str) -> List[str]:
@@ -270,7 +289,10 @@ def drop_worktree(project, seat: str) -> List[str]:
     if not (path / ".git").exists():
         return []
     if worktrees.merge_in_progress(path):
-        gitutil.run(path, ["merge", "--abort"])
+        try:  # best effort: the forced removal below discards the merge state anyway
+            gitutil.run(path, ["merge", "--abort"])
+        except KankanError as err:
+            project.log("seat_remove_merge_abort_failed", seat=seat, error=err.message)
     discarded = worktrees.dirty_files(path)
     gitutil.run(project.paths.repo, ["worktree", "remove", "--force", str(path)])
     project.log("seat_worktree_removed", seat=seat, discarded=discarded)
@@ -286,7 +308,13 @@ def remaining_cards(project, seat: str) -> List[str]:
     snap = project.trello.snapshot(cfg.board_id)
     left = {card.short for card in snap.cards.values() if card.list_id in lists}
     for value in parse_refs(project).values():
-        if isinstance(value, RefValue) and (value.meta.get("target_list") in lists or value.meta.get("from_list") in lists):
+        if not isinstance(value, RefValue):
+            continue
+        card = snap.cards.get(value.meta.get("card"))  # open cards only: a closed card's claim names no list
+        if card is None:
+            continue
+        target = value.meta.get("target_list")
+        if target in lists or (value.meta.get("from_list") in lists and card.list_id != target):
             left.add(value.meta.get("short") or value.meta.get("card"))
     return sorted(left)
 
@@ -332,9 +360,28 @@ def complete(project, seat: str) -> dict:
                               err.data) from err
 
 
+def _finish_block(project, seat: str) -> None:
+    """An interrupted ``block`` of the seat is finished first (its card goes to ``Blocked`` with its blocked
+    worktree), so the card is not given to another agent while its branch is checked out there."""
+    if load_state(project.paths, seat).block_journal is None:
+        return
+    from kankan import integrate
+    with project_lock(project.paths):
+        lease = seats._occupy(project, seat, seats.seat_type(seat), None, comment=False)
+    if lease is None:
+        raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_ALIVE.format(seat=seat))
+    try:
+        integrate.resume_block(project, lease)
+    finally:
+        seats.release(project, lease)
+
+
 def _complete(project, seat: str, is_qa: bool) -> dict:
     worktree = project.paths.seat_worktree(seat)
     had_worktree = (worktree / ".git").exists()
+    if not is_qa:
+        plan_moves(project, seat)  # a malformed claim stops the removal before anything is changed
+        _finish_block(project, seat)
     discarded = drop_worktree(project, seat)
     moved: List[dict] = []
     if is_qa:
@@ -343,6 +390,10 @@ def _complete(project, seat: str, is_qa: bool) -> dict:
             qa.end_admin(project, seat)
             with project_lock(project.paths):
                 qa.drop_stale_record(project, None)
+                owned = [v.meta.get("short") or v.meta.get("card") for v in qa._owned(project, seat)]
+            if owned:
+                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_QA_OWNED.format(
+                    seat=seat, cards=", ".join(owned)), {"cards": owned})
     else:
         for move in plan_moves(project, seat):
             done = apply_move(project, seat, move)
@@ -426,13 +477,21 @@ def _list_name(cfg, list_id: Optional[str]) -> str:
     return cfg.workflow_lists().get(list_id, list_id)
 
 
-def _mark(project, seat: str, mode: str) -> None:
+def _mark(project, seat: str, mode: str) -> bool:
+    """Record the removal mode; False when the seat was removed meanwhile (by another command or its launcher)."""
     with project_lock(project.paths):
         cfg = project.reload_config()
+        if seat not in cfg.seats:
+            return False
         cfg.seats[seat].removing = mode
         save_config(project.paths, cfg)
         project.reload_config()
     project.log("seat_remove_requested", seat=seat, mode=mode)
+    return True
+
+
+def _already_removed(project, seat: str) -> dict:
+    return last_report(project, seat) or {"seat": seat}
 
 
 def describe(project, seat: str, moves: List[Move], discarded: List[str], autostart: str,
@@ -471,8 +530,8 @@ def remove(project, seat: str, *, graceful: bool, confirm: Callable[[str], bool]
     if seat not in cfg.seats:
         raise KankanError(Status.USAGE_ERROR, messages.UNKNOWN_SEAT.format(seat=seat))
     mode = cfg.seats[seat].removing
-    if mode == "immediate":  # confirmed earlier and interrupted: completed without a question
-        return _finish_immediate(project, seat, "unchanged")
+    if mode == "immediate":  # confirmed earlier and interrupted: completed without a question; autostart again
+        return _finish_immediate(project, seat, adjust_autostart(project, seat))
     if mode == "graceful":  # seat F§3.7: the same seat asked again
         running = messages.SEAT_REMOVE_GRACEFUL_RUNNING.format(seat=seat, state=_state_line(project, seat))
         if graceful:
@@ -483,7 +542,8 @@ def remove(project, seat: str, *, graceful: bool, confirm: Callable[[str], bool]
                             confirm_text=messages.SEAT_REMOVE_ESCALATE.format(seat=seat))
         if not confirm(running + "\n" + question):
             return {"cancelled": True, "graceful_running": True, "seat": seat}
-        _mark(project, seat, "immediate")
+        if not _mark(project, seat, "immediate"):
+            return _already_removed(project, seat)
         return _finish_immediate(project, seat, "unchanged")
     if graceful:
         return request_graceful(project, seat, say=say, poll=poll, tmux=tmux)
@@ -491,8 +551,12 @@ def remove(project, seat: str, *, graceful: bool, confirm: Callable[[str], bool]
     preview = adjust_autostart(project, seat, apply=False)
     if (moves or conversation) and not confirm(describe(project, seat, moves, discarded, preview, conversation)):
         return {"cancelled": True, "seat": seat}
-    _mark(project, seat, "immediate")
-    return _finish_immediate(project, seat, adjust_autostart(project, seat))
+    if seat not in project.reload_config().seats:
+        return _already_removed(project, seat)
+    autostart = adjust_autostart(project, seat)  # before the mark: a fast completion must not skip it
+    if not _mark(project, seat, "immediate"):
+        return _already_removed(project, seat)
+    return _finish_immediate(project, seat, autostart)
 
 
 def _finish_immediate(project, seat: str, autostart: str) -> dict:
@@ -558,8 +622,9 @@ def request_graceful(project, seat: str, *, say: Callable[[str], None], poll: fl
     from kankan import stopall
     if seats.liveness(project, seat) == "alive":
         stopall.refuse_other_code(project, [seat], messages.SEAT_REMOVE_OTHER_CODE.replace("<seat>", seat))
-    _mark(project, seat, "graceful")
-    autostart = adjust_autostart(project, seat)
+    autostart = adjust_autostart(project, seat)  # before the mark: a fast completion must not skip it
+    if not _mark(project, seat, "graceful"):
+        return dict(_already_removed(project, seat), autostart=autostart)
     if autostart != "unchanged":
         say(messages.SEAT_REMOVE_PLAN_AUTOSTART.strip().format(autostart=autostart))
     try:

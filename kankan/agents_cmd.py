@@ -201,40 +201,52 @@ def _wait_started(project, session: str, what: str, started) -> None:
                                                                                seconds=UP_WAIT_SECONDS))
 
 
-def resume_removals(project, tmux: Optional[Tmux] = None, only: Optional[str] = None, strict: bool = False) -> List[str]:
-    """seat T§5: the only code restarting or completing seats being removed that are not running. A graceful one
-    with work left is started (existing seat only) and awaited; the others are completed. The starts happen under
-    ``up.lock``, the completions after it (lock order: removal lock before ``up.lock``). A failure is logged and
-    the next seat goes on, unless ``strict``. Returns the seats acted on."""
+def resume_removals(project, tmux: Optional[Tmux] = None, only: Optional[str] = None, strict: bool = False) -> dict:
+    """seat T§5: the only code restarting or completing seats being removed. A graceful one that is not running and
+    has work left is started (existing seat only) and awaited; a graceful one without work, and an immediate one
+    (running or not: its confirmed stop is replayed), is completed. The starts happen under ``up.lock``, the
+    completions after it (lock order: removal lock before ``up.lock``). Returns ``{"acted": [...], "failed":
+    {seat: error}}``; with ``strict`` the first failure is raised."""
     from kankan import seatremove
     tmux = tmux or Tmux()
     acted: List[str] = []
+    failed: Dict[str, str] = {}
     to_complete: List[str] = []
+
+    def failure(name: str, err: KankanError) -> None:
+        if strict:
+            raise err
+        failed[name] = err.message
+        project.log("seat_remove_resume_failed", seat=name, error=err.message)
+
     with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
         cfg = project.reload_config()
         for name, seat_cfg in sorted(cfg.seats.items()):
-            if not seat_cfg.removing or (only and name != only) or seats.liveness(project, name) == "alive":
+            if not seat_cfg.removing or (only and name != only):
                 continue
-            acted.append(name)
+            alive = seats.liveness(project, name) == "alive"
+            if seat_cfg.removing == "graceful" and alive:
+                continue  # draining: its launcher completes the removal
             if seat_cfg.removing == "graceful" and seatremove.has_work(project, name):
                 try:
                     session = agent(project, seat_cfg.type, seat=name, tmux=tmux, qa=seat_cfg.role == "qa",
                                     create=False)
                     seatremove.await_start(project, name, session)
+                    acted.append(name)
                 except KankanError as err:
-                    if strict:
-                        raise
-                    project.log("seat_remove_resume_failed", seat=name, error=err.message)
+                    failure(name, err)
             else:
                 to_complete.append(name)
     for name in to_complete:
         try:
+            if project.reload_config().seats.get(name) is not None \
+                    and project.cfg.seats[name].removing == "immediate":
+                seatremove.stop_seat(project, name, kill_alive=True)
             seatremove.complete(project, name)
+            acted.append(name)
         except KankanError as err:
-            if strict:
-                raise
-            project.log("seat_remove_resume_failed", seat=name, error=err.message)
-    return acted
+            failure(name, err)
+    return {"acted": acted, "failed": failed}
 
 
 def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None, qa: Optional[str] = None) -> List[str]:

@@ -131,6 +131,13 @@ def _refuse_unregistered(project, seat: str) -> None:
         raise KankanError(Status.USAGE_ERROR, messages.SEAT_NOT_REGISTERED.format(seat=seat))
 
 
+def _refuse_completing(project, seat: str) -> None:
+    """seat T§5: a seat whose removal is completing (``immediate``) is never occupied again."""
+    seat_cfg = project.cfg.seats.get(seat)
+    if seat_cfg is not None and seat_cfg.removing == "immediate":
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
+
+
 def _candidates(project, agent_type: str) -> List[str]:
     seats = sorted((name for name, sc in project.cfg.work_seats().items()
                     if sc.type == agent_type and not sc.removing),
@@ -154,6 +161,7 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
         if seat is not None and not create:
             _refuse_unregistered(project, seat)
         if seat is not None:
+            _refuse_completing(project, seat)
             lease = _occupy(project, seat, agent_type, pids)
             if lease is None:
                 raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is in use or unavailable")
@@ -192,6 +200,7 @@ def acquire_qa(project, agent_type: str, pids: Optional[dict] = None, create: bo
         cfg = project.reload_config()
         if not create:
             _refuse_unregistered(project, name)
+        _refuse_completing(project, name)
         registered = cfg.qa_seat()
         if registered is not None and registered != name:
             raise KankanError(Status.CONFIG_ERROR, messages.QA_SEAT_OTHER.format(seat=name, registered=registered))
@@ -267,6 +276,9 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
         cfg = project.reload_config()
         existing = cfg.seats.get(seat)
         snap_lists = None
+        if existing is not None and existing.removing and not _lists_open(project, existing):
+            # seat T§5: lists archived by a removal are never re-created, nor its entry rewritten without its flag
+            raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
         if existing is None or not _lists_open(project, existing):
             snap_lists = project.trello.snapshot(cfg.board_id).lists
             ids = {}

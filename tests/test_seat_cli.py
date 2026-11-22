@@ -37,7 +37,8 @@ def started(here, monkeypatch):
         calls.append((agent_type, seat, qa, create, attach))
         return f"ai-proj-{agent_type}-starting-abc"
     monkeypatch.setattr(agents_cmd, "agent", agent)
-    monkeypatch.setattr(agents_cmd, "_wait_started", lambda project, session, what, started: None)
+    from kankan import seatremove
+    monkeypatch.setattr(seatremove, "await_start", lambda project, seat, session: None)
     return calls
 
 
@@ -88,11 +89,13 @@ def test_seat_start_waits_and_reports_failed_start(here, started, monkeypatch, c
     monkeypatch.setattr("kankan.tmux.Tmux.has_session", lambda self, name: False)
     _register(here, "claude-1")
 
-    def fail(project, session, what, started_):
-        raise KankanError(Status.INTERNAL_ERROR, "did not occupy a seat")
-    monkeypatch.setattr(agents_cmd, "_wait_started", fail)
+    from kankan import seatremove
+
+    def fail(project, seat, session):
+        raise KankanError(Status.NEEDS_ACTION, "did not occupy a seat")
+    monkeypatch.setattr(seatremove, "await_start", fail)
     code, out = run(capsys, "seat", "start", "claude-1")
-    assert out["status"] == "internal_error" and "did not occupy" in out["message"]
+    assert out["status"] == "needs_action" and "did not occupy" in out["message"]
 
 
 def test_seat_start_attach_passed(here, started, monkeypatch, capsys):
@@ -118,3 +121,20 @@ def test_seat_flag_combinations(here, capsys, argv):
     _register(here, "claude-1")
     code, out = run(capsys, "seat", *argv)
     assert out["status"] == "usage_error"
+
+
+def test_seat_start_of_a_draining_seat_that_completes_at_once(here, monkeypatch, capsys):
+    """A graceful seat without work may complete its removal before it is seen running: not a failure."""
+    monkeypatch.setattr("kankan.tmux.Tmux.has_session", lambda self, name: False)
+    _register(here, "claude-1")
+    cfg = here.reload_config()
+    cfg.seats["claude-1"].removing = "graceful"
+    save_config(here.paths, cfg)
+
+    def agent(project, agent_type, seat=None, attach=False, tmux=None, preflight=True, qa=False, create=True):
+        from kankan import seatremove
+        seatremove.complete(project, seat)  # its launcher drained and completed at once
+        return "ai-proj-claude-1"
+    monkeypatch.setattr(agents_cmd, "agent", agent)
+    code, out = run(capsys, "seat", "start", "claude-1")
+    assert code == 0
