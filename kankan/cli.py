@@ -398,6 +398,10 @@ def _cmd_stop(args):
     seat = seats.validate_seat(args.seat)
     if seat not in cfg.seats:
         raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
+    from kankan import stopall
+    project = _project()
+    if seats.liveness(project, seat) == "alive":
+        stopall.refuse_other_code(project, [seat], messages.STOP_SEAT_OTHER_CODE.replace("<seat>", seat))
     update_state(paths, seat, lambda s: setattr(s, "stop_requested", True))
     auditlog.append(paths, "stop_requested", seat=seat)
     return {"seat": seat}, f"{seat} stops after its current task"
