@@ -18,15 +18,15 @@ Problems of one card are still reported on that card (`Error`, `Question`, `Bloc
 
 ## 2. The `Alerts` card
 
-**Place.** The `Alerts` card is the **first card of the `kankan` list** on creation; the `Instructions` help card comes second ([§8](#8-changes-to-the-card-instructions-specification)), then the setting cards. kankan does not keep this order when the user changes it but `kankan init` and `kankan doctor` (with fixes) will create the card at the top position when missing.
+**Place.** `kankan init` and `kankan doctor` (with fixes) create a missing `Instructions` help card ([§8](#8-changes-to-the-card-instructions-specification)) and then a missing `Alerts` card, both at the **top of the `kankan` list**, and the setting cards at the bottom: on a new board `Alerts` is first and `Instructions` second. A card created later, when the other one exists, lands above it. kankan never moves these cards afterwards: the user may reorder the list at will.
 
 **Always available.** When an alert is due and the card is missing (never created, archived or deleted), kankan creates it at the top of the `kankan` list and posts the alert there. Archiving the card is therefore a way to clear old alerts, never a way to lose new ones.
 
-**Description.** A fixed text kept current by `kankan doctor`, like the `Instructions` card: each comment is one alert about kankan's agents that does not belong to one card; the user may delete them or archive the card (kankan creates a new one at the next alert); and the closing line "This card is maintained by `kankan doctor`: edits to it are overwritten, deleting it is safe."
+**Description.** A fixed text kept current by `kankan doctor`, like the `Instructions` card: each comment is one alert about kankan's agents that does not belong to one card, and a problem that repeats keeps one comment with a counter; the user may delete them or archive the card (kankan creates a new one at the next alert); and the closing line "This card is maintained by `kankan doctor`: edits to it are overwritten, deleting it is safe."
 
 **Not a setting.** The name `Alerts` is reserved: the card is never an unknown setting. Two open `Alerts` cards in the `kankan` list get `Error` on both, like two setting cards with the same title; meanwhile alerts go to the upper one.
 
-**Old alerts.** kankan keeps its latest 30 comments on the card and deletes older ones, so the card stays readable.
+**Old alerts.** kankan keeps its latest 30 alert comments on the card and deletes older ones, so the card stays readable. Comments written by the user are never deleted.
 
 ## 3. Alerts
 
@@ -40,16 +40,24 @@ Problems of one card are still reported on that card (`Error`, `Question`, `Bloc
 | A6 Start at boot failed | `kankan up` fails while it runs without a terminal (in practice, started by `kankan autostart` at boot). | `kankan up`. | The error message, and that the agents of this project did not start. |
 
 **Comment.** Every alert comment has:
-1. a first line `kankan alert: <title>`, with the alert's title from the table and the seat when there is one;
+1. a first line `kankan alert: <title>`, with the alert's title from the table and the seat when there is one; for a repeated alert it ends with the counter `+N since <time>` (see "Repeats"), for example `kankan alert: Launcher failed (seat dev1) +3 since 2026-11-22 10:15 UTC`;
 2. the problem, in the words of the message shown in the agent's session or printed by the command;
 3. what to do;
 4. the machine's host name and the kankan version that posted it;
 5. the mention of the board's admins other than kankan's own account (the people [initial §14.2](initial_spec_functional.md#142-notifications) mentions for cards kankan created).
-6. a counter for repeating alerts
 
-**No floods.** A launcher restarted by its supervisor, or an agent that keeps running commands, can meet the same problem many times. An alert is considered to be repeated when the relative comment has the same alert type, same seat or command, same problem text of an existing comment that was already posted in the last 24 hours. In such case, before posting a new comment the old one is deleted and the new comment adds or increments the counter. A different text is a different alert: for example a different version in A5. So before posting an alert, kankan will read all existing comments from the last 24 hours, newest first, stopping when a same one is found or there are no more comments or when the read comment is older than 24h. When a comment for the same problem is found, get the counter if any (defaults to 0), delete that comment, increment the counter by 1 and set it in the new comment text, then post the new comment. When no previous comment is found, post a new comment without counter.
+**Repeats.** A launcher restarted by its supervisor, or an agent that keeps running commands, can meet the same problem many times. The same alert is the same alert type, for the same seat (or none, for A6), with the same problem text; the counter, the host name, the version line and the mention are not compared. A different problem text is a different alert: for example a different version in A5. When the same alert is due again within 24 hours of kankan's latest comment for it, kankan posts the new comment and then deletes that previous one, so a problem that keeps happening is a single comment, at the top of the comments, whose counter grows:
+- the first occurrence has no counter;
+- the second has `+1`, the third `+2`, and so on: `+N` counts every occurrence after the first, including those not posted because of the rate limit below;
+- `since` keeps the time of the first occurrence, in UTC.
 
-**Never in the way.** Posting an alert never changes what kankan does: the launcher still exits with the same code, the supervisor still restarts it, the agent command still refuses, `kankan up` still fails. When the alert cannot be posted (Trello unreachable, credential refused, `kankan` list missing or archived), it is only recorded in the audit log; it is not posted later. Posting adds at most 15 seconds to the exit, waiting for another process's post included.
+After 24 hours without the same alert, or after the user deleted its comment or archived the card, the next occurrence starts again without counter. Only kankan's own alert comments are compared; comments written by the user are never matched or deleted.
+
+Each repeat mentions the board's admins again; deleting the previous comment removes its notification on Trello, so the user finds one notification per problem. Because repeats replace their comment instead of adding one, a repeating problem never pushes a different alert out of the latest 30.
+
+**Rate limit.** An agent that keeps running commands could otherwise post an alert every few seconds, and every post uses Trello requests that the agents need for their work. So the same alert is posted at most once every 5 minutes (`alert_min_interval_minutes` in the project configuration; 0 removes the limit). An occurrence within that time makes no Trello request: it is only recorded in the audit log and counted in the next comment's `+N`. A different alert, even of the same type and seat, is posted at once. `kankan up`, `kankan start` and `kankan agent` reset the limit, so after a repair attempt an alert that is still due is posted at once; for A5 the remedy itself, `kankan stop` then `kankan start`, resets it.
+
+**Never in the way.** Posting an alert never changes what kankan does: the launcher still exits with the same code, the supervisor still restarts it, the agent command still refuses, `kankan up` still fails. When the alert cannot be posted (Trello unreachable, credential refused, `kankan` list missing or archived), it is only recorded in the audit log; it is not posted later, and the previous comment for the same alert stays as it is. When the previous comment cannot be deleted after the new one was posted, both stay until old alerts are removed. Posting adds at most 15 seconds to the exit, waiting for another process's post included.
 
 ## 4. What the user does
 
@@ -71,7 +79,7 @@ How this feature changes [`initial_spec_functional.md`](initial_spec_functional.
 
 **§15.2 Situations and behaviour.** In the rows "The launcher dies", "Different `registry-id`" and "Workflow list archived or deleted", add: "alert on the `Alerts` card". Add a row: "Supervisor gives up after repeated launcher failures | The seat stays stopped; alert on the `Alerts` card."
 
-**§15.5 `kankan doctor`.** In "Project", add: "the `Alerts` card (created; description rewritten when outdated; moved back to the top of the `kankan` list)."
+**§15.5 `kankan doctor`.** In "Project", add: "the `Alerts` card (created at the top of the `kankan` list when missing; description rewritten when outdated)."
 
 **§16.2 Agent commands.** After the sentence on the code identifier, add: "The refusal is also posted as an alert ([alerts §3](alerts_spec_functional.md#3-alerts), A5)."
 
@@ -87,7 +95,11 @@ How this feature changes [`boardsettings_spec_functional.md`](boardsettings_spec
 
 How this feature changes [`cardinstructions_spec_functional.md`](cardinstructions_spec_functional.md). That file is not edited.
 
-**§6 The `Instructions` card.** Replace "kept by kankan as the **first card of the list**, above the setting cards" with "kept by kankan as the **second card of the list**, after the `Alerts` card ([alerts §2](alerts_spec_functional.md#2-the-alerts-card)) and above the setting cards".
+**§6 The `Instructions` card, "The card".** Replace "kept by kankan as the **first card of the list**, above the setting cards" with "created at the **top of the list**, above the setting cards, just before kankan creates a missing `Alerts` card above it ([alerts §2](alerts_spec_functional.md#2-the-alerts-card)); kankan never moves it afterwards".
+
+**§6 The `Instructions` card, "Keeping it current".** Remove the sentence "`doctor` also moves the card back to the top of the `kankan` list when another card is above it, and prints "Instructions card moved to the top of the kankan list"." Replace "`doctor --no-fix` only reports that the card is outdated or not at the top" with "`doctor --no-fix` only reports that the card is missing or outdated".
+
+**§10 Acceptance tests, test 8.** Replace "`init` creates the `Instructions` card, first in the `kankan` list, with blocks for every configured agent type; a card dragged above it is put back below it by the next `doctor`, and `doctor --no-fix` reports it;" with "`init` creates the `Instructions` card second in the `kankan` list, below the `Alerts` card, with blocks for every configured agent type; a card dragged above it stays there after `doctor`;".
 
 ## 9. Changes to the questions specification
 
@@ -98,15 +110,18 @@ How this feature changes [`questions_spec_functional.md`](questions_spec_functio
 ## 10. Acceptance tests
 
 1. A launcher stopping on a configuration problem (the `Q&A` list archived under a running Q&A seat) posts A1 on the `Alerts` card, mentioning the board's admins; the launcher's exit code and the supervisor's behaviour are unchanged.
-2. A launcher failing with an internal error posts A2; its supervisor restarts it; the same failure after the restart posts nothing new within 24 hours; a failure with a different message posts again.
+2. A launcher failing with an internal error posts A2 without counter; its supervisor restarts it; the same failure within 5 minutes posts nothing and is recorded in the audit log; the same failure after 5 minutes posts a comment ending its first line with `+2 since <time of the first>` (the occurrence not posted is counted) and deletes the first one; a failure with a different message posts a separate comment at once and leaves the other.
 3. After 5 failures in 10 minutes, the supervisor posts A3.
-4. An agent command running a different kankan than its launcher refuses with `config_error` and posts A5 with both versions and directories; a second command with the same mismatch posts nothing new.
+4. An agent command running a different kankan than its launcher refuses with `config_error` and posts A5 with both versions and directories; a second command with the same mismatch within 5 minutes posts nothing; after `kankan stop` and `kankan start`, the same mismatch posts at once, replacing the comment with a `+2` one.
 5. With the `Alerts` card archived, the next alert creates a new `Alerts` card at the top of the `kankan` list.
 6. With Trello unreachable, an alert is recorded only in the audit log, and the launcher exits with the code it had without this feature, after at most 15 seconds more.
-7. `kankan doctor` creates a missing `Alerts` card, rewrites an edited description and restores the order `Alerts`, `Instructions`, setting cards; `--no-fix` reports each and writes nothing.
+7. `kankan doctor` creates a missing `Instructions` card and then a missing `Alerts` card at the top of the `kankan` list (with both missing, `Alerts` ends up first), and rewrites an edited description; cards the user reordered stay where they are; `--no-fix` reports each missing or outdated card and writes nothing.
 8. A card named `Alerts` is not an unknown setting; two of them get `Error`.
 9. `kankan up` run without a terminal with a missing agent CLI posts A6; run from a terminal it posts nothing.
-10. After 50 alerts, the oldest of kankan's comments on the card are deleted.
+10. After more than 30 different alerts, the oldest of kankan's alert comments on the card are deleted; the user's comments stay.
+11. The same alert due more than 24 hours after kankan's latest comment for it posts a new comment without counter and leaves the old one; after the user deletes the latest comment, the next occurrence also starts without counter.
+12. When deleting the previous comment of a repeated alert fails, the new comment is posted all the same and both stay.
+13. With `alert_min_interval_minutes` set to 0, every occurrence is posted; `kankan up` and `kankan agent` reset the limit like `kankan start`.
 
 ## 11. Out of scope
 
