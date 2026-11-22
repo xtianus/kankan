@@ -445,7 +445,7 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
             discard_conversation(project.paths, older)
         project.log("qa_claimed", seat=lease.seat, card=card.id, conversation=conversation,
                     old=current.oid if current else None, new=oid)
-    with conversation_lock(project.paths, conversation, CONVERSATION_LOCK_TIMEOUT):
+    with card_conversation_lock(project, card.id, conversation, CONVERSATION_LOCK_TIMEOUT):
         pass  # creates the conversation directory, now that the ref names it
     base, reflog = worktrees.reset_detached(project.paths.seat_worktree(lease.seat), _integration_tip(project))
     return _store(project, lease, card.id, meta.short, conversation, pair, base, reflog)
@@ -480,6 +480,21 @@ def drop_orphan(project, card_id: str, conversation: str) -> None:
         discard_conversation(project.paths, conversation)
 
 
+@contextlib.contextmanager
+def card_conversation_lock(project, card_id: str, conversation: str, timeout: float) -> Iterator[None]:
+    """``conversation_lock`` for an operation on the conversation of ``card_id``. On release it deletes the
+    directory when no ref names the conversation any more: an end while the lock was held could not delete it
+    (``discard_conversation`` only tries the lock), and the operation may have re-created files in it."""
+    with conversation_lock(project.paths, conversation, timeout):
+        try:
+            yield
+        finally:
+            try:
+                drop_orphan(project, card_id, conversation)
+            except KankanError as err:  # never hides the operation's own outcome; reconcile reports a leftover
+                project.log("qa_drop_orphan_failed", card=card_id, conversation=conversation, error=err.message)
+
+
 def start_turn(project, lease, task: dict, inputs: Inputs, context: Optional[Inputs] = None) -> str:
     """Start a turn: under the conversation lock, re-validate the ref and the seat, write ``turn.json`` (token,
     inputs, the first turn's context, the launcher run), then the seat task's ``turn``. The caller writes the
@@ -489,7 +504,7 @@ def start_turn(project, lease, task: dict, inputs: Inputs, context: Optional[Inp
     if not ours(project.refs.read(card_ref(task["card"])), lease.seat, conversation):
         raise ended  # checked before the lock too, so an ended conversation's directory is not re-created
     token = uuid.uuid4().hex[:16]
-    with conversation_lock(project.paths, conversation, CONVERSATION_LOCK_TIMEOUT):
+    with card_conversation_lock(project, task["card"], conversation, CONVERSATION_LOCK_TIMEOUT):
         value = project.refs.read(card_ref(task["card"]))
         if not ours(value, lease.seat, conversation):
             drop_orphan(project, task["card"], conversation)

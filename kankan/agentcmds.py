@@ -455,7 +455,7 @@ def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, templa
     current = ctx.task
     if current.get("kind") == "qa":
         _own_ref(ctx, QA_PHASES)  # before the conversation lock, so an ended conversation's directory stays gone
-        with qa.conversation_lock(project.paths, current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
+        with qa.card_conversation_lock(project, current["card"], current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
             # under the lock no turn starts: the token checked here stays current until the signal is written
             if not _qa_still_ours(ctx):
                 qa.drop_orphan(project, current["card"], current["conversation"])

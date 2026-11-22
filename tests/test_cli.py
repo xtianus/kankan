@@ -300,6 +300,31 @@ def test_up_with_qa_only(calls, capsys):
     assert code == 0 and calls["up"] == ({}, "claude")
 
 
+def test_up_without_arguments_starts_every_registered_seat(kproject, calls, capsys):
+    from kankan.config import SeatConfig, save_config
+    cfg = kproject.reload_config()
+    cfg.seats.update({"claude-1": SeatConfig("claude"), "claude-2": SeatConfig("claude"),
+                      "codex-1": SeatConfig("codex"), "codex-qa": SeatConfig("codex", role="qa")})
+    save_config(kproject.paths, cfg)
+    code, out = run(capsys, "up")
+    assert code == 0 and calls["up"] == ({"claude": 2, "codex": 1}, "codex")
+    assert out["data"]["up"] == "claude=2 codex=1 qa=codex"
+
+
+def test_up_without_arguments_or_seats_prints_the_commands(calls, capsys):
+    code, out = run(capsys, "up")
+    assert out["status"] == "needs_action" and "up" not in calls
+    assert "no seats registered" in out["message"] and "kankan up claude=<n>" in out["message"]
+    assert "kankan autostart enable" in out["message"] and "kankan init" not in out["message"]
+
+
+def test_up_without_arguments_in_an_unbound_clone_asks_for_init(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    code, out = run(capsys, "up")
+    assert out["status"] == "needs_action"
+    assert "kankan init <board-url>" in out["message"] and "kankan up claude=<n>" in out["message"]
+
+
 def test_autostart_enable_with_qa(calls, capsys):
     code, out = run(capsys, "autostart", "enable", "claude=2", "qa=codex")
     assert code == 0 and calls["autostart"] == ({"claude": 2}, "codex")

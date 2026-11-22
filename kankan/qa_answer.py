@@ -254,7 +254,7 @@ def post(ctx, text: str, turn: str, kind: str) -> List[str]:
     """Steps 1–3 of ``answer`` (``kind="answer"``) or ``handoff``: validate, record the pending operation, post
     the chunks not yet posted. Returns the comment IDs of every chunk."""
     task = qa_task(ctx, kind)
-    with qa.conversation_lock(ctx.project.paths, task["conversation"], LOCK_TIMEOUT):
+    with qa.card_conversation_lock(ctx.project, task["card"], task["conversation"], LOCK_TIMEOUT):
         return _post(ctx, task, text, turn, kind)[0]
 
 
@@ -347,7 +347,7 @@ def _commit_check(project, lease, task: dict, kind: str = "answer") -> None:
 def _run(ctx, text: str, turn: str, kind: str) -> dict:
     task = qa_task(ctx, kind)
     project = ctx.project
-    with qa.conversation_lock(project.paths, task["conversation"], LOCK_TIMEOUT):
+    with qa.card_conversation_lock(project, task["card"], task["conversation"], LOCK_TIMEOUT):
         ids, done = _post(ctx, task, text, turn, kind)
         if not done:
             if kind == "handoff":
@@ -384,7 +384,7 @@ def complete_pending(project, lease, task: dict, lock_timeout: float = LOCK_TIME
         return None
     if not _pending_path(project.paths, conversation).exists():
         return None
-    with qa.conversation_lock(project.paths, conversation, lock_timeout):
+    with qa.card_conversation_lock(project, task["card"], conversation, lock_timeout):
         pending = read_pending(project.paths, conversation)
         if pending is None:
             qa.drop_orphan(project, task["card"], conversation)  # an end in between: the lock re-created it

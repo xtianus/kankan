@@ -349,6 +349,25 @@ def test_card_moved_to_done_between_chunks_gives_not_owner(conv, monkeypatch):
     assert signals(conv) == []
 
 
+def test_an_end_while_answer_holds_the_lock_leaves_no_directory(conv, monkeypatch):
+    # the user moves the card as soon as the answer appears: the end cannot delete the directory while `answer`
+    # holds the conversation lock (it only tries it), so `answer` deletes it on releasing the lock
+    real = conv.ctx.project.trello.comment_once
+
+    def comment_once(card_id, text, op_id):
+        comment = real(card_id, text, op_id)
+        ender = threading.Thread(target=qa.end, args=(conv.project, conv.lease, conv.task))
+        ender.start()
+        ender.join()
+        return comment
+    monkeypatch.setattr(conv.ctx.project.trello, "comment_once", comment_once)
+    with pytest.raises(KankanError) as err:
+        qa_answer.answer(conv.ctx, "answer", conv.token)
+    assert err.value.status == Status.NOT_OWNER
+    assert any(e["event"] == "qa_discard_busy" for e in auditlog.read(conv.project.paths))
+    assert qa.conversations(conv.project.paths) == []
+
+
 def test_answer_after_the_end_gives_not_owner_and_leaves_no_directory(conv):
     qa.end(conv.project, conv.lease, conv.task)
     with pytest.raises(KankanError) as err:

@@ -60,8 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seat")
     p.add_argument("--qa", action="store_true", help="start the Q&A agent (seat <type>-qa)")
     p.add_argument("--attach", action="store_true")
-    p = add("up", "ensure the given number of agents (and the Q&A agent with qa=<type>) run, starting the missing ones")
-    p.add_argument("wanted", nargs="+", metavar="<type>=<n>|qa=<type>")
+    p = add("up", "ensure the given number of agents (and the Q&A agent with qa=<type>) run, starting the missing "
+                  "ones; without arguments, every seat registered in the project")
+    p.add_argument("wanted", nargs="*", metavar="<type>=<n>|qa=<type>")
     p = add("autostart", "start agents at boot (systemd user service)")
     p.add_argument("action", choices=["enable", "disable"])
     p.add_argument("wanted", nargs="*", metavar="<type>=<n>|qa=<type>")
@@ -491,12 +492,20 @@ def _cmd_agent(args):
 @command("up")
 def _cmd_up(args):
     from kankan import agents_cmd
+    items = args.wanted
+    if not items:  # every seat registered in the project; before opening it, which an unbound clone refuses
+        items = agents_cmd.registered_up_args(os.getcwd()).split()
+        if not items:
+            raise KankanError(Status.NEEDS_ACTION, agents_cmd.start_help(os.getcwd(), messages.UP_NO_SEATS))
     project = _project()
-    wanted, qa = agents_cmd.parse_wanted(args.wanted)
+    wanted, qa = agents_cmd.parse_wanted(items)
     for warning in agents_cmd.warnings_for(project):
         print(f"warning: {warning}", file=sys.stderr)
     started = agents_cmd.up(project, wanted, qa=qa)
-    return {"started": started}, (f"started {len(started)} agent(s)" if started else "all requested agents are running")
+    up_args = " ".join(items)
+    return ({"started": started, "up": up_args},
+            f"started {len(started)} agent(s) for `kankan up {up_args}`" if started
+            else f"all agents of `kankan up {up_args}` are running")
 
 
 @command("autostart")

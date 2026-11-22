@@ -293,32 +293,10 @@ def report_text(report: dict) -> str:
 
 
 # ---------------------------------------------------------------------- kankan start
-def _registered_args(cfg) -> str:
-    counts: Dict[str, int] = {}
-    qa = None
-    for seat_cfg in cfg.seats.values():
-        if seat_cfg.role == "qa":
-            qa = seat_cfg.type
-        else:
-            counts[seat_cfg.type] = counts.get(seat_cfg.type, 0) + 1
-    return " ".join([f"{t}={n}" for t, n in sorted(counts.items())] + ([f"qa={qa}"] if qa else []))
-
-
 def no_record_help(cwd) -> str:
     """What to run when there is no stop record: ``init`` first for an unbound clone, then ``up``/``autostart``."""
-    from kankan.config import Paths, load_config
-    paths = Paths.discover(cwd)
-    try:
-        cfg = load_config(paths)
-    except KankanError:
-        cfg = None
-    lines = ["no stop record: `kankan start` restores only what `kankan stop` stopped. To start agents:"]
-    if cfg is None or not cfg.board_id:
-        lines.append("  kankan init <board-url>          (this clone is not bound to a board yet)")
-    args = (_registered_args(cfg) if cfg is not None else "") or "claude=<n> codex=<n> [qa=<type>]"
-    lines.append(f"  kankan up {args}")
-    lines.append(f"  kankan autostart enable {args}   (optional: start them at boot)")
-    return "\n".join(lines)
+    return agents_cmd.start_help(cwd, "no stop record: `kankan start` restores only what `kankan stop` stopped. "
+                                      "To start agents:")
 
 
 def start_all(project, say: Callable[[str], None] = lambda text: None) -> dict:

@@ -146,6 +146,7 @@ After the board has been initialized, agent **seats** can be added. A seat is an
 
 ```bash
 kankan up claude=2 codex=1 qa=codex        # make sure these agents run; starts only the missing ones
+kankan up                                  # make sure every seat registered in the project runs
 kankan agent claude [--seat claude-1] [--attach]
 kankan autostart enable claude=2 codex=1   # systemd user service kankan-up@<project>.service
 kankan autostart disable
@@ -153,7 +154,7 @@ kankan autostart disable
 
 The three commands differ in when they act:
 
-- **`kankan up <type>=<n>...`** makes sure that `<n>` agents of each type run: it counts the agents already running and starts only the missing ones, waiting until each has started. It never stops an agent, so running it again is harmless. Use it to start work: after `kankan init`, after a reboot without autostart, or to add agents (`kankan up claude=3` while two run starts one more). To run fewer agents, stop the extra seats ([section 4.3](#43-pausing-work)).
+- **`kankan up <type>=<n>...`** makes sure that `<n>` agents of each type run: it counts the agents already running and starts only the missing ones, waiting until each has started. It never stops an agent, so running it again is harmless. Use it to start work: after `kankan init`, after a reboot without autostart, or to add agents (`kankan up claude=3` while two run starts one more). To run fewer agents, stop the extra seats ([section 4.3](#43-pausing-work)). Without arguments, `kankan up` uses the seats registered in the project (every seat started at least once and not removed with `kankan seat remove`, the Q&A seat included) and prints the counts it used, for example `kankan up claude=2 codex=1 qa=codex`. When no seat is registered yet it starts nothing and prints the commands to run instead (exit 14): `kankan up …` and `kankan autostart enable …`, preceded by `kankan init` when the clone is not bound to a board yet. To remove a seat for good, so that `kankan up` no longer starts it, use `kankan seat remove <seat>` ([section 9.2](#92-manual-administration)).
 - **`kankan agent <type>`** starts one more agent, whatever is already running. `--seat` chooses its seat (it refuses a seat that is already running) and `--attach` attaches your terminal to its tmux session from the first moment. Use it to start one particular seat, or to follow an agent from its first moment.
 - **`kankan autostart enable <type>=<n>...`** starts nothing now: it installs a systemd user service that runs `kankan up` with the same arguments at boot, and warns when lingering is off, since the agents then start only after you log in ([section 9.1](#91-keeping-agents-running-after-logout-and-reboot)). Use it together with `kankan up` when the agents should come back by themselves after a reboot. Running it again with other counts replaces them. `kankan autostart disable` removes the service and leaves the running agents alone.
 
@@ -185,9 +186,11 @@ You may change the model and effort at any time by ticking items on the setting 
 ### 4.3 Pausing work
 
 ```bash
-kankan stop claude-1              # the agent exits after its current task
-kankan stop [--graceful]          # every agent of the project, and autostart disabled (asks first)
-kankan start                      # start again what the last `kankan stop` stopped
+kankan stop             # immediately quit all agents and disable autostart
+kankan stop --graceful  # wait for the agents to finish their current task, then stop
+kankan stop claude-1    # the agent exits after its current task
+kankan start            # start again what the last `kankan stop` stopped
+kankan up               # start every seat registered in the project
 ```
 
 `kankan stop <seat>` stops one agent after its current task, without changing autostart. If kankan was upgraded or changed after that agent started, it refuses and changes nothing, because the agent could not finish its task: run `kankan stop` to quit all agents now, or `kankan seat recover <seat> --kill` for that one. To stop a single card instead of an agent, put `HOLD` on it ([section 5.2](#52-task-cards)).
@@ -195,6 +198,8 @@ kankan start                      # start again what the last `kankan stop` stop
 `kankan stop` without a seat stops **all** the project's agents, the Q&A agent included, and disables autostart. It shows what it will stop and asks for confirmation (`--yes` skips the question and is required from a script). By default it quits the agents **immediately**, as `kankan seat recover --kill` would: each interrupted card stays with its seat, gets a comment and is resumed at the next start. With `--graceful` it instead waits for each agent to finish its current task (a Q&A agent its current answer), showing what each one is doing; that can take long, and Ctrl-C only stops the waiting (the agents still stop after their task). If kankan was upgraded or changed after the running agents started, `--graceful` refuses and changes nothing: those agents could not finish their task, because kankan would refuse their commands. Run `kankan stop` without it. At the end kankan checks that no agent runs, no tmux session of the project is open and autostart is off, and lists anything left with what to do (exit 14). Running `kankan stop` again is harmless: what is already stopped or disabled is reported as such.
 
 `kankan start` resumes everything that `kankan stop` stopped: the same agents (`kankan up` with the same counts) and autostart if it was enabled. Without a stop record it prints the commands to run instead: `kankan up …` and `kankan autostart enable …`, preceded by `kankan init` when the clone is not bound to a board yet.
+
+`kankan start` restores only the agents that were running when `kankan stop` ran (or the counts of the autostart service, when it was enabled): agents you had stopped before with `kankan stop <seat>` stay stopped. To start every agent of the project, whatever was stopped and how, run `kankan up` without arguments; it starts only the missing ones, so it can follow `kankan start` safely.
 
 ### 4.4 Card instructions
 
@@ -587,7 +592,7 @@ When credentials are not found, kankan asks for them and stores them in the rele
 
 In these commands `<type>` is `claude` or `codex`.
 
-**`kankan up <type>=<n>... [qa=<type>]`**: makes sure that `<n>` agents of each type run, starting only the missing ones ([section 4.1](#41-starting-agents)). For example `kankan up claude=2 codex=1 qa=claude`.
+**`kankan up [<type>=<n>... [qa=<type>]]`**: makes sure that `<n>` agents of each type run, starting only the missing ones ([section 4.1](#41-starting-agents)). For example `kankan up claude=2 codex=1 qa=claude`. Without arguments, every seat registered in the project.
 - `qa=<type>`: also run the Q&A agent, of that type ([section 5.3](#53-questions-qa-cards)).
 
 **`kankan agent <type> [--seat <seat>] [--qa] [--attach]`**: starts one agent in its own tmux session.

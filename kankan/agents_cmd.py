@@ -43,6 +43,47 @@ def parse_wanted(items: List[str]) -> Tuple[Dict[str, int], Optional[str]]:
     return wanted, qa
 
 
+def registered_args(cfg) -> str:
+    """``<type>=<n> … [qa=<type>]`` for every seat registered in the project (empty when there is none): what
+    ``kankan up`` without arguments starts and what ``kankan start`` without a stop record suggests."""
+    counts: Dict[str, int] = {}
+    qa = None
+    for seat_cfg in cfg.seats.values():
+        if seat_cfg.role == "qa":
+            qa = seat_cfg.type
+        else:
+            counts[seat_cfg.type] = counts.get(seat_cfg.type, 0) + 1
+    return " ".join([f"{t}={n}" for t, n in sorted(counts.items())] + ([f"qa={qa}"] if qa else []))
+
+
+def start_help(cwd, intro: str) -> str:
+    """``intro``, then what to run to start agents: ``init`` first for an unbound clone, then ``up``/``autostart``
+    with the registered seats' counts (placeholders when none is registered)."""
+    from kankan.config import Paths, load_config
+    paths = Paths.discover(cwd)
+    try:
+        cfg = load_config(paths)
+    except KankanError:
+        cfg = None
+    lines = [intro]
+    if cfg is None or not cfg.board_id:
+        lines.append("  kankan init <board-url>          (this clone is not bound to a board yet)")
+    args = (registered_args(cfg) if cfg is not None else "") or "claude=<n> codex=<n> [qa=<type>]"
+    lines.append(f"  kankan up {args}")
+    lines.append(f"  kankan autostart enable {args}   (optional: start them at boot)")
+    return "\n".join(lines)
+
+
+def registered_up_args(cwd) -> str:
+    """The ``up`` arguments of the seats registered in the clone at ``cwd``; empty when unbound or without seats."""
+    from kankan.config import Paths, load_config
+    try:
+        cfg = load_config(Paths.discover(cwd))
+    except KankanError:
+        return ""
+    return registered_args(cfg) if cfg.board_id else ""
+
+
 def _check_collision(project, tmux: Tmux) -> None:
     """Another repository whose sanitized project name is the same would share session names."""
     prefix = f"ai-{sanitize(project.paths.project)}-"

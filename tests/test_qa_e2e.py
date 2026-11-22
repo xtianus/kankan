@@ -167,8 +167,8 @@ def test_question_follow_up_and_handoff_implemented_reviewed_and_integrated(stac
     env.fake.user_move(first["id"], cfg.done)
     assert wait_for(lambda: ref_meta(env, first) is None, timeout=30)
     assert env.fake.card_list(second["id"]) == cfg.done and env.fake.card_list(first["id"]) == cfg.done
-    # a command racing the end may re-create the conversation directory until qa.drop_orphan removes it
-    assert wait_for(lambda: diag.reconcile(env.project) == [], timeout=10), diag.reconcile(env.project)
+    # a command holding the conversation lock at the end keeps the directory until it releases the lock
+    assert wait_for(lambda: diag.reconcile(env.project) == [], timeout=30), diag.reconcile(env.project)
 
 
 class LockWatch:
