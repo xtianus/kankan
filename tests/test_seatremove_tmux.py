@@ -62,13 +62,19 @@ def test_ctrl_c_then_autonomous_completion(stack, monkeypatch):
     assert wait_for(lambda: "claude-1" not in project.reload_config().seats, timeout=60)
 
 
-def test_removing_seat_restarted_by_up_completes(stack):
+def test_removing_seat_restarted_by_up_completes(stack, tmp_path, monkeypatch):
     project, fake, server = stack
+    flag = tmp_path / "go"  # the agent works on its card until the flag exists: killed mid-card for sure
+    scenario = tmp_path / "flag-scenario.json"
+    scenario.write_text(json.dumps({"steps": [
+        {"shell": f"while [ ! -f {flag} ]; do sleep 0.2; done; {COMMIT_AND_DONE}"}, {"sleep": 120}]}))
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", str(scenario))
     card = fake.add_card(project.cfg.backlog, "c")
     agents_cmd.up(project, {"claude": 1})
     assert wait_for(lambda: launcher_state(project, "claude-1") == "working", timeout=30)
     stopall.stop_all(project, confirm=lambda text: True, say=lambda text: None)  # killed in the middle of the card
     assert project.refs.read(card_ref(card["id"])).meta["owner"] == "claude-1"
+    flag.write_text("")
     report = _remove_graceful(project)  # stopped seat with work: started again, finishes, removed
     assert report["seat"] == "claude-1" and "claude-1" not in project.reload_config().seats
     assert project.refs.read(card_ref(card["id"])).meta["cause"] == "seat_removed"
