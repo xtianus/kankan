@@ -148,7 +148,7 @@ class Launcher:
         self.lease = self.acquire(pids)
         self.project.reload_config()
         # A stale stop of a previous run is cleared before `starting` is published: a stop requested once the seat
-        # shows `starting` must never be erased (`kankan stop <seat>` during startup).
+        # shows `starting` must never be erased (`kankan seat stop <seat>` during startup).
         update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
         self.set_state('starting')
         if main_wts:
@@ -174,7 +174,7 @@ class Launcher:
 
     def acquire(self, pids: dict) -> Lease:
         """Occupy the seat (hook: the Q&A launcher occupies its ``<type>-qa`` seat)."""
-        return seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
+        return seats.acquire(self.project, self.type, self.wanted_seat, pids=pids, create=not seats.existing_only())
 
     def _resume_block_journal(self) -> None:
         state = load_state(self.project.paths, self.lease.seat)
@@ -499,8 +499,37 @@ class Launcher:
                 update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, 'running_selection', None))
             except Exception:  # noqa: BLE001 - shutdown must release the seat flock
                 pass
-            seats.release(self.project, self.lease, retain=self.unsafe)
+            seat, retained = self.lease.seat, self.unsafe
+            seats.release(self.project, self.lease, retain=retained)
             self.lease = None
+            if not retained:
+                self.complete_removal(seat)
+
+    def complete_removal(self, seat: str) -> None:
+        """seat T§5: after releasing the seat, complete its graceful removal when no work is left. An immediate
+        removal is completed by the command that killed this launcher; a failure is saved as ``remove_error``."""
+        from kankan import seatremove
+        try:
+            seat_cfg = self.project.reload_config().seats.get(seat)
+            if seat_cfg is None or seat_cfg.removing != "graceful" or seatremove.has_work(self.project, seat):
+                return
+            seatremove.complete(self.project, seat)
+            self.log("seat_removed_by_launcher")
+        except Exception as err:  # noqa: BLE001 - shutdown must finish; the next `up` or `seat remove` retries
+            self.log("seat_remove_failed", error=str(err))
+
+    def removing_mode(self) -> Optional[str]:
+        """The seat's removal mode, read again from ``config.json`` (another process writes it)."""
+        try:
+            seat_cfg = self.project.reload_config().seats.get(self.lease.seat)
+        except KankanError:
+            return None
+        return seat_cfg.removing if seat_cfg is not None else None
+
+    def drained(self) -> bool:
+        """seat T§5: a seat being removed gracefully exits once it holds no card."""
+        from kankan import seatremove
+        return self.removing_mode() == "graceful" and not seatremove.has_work(self.project, self.lease.seat)
 
 
     def step(self) -> bool:
@@ -527,7 +556,7 @@ class Launcher:
             return False
         self.track_limit(cls)
         if self.state == "limited":
-            return self.stop_requested() and not self.task
+            return (self.stop_requested() or self.drained()) and not self.task
         if self.state == "idle":
             return self.idle(cls)
         self.periodic_board_check()
@@ -591,7 +620,8 @@ class Launcher:
                 self.activate(cls)
             return self.exit_now
         now = clock.monotonic()
-        if self.cfg.idle_exit_minutes and now - self.idle_since >= self.cfg.idle_exit_minutes * 60:
+        if self.cfg.idle_exit_minutes and now - self.idle_since >= self.cfg.idle_exit_minutes * 60 \
+                and not self.removing_mode():  # seat T§5: a seat being removed stays until it has finished
             self.log("idle_exit")
             return True
         if now < self.next_tick:
@@ -613,6 +643,9 @@ class Launcher:
         if self.gc_due():
             self.gc_resume_labels()
         if task is None:
+            if self.drained():
+                self.log("seat_drained")
+                return True
             return False
         pair = ModelEffort(task['model'], task['effort'])
         self.prepared = task

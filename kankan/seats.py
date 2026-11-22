@@ -117,24 +117,51 @@ def owned_cards(project, seat: str, phases=("impl", "review")) -> List[RefValue]
     return [value for value in refs.values() if value.meta.get("owner") == seat and value.meta.get("phase") in phases]
 
 
+# Set on an agent's tmux session by `kankan seat start` and by restarts of seats being removed: the launcher then
+# occupies only a registered seat and never re-creates one removed meanwhile (seat T§5).
+EXISTING_ONLY_ENV = "KANKAN_SEAT_EXISTING_ONLY"
+
+
+def existing_only() -> bool:
+    return os.environ.get(EXISTING_ONLY_ENV) == "1"
+
+
+def _refuse_unregistered(project, seat: str) -> None:
+    if seat not in project.cfg.seats:
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_NOT_REGISTERED.format(seat=seat))
+
+
+def _refuse_completing(project, seat: str) -> None:
+    """seat T§5: a seat whose removal is completing (``immediate``) is never occupied again."""
+    seat_cfg = project.cfg.seats.get(seat)
+    if seat_cfg is not None and seat_cfg.removing == "immediate":
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
+
+
 def _candidates(project, agent_type: str) -> List[str]:
-    seats = sorted((name for name, sc in project.cfg.work_seats().items() if sc.type == agent_type),
+    seats = sorted((name for name, sc in project.cfg.work_seats().items()
+                    if sc.type == agent_type and not sc.removing),
                    key=lambda n: int(n.rsplit("-", 1)[1]))
     holding = {v.meta.get("owner") for v in project.refs.list(CARD_PREFIX).values()
                if v.meta.get("phase") in ("impl", "review")}
     return [s for s in seats if s in holding] + [s for s in seats if s not in holding]
 
 
-def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional[dict] = None) -> Lease:
-    """Occupy a seat (§7.1–7.3) under the project lock and return its lease."""
+def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional[dict] = None,
+            create: bool = True) -> Lease:
+    """Occupy a seat (§7.1–7.3) under the project lock and return its lease. A seat being removed is occupied
+    only when named; with ``create`` false only a registered seat is (seat T§5)."""
     validate_type(agent_type)
     if seat is not None and seat_type(seat) != agent_type:
         raise KankanError(Status.USAGE_ERROR, f"seat {seat} is not of type {agent_type}")
     if seat is not None and is_qa(seat):
-        return acquire_qa(project, agent_type, pids)
+        return acquire_qa(project, agent_type, pids, create=create)
     with project_lock(project.paths):
         project.reload_config()
+        if seat is not None and not create:
+            _refuse_unregistered(project, seat)
         if seat is not None:
+            _refuse_completing(project, seat)
             lease = _occupy(project, seat, agent_type, pids)
             if lease is None:
                 raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is in use or unavailable")
@@ -156,7 +183,7 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
         return lease
 
 
-def acquire_qa(project, agent_type: str, pids: Optional[dict] = None) -> Lease:
+def acquire_qa(project, agent_type: str, pids: Optional[dict] = None, create: bool = True) -> Lease:
     """Occupy the Q&A seat ``<type>-qa``, registering it when no Q&A seat exists (spec questions T§2).
 
     Refuses (config_error, which the supervisor treats as fatal) without an open ``Q&A`` list, and when
@@ -171,6 +198,9 @@ def acquire_qa(project, agent_type: str, pids: Optional[dict] = None) -> Lease:
         raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
     with project_lock(project.paths):
         cfg = project.reload_config()
+        if not create:
+            _refuse_unregistered(project, name)
+        _refuse_completing(project, name)
         registered = cfg.qa_seat()
         if registered is not None and registered != name:
             raise KankanError(Status.CONFIG_ERROR, messages.QA_SEAT_OTHER.format(seat=name, registered=registered))
@@ -246,6 +276,9 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
         cfg = project.reload_config()
         existing = cfg.seats.get(seat)
         snap_lists = None
+        if existing is not None and existing.removing and not _lists_open(project, existing):
+            # seat T§5: lists archived by a removal are never re-created, nor its entry rewritten without its flag
+            raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
         if existing is None or not _lists_open(project, existing):
             snap_lists = project.trello.snapshot(cfg.board_id).lists
             ids = {}

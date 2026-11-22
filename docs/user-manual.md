@@ -148,6 +148,7 @@ After the board has been initialized, agent **seats** can be added. A seat is an
 kankan up claude=2 codex=1 qa=codex        # make sure these agents run; starts only the missing ones
 kankan up                                  # make sure every seat registered in the project runs
 kankan agent claude [--seat claude-1] [--attach]
+kankan seat start claude-1 [--attach]      # start one existing seat
 kankan autostart enable claude=2 codex=1   # systemd user service kankan-up@<project>.service
 kankan autostart disable
 ```
@@ -160,7 +161,7 @@ The three commands differ in when they act:
 
 Each agent gets a seat and a worktree in `~/coding/.kankan/<project>/<seat>`. Seats are reused; at most 4 per type by default (`seat_cap` in `<git dir>/kankan/config.json`).
 
-The **Q&A agent** ([section 5.3](#53-questions-qa-cards)) is started by adding `qa=<type>` to `kankan up` or `kankan autostart enable` (for example `kankan up claude=2 codex=1 qa=claude`), or alone with `kankan agent <type> --qa`. It gets the seat `<type>-qa` (`claude-qa`, `codex-qa`), with its own worktree and no lists; there is at most one per project and it does not count towards `seat_cap`. It answers only the cards of the `Q&A` list, and the other agents never take them. Starting a Q&A agent of the other type replaces the existing Q&A seat: kankan refuses while that seat is alive (stop it first with `kankan stop <type>-qa`); otherwise it removes the old seat and the new agent continues the old one's conversation, if any. `kankan stop claude-qa` lets the agent finish its current turn; the conversation is kept and continues at the next start.
+The **Q&A agent** ([section 5.3](#53-questions-qa-cards)) is started by adding `qa=<type>` to `kankan up` or `kankan autostart enable` (for example `kankan up claude=2 codex=1 qa=claude`), or alone with `kankan agent <type> --qa`. It gets the seat `<type>-qa` (`claude-qa`, `codex-qa`), with its own worktree and no lists; there is at most one per project and it does not count towards `seat_cap`. It answers only the cards of the `Q&A` list, and the other agents never take them. Starting a Q&A agent of the other type replaces the existing Q&A seat: kankan refuses while that seat is alive (stop it first with `kankan seat stop <type>-qa`); otherwise it removes the old seat and the new agent continues the old one's conversation, if any. `kankan seat stop claude-qa` lets the agent finish its current turn; the conversation is kept and continues at the next start.
 
 The agent runs in the tmux session `ai-<project>-<seat>`; attach with `tmux attach -t ai-<project>-<seat>` to watch. Ctrl-C typed there reaches the agent (the launcher and supervisor ignore Ctrl-C, Ctrl-Z and Ctrl-\\). kankan never types while you are typing (it waits `write_quiet_seconds`, default 20 s) and never sends Esc or Ctrl-C. `airesumer.sh` finds these sessions and resumes agents after a usage limit.
 
@@ -188,18 +189,19 @@ You may change the model and effort at any time by ticking items on the setting 
 ```bash
 kankan stop             # immediately quit all agents and disable autostart
 kankan stop --graceful  # wait for the agents to finish their current task, then stop
-kankan stop claude-1    # the agent exits after its current task
+kankan seat stop claude-1    # the agent exits after its current task
+kankan seat start claude-1   # start it again
 kankan start            # start again what the last `kankan stop` stopped
 kankan up               # start every seat registered in the project
 ```
 
-`kankan stop <seat>` stops one agent after its current task, without changing autostart. If kankan was upgraded or changed after that agent started, it refuses and changes nothing, because the agent could not finish its task: run `kankan stop` to quit all agents now, or `kankan seat recover <seat> --kill` for that one. To stop a single card instead of an agent, put `HOLD` on it ([section 5.2](#52-task-cards)).
+`kankan seat stop <seat>` stops one agent after its current task, without changing autostart; `kankan seat start <seat>` starts it again. If kankan was upgraded or changed after that agent started, `seat stop` refuses and changes nothing, because the agent could not finish its task: run `kankan stop` to quit all agents now, or `kankan seat recover <seat> --kill` for that one. To stop a single card instead of an agent, put `HOLD` on it ([section 5.2](#52-task-cards)).
 
 `kankan stop` without a seat stops **all** the project's agents, the Q&A agent included, and disables autostart. It shows what it will stop and asks for confirmation (`--yes` skips the question and is required from a script). By default it quits the agents **immediately**, as `kankan seat recover --kill` would: each interrupted card stays with its seat, gets a comment and is resumed at the next start. With `--graceful` it instead waits for each agent to finish its current task (a Q&A agent its current answer), showing what each one is doing; that can take long, and Ctrl-C only stops the waiting (the agents still stop after their task). If kankan was upgraded or changed after the running agents started, `--graceful` refuses and changes nothing: those agents could not finish their task, because kankan would refuse their commands. Run `kankan stop` without it. At the end kankan checks that no agent runs, no tmux session of the project is open and autostart is off, and lists anything left with what to do (exit 14). Running `kankan stop` again is harmless: what is already stopped or disabled is reported as such.
 
 `kankan start` resumes everything that `kankan stop` stopped: the same agents (`kankan up` with the same counts) and autostart if it was enabled. Without a stop record it prints the commands to run instead: `kankan up …` and `kankan autostart enable …`, preceded by `kankan init` when the clone is not bound to a board yet.
 
-`kankan start` restores only the agents that were running when `kankan stop` ran (or the counts of the autostart service, when it was enabled): agents you had stopped before with `kankan stop <seat>` stay stopped. To start every agent of the project, whatever was stopped and how, run `kankan up` without arguments; it starts only the missing ones, so it can follow `kankan start` safely.
+`kankan start` restores only the agents that were running when `kankan stop` ran (or the counts of the autostart service, when it was enabled): agents you had stopped before with `kankan seat stop <seat>` stay stopped. To start every agent of the project, whatever was stopped and how, run `kankan up` without arguments; it starts only the missing ones, so it can follow `kankan start` safely.
 
 ### 4.4 Card instructions
 
@@ -268,7 +270,7 @@ Ask the agents about the code without asking for a change: create a card in the 
 - **Long answers** are split into numbered comments (`1/3`, `2/3`, …); only the last one mentions you.
 - **Errors.** When the agent cannot answer because something needs you (for example an attachment it cannot download), the card gets `Error` with a comment; so does an agent that stops without answering. Add a comment (or fix the attachment): the next follow-up removes the `Error` label and the conversation goes on.
 - **Asking for a change.** Write "now implement it" (or similar): the agent does not change the code itself. It posts a summary of what to implement, mentioning you, and moves the card to the **bottom** of `Backlog`, where you can still reorder it, put it on `HOLD` or move it elsewhere. From there it is a normal card: an agent implements it following the summary (which prevails over the description, since the description was a question) and the comments, another reviews and integrates it. When your request is ambiguous, the agent asks you to confirm first. If the summary is wrong, drag the card back into `Q&A` and continue the dialogue.
-- **Ending a conversation.** Move the card out of `Q&A` (to `Done` or any other list), archive it or delete it: kankan never moves it back, and the agent starts the next card in a fresh conversation. `HOLD` also ends the conversation, but the card stays in `Q&A`; remove `HOLD` and the card is taken again, the agent continuing from its comments. A card taken again later (after `HOLD`, or dragged back) gets the whole comment thread, with what you added since the last answer marked as new.
+- **Ending a conversation.** Move the card out of `Q&A` (to `Done` or any other list), archive it or delete it: kankan never moves it back, and the agent starts the next card in a fresh conversation. `HOLD` also ends the conversation, but the card stays in `Q&A`; remove `HOLD` and the card is taken again, the agent continuing from its comments. A card taken again later (after `HOLD`, dragged back, or after the Q&A seat was removed) gets the whole comment thread, with what you added since the last answer marked as new. When its latest answer is complete and you added nothing since, the agent is not prompted: it waits for your next comment or attachment, then reads the whole thread first. An answer cut short (only some of its parts posted) is answered again.
 - **Restarts.** If the Q&A agent or kankan restarts (crash, reboot, a changed model, a replaced Q&A seat, `kankan stop` and a new start), the agent takes up the card under discussion again and reads the dialogue from the comments; when its last answer already covered everything you wrote, it waits for your next comment instead of answering again. An answer interrupted by a crash or a failure is completed, never duplicated. A usage limit puts `Resume` on the card, and what you add meanwhile is forwarded on resumption.
 - **The Q&A agent never commits.** It works on a checkout of the agents' branch, reset for every card. If it commits anyway, its answer is still posted but the card gets `Error` with a comment saying so; the commit is discarded when the next card starts.
 
@@ -422,13 +424,13 @@ These commands repair situations that kankan does not resolve by itself. You rar
 ```bash
 kankan release <card> --force        # park a card's ref; the card stays where it is
 kankan seat recover <seat> [--kill]  # a seat that is alive but stuck; --kill terminates its pane session first
-kankan seat remove <seat>            # only if free, holding no cards and with empty lists; for <type>-qa only if free (its conversation ends)
+kankan seat remove <seat> [--graceful] [--yes]   # in any state; its cards go to the rest of the board
 kankan purge-remote [--remote origin]  # delete refs/agent-* pushed by mistake
 ```
 
 - **`kankan release <card> --force`** takes a card away from the seat that holds it (its ref is parked) and leaves the card where it is, with a comment. Use it when `kankan claims` shows a card held by a seat that will not finish it, for example a seat you cannot bring back, and you want other agents to take the card. Nothing moves a released card for you, and since no seat holds it any more the golden rule ([section 5.2](#52-task-cards)) no longer applies to it: move it yourself to `Backlog` to have it implemented again. A released card in an `Implemented` list stays there and can be reviewed again by an agent of the other type.
-- **`kankan seat recover <seat> [--kill]`** frees a seat whose agent is alive but stuck: kankan does not recover such a seat by itself, and the card shows it with `Error` after `idle_ready_minutes` of inactivity. Look at its tmux session first; when the agent cannot be brought back there, recover the seat. Its session loses the seat and the cards it held get a comment; start the agent again (`kankan up` or `kankan agent <type> --seat <seat>`) and it continues them. `--kill` first terminates the seat's tmux session and its processes; use it unless you have closed that session yourself, since `kankan agent --seat` refuses a seat whose tmux session is still open. A dead seat (its tmux session is gone) needs none of this: the next `kankan up` or `kankan agent` recovers it.
-- **`kankan seat remove <seat>`** deletes a seat you no longer need, for example after reducing the number of agents of a type for good: its lists are archived, it is removed from the configuration and its worktree is deleted if clean. Stop its agent and let its lists empty first. For the Q&A seat (`<type>-qa`), use it when you no longer want a Q&A agent; its conversation ends.
+- **`kankan seat recover <seat> [--kill]`** frees a seat whose agent is alive but stuck: kankan does not recover such a seat by itself, and the card shows it with `Error` after `idle_ready_minutes` of inactivity. Look at its tmux session first; when the agent cannot be brought back there, recover the seat. Its session loses the seat and the cards it held get a comment; start the agent again (`kankan up` or `kankan seat start <seat>`) and it continues them. `--kill` first terminates the seat's tmux session and its processes; use it unless you have closed that session yourself, since `kankan agent --seat` refuses a seat whose tmux session is still open. A dead seat (its tmux session is gone) needs none of this: the next `kankan up` or `kankan agent` recovers it.
+- **`kankan seat remove <seat> [--graceful] [--yes]`** deletes a seat you no longer need, for example after reducing the number of agents of a type for good, whatever its state: there is no need to stop it first. Its cards go to the rest of the board: a card it was implementing to the top of `Backlog`, where the next implementer continues from the work committed on its branch; a card it was reviewing back to its implementer's `Implemented` list; its finished work waiting for review to the `Implemented` list of another seat of the same type (else of any other work seat, still reviewed only by the other type; else to `Backlog`); a card already integrated to `Done`; a card on its way to `Blocked` or another list to that list; anything else in its lists to the top of `Backlog`. Each moved card gets a comment, keeps `HOLD`, and loses the `Question`, `Error` and `Resume` labels the seat had set. Then its lists are archived, its worktree deleted and it leaves the configuration; autostart is lowered so that the next boot does not create it again. By default the agent is stopped **now**: when the seat holds cards, kankan lists them with their destination and asks for confirmation, because a task in progress is interrupted and uncommitted changes in its worktree are lost (`--yes` answers, and is required from a script). With **`--graceful`** nothing is asked: the seat takes no new card, finishes the ones it holds (starting its agent if it is stopped), then exits and the removal completes; the command shows the agent's progress, Ctrl-C only stops the waiting, and `kankan up` restarts such a seat after a reboot until it has finished. Running `seat remove` again while a graceful removal runs tells you so: with `--graceful` nothing changes, without it kankan asks whether to remove the seat now instead. For the Q&A seat (`<type>-qa`) no card moves: the `Q&A` list belongs to the board, and the active conversation ends (with `--graceful`, after the current answer); the card stays in `Q&A` with its whole thread.
 - **`kankan purge-remote [--remote origin]`** deletes the card claims (`refs/agent-*`) from a remote after they were pushed there by mistake, for example with `git push --mirror` or a push of all refs. They belong only in the clone ([section 9.5](#95-moving-a-board-to-another-clone)).
 
 All of these are recorded in the audit log. A command started before them (for example an `integrate`) can no longer change anything (`not_owner`).
@@ -604,12 +606,16 @@ In these commands `<type>` is `claude` or `codex`.
 
 **`kankan autostart disable`**: disables that service.
 
-**`kankan stop [<seat>] [--graceful] [--yes]`**: without a seat, stops every agent of the project, the Q&A agent included, and disables autostart, after showing what it will stop and asking for confirmation ([section 4.3](#43-pausing-work)).
-- `<seat>`: stop only this agent, after its current task; autostart is not changed.
+**`kankan stop [--graceful] [--yes]`**: stops every agent of the project, the Q&A agent included, and disables autostart, after showing what it will stop and asking for confirmation ([section 4.3](#43-pausing-work)). One agent is stopped with `kankan seat stop <seat>`.
 - `--graceful`: wait for each agent to finish its current task instead of quitting it immediately.
 - `--yes`: do not ask for confirmation (required in scripts).
 
 **`kankan start`**: starts again the agents and the autostart that the last `kankan stop` stopped.
+
+**`kankan seat start <seat> [--attach]`**: starts the agent of an existing seat; the type comes from its name (`claude-2`, `codex-qa`). It never creates a seat (`kankan agent` and `kankan up` do) and reports a seat already running.
+- `--attach`: attach your terminal to the agent's tmux session.
+
+**`kankan seat stop <seat>`**: the agent exits after its current task; autostart is not changed.
 
 ### Working with the agents
 
@@ -648,7 +654,9 @@ These are recorded in the audit log ([section 9.2](#92-manual-administration)).
 **`kankan seat recover <seat> [--kill]`**: frees a seat that is alive but stuck: its session loses the seat, and the cards it held get a comment.
 - `--kill`: first terminate the seat's tmux session and its processes.
 
-**`kankan seat remove <seat>`**: deletes a seat. Only if it is free, holds no cards and its lists are empty; a Q&A seat only if it is free (its conversation ends).
+**`kankan seat remove <seat> [--graceful] [--yes]`**: deletes a seat in any state, giving its cards to the rest of the board ([section 9.2](#92-manual-administration)).
+- `--graceful`: let the agent finish its cards first; nothing is asked.
+- `--yes`: do not ask for confirmation (required in scripts).
 
 **`kankan purge-remote [--remote <name>]`**: deletes the `refs/agent-*` refs pushed to a remote by mistake.
 - `--remote <name>`: the remote, default `origin`.

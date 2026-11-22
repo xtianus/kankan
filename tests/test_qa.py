@@ -13,7 +13,7 @@ from kankan.refstore import card_ref, seat_ref
 from kankan.seatstate import load_state, update_state
 from kankan.trello import Comment
 from tests.conftest import git
-from tests.helpers import add_qa_list, put_card_ref
+from tests.helpers import remove_seat, add_qa_list, put_card_ref
 
 PAIR = ModelEffort("sonnet", "high")
 OLD = "fedcba9876543210"
@@ -104,11 +104,11 @@ def test_first_turn_marks_items_after_the_latest_answer_by_trello_dates(qa_env):
     first, second = fresh.attachment_items
     fresh.attachment_items = [replace(first, date="2026-11-17T10:01:00.000Z"),
                               replace(second, date="2026-11-17T10:07:00.000Z")]
-    inputs, context = qa.first_turn(project, fresh, comments)
+    inputs, context, _ = qa.first_turn(project, fresh, comments)
     assert inputs == qa.Inputs([ident(4)], [second.id])
     assert context == qa.Inputs([ident(3)], [first.id])  # the newest context comment covers the older ones
     # never answered: everything is new
-    inputs, context = qa.first_turn(project, fresh, [c for c in comments if c.id != ident(2)])
+    inputs, context, _ = qa.first_turn(project, fresh, [c for c in comments if c.id != ident(2)])
     assert inputs == qa.Inputs([ident(1), ident(3), ident(4)], [first.id, second.id])
     assert context == qa.Inputs([], [])
 
@@ -385,7 +385,7 @@ def _retaken(project, fake, qa_list, lease, follow_up=True):
     new = [fake.user_comment(card["id"], "new question")["id"]] if follow_up else []
     fresh = project.trello.card(card["id"])
     task = qa.claim(project, lease, fresh, PAIR)
-    inputs, context = qa.first_turn(project, fresh, project.trello.comments(card["id"]))
+    inputs, context, _ = qa.first_turn(project, fresh, project.trello.comments(card["id"]))
     assert inputs == qa.Inputs(new, []) and context == qa.Inputs([old], [])
     qa.start_turn(project, lease, task, inputs, context)
     return task, old, new, fresh
@@ -886,7 +886,7 @@ def test_a_crash_after_registration_then_seat_remove_of_the_new_seat_is_complete
     with pytest.raises(faults.SimulatedCrash):
         qa.replace_seat(project, "claude")
     monkeypatch.delenv("KANKAN_FAULT")
-    diag.seat_remove(project, "claude-qa")
+    remove_seat(project, "claude-qa")
     assert project.reload_config().qa_seat() is None
     issues = diag.reconcile(project)
     assert any(i.kind == "qa_owner_unregistered" and i.subject == card.id for i in issues)
@@ -901,7 +901,7 @@ def test_a_plain_seat_remove_is_not_taken_for_a_replacement(kproject, fake_trell
     add_qa_list(project, fake)
     lease = seats.acquire_qa(project, "codex", None)
     seats.release(project, lease)
-    diag.seat_remove(project, "codex-qa")
+    remove_seat(project, "codex-qa")
     assert list(project.paths.seats_dir.glob("codex-qa.*"))  # the seat files of a removed seat stay
     seats.release(project, seats.acquire_qa(project, "claude", None))  # `agent --qa claude` registers claude-qa
     assert qa.replace_seat(project, "claude", initiate=False) is None  # what its launcher runs before occupying
@@ -930,11 +930,11 @@ def test_a_replacement_record_that_can_no_longer_complete_is_removed(old_seat, m
     with pytest.raises(faults.SimulatedCrash):
         qa.replace_seat(project, "claude")
     monkeypatch.delenv("KANKAN_FAULT")
-    diag.seat_remove(project, "claude-qa")
+    remove_seat(project, "claude-qa")
     assert qa.replace_seat(project, "codex", initiate=False) is None  # the codex launcher starts again
     seats.release(project, seats.acquire_qa(project, "codex", None))
     assert not qa._replacing_path(project.paths).exists()
-    diag.seat_remove(project, "codex-qa")
+    remove_seat(project, "codex-qa")
     assert qa.replace_seat(project, "claude", initiate=False) is None
     seats.release(project, seats.acquire_qa(project, "claude", None))
     assert not any(e["event"] == "qa_seat_replaced" for e in auditlog.read(project.paths))

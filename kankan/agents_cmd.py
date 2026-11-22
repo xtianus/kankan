@@ -49,6 +49,8 @@ def registered_args(cfg) -> str:
     counts: Dict[str, int] = {}
     qa = None
     for seat_cfg in cfg.seats.values():
+        if seat_cfg.removing:  # seat T§5: a seat being removed is never asked for
+            continue
         if seat_cfg.role == "qa":
             qa = seat_cfg.type
         else:
@@ -139,7 +141,7 @@ def agent_path(path: Optional[str], paths) -> str:
 
 
 def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = False,
-          tmux: Optional[Tmux] = None, preflight: bool = True, qa: bool = False) -> str:
+          tmux: Optional[Tmux] = None, preflight: bool = True, qa: bool = False, create: bool = True) -> str:
     """Create a tmux session running the supervisor; the launcher renames it to ai-<project>-<seat>.
 
     With ``qa``, the Q&A seat ``<type>-qa`` (questions F§2): the ``Q&A`` list must be open, a Q&A seat of another
@@ -153,7 +155,8 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
             raise KankanError(Status.USAGE_ERROR, messages.QA_SEAT_ARG.format(seat=seats.qa_seat_name(agent_type),
                                                                               given=seat))
         seat = seats.qa_seat_name(agent_type)
-        _register_qa_seat(project, agent_type)
+        if create:
+            _register_qa_seat(project, agent_type)
     if preflight:
         from kankan import doctor
         doctor.preflight([agent_type], project.paths, roles=QA_ROLES if qa else WORK_ROLES)
@@ -163,7 +166,10 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
     if seat is not None and tmux.has_session(session_name("ai-", project.paths.project, seat)):
         raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is already running")
     name = f"ai-{sanitize(project.paths.project)}-{agent_type}-starting-{secrets.token_hex(3)}"
-    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env={"PATH": agent_path(None, project.paths)})
+    env = {"PATH": agent_path(None, project.paths)}
+    if not create:  # seat T§5: the launcher occupies only a registered seat, also after its restarts
+        env[seats.EXISTING_ONLY_ENV] = "1"
+    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env=env)
     tmux.set_option(name, "@kankan_repo", str(project.paths.repo))
     project.log("agent_started", session=name, type=agent_type, seat=seat)
     if attach:
@@ -181,7 +187,7 @@ def live_counts(project) -> Dict[str, int]:
     cfg = project.reload_config()
     counts: Dict[str, int] = {}
     for name, seat_cfg in cfg.work_seats().items():
-        if seats.liveness(project, name) == "alive":
+        if not seat_cfg.removing and seats.liveness(project, name) == "alive":
             counts[seat_cfg.type] = counts.get(seat_cfg.type, 0) + 1
     return counts
 
@@ -195,10 +201,60 @@ def _wait_started(project, session: str, what: str, started) -> None:
                                                                                seconds=UP_WAIT_SECONDS))
 
 
+def resume_removals(project, tmux: Optional[Tmux] = None, only: Optional[str] = None, strict: bool = False) -> dict:
+    """seat T§5: the only code restarting or completing seats being removed. A graceful one that is not running and
+    has work left is started (existing seat only) and awaited; a graceful one without work, and an immediate one
+    (running or not: its confirmed stop is replayed), is completed. The starts happen under ``up.lock``, the
+    completions after it (lock order: removal lock before ``up.lock``). Returns ``{"acted": [...], "failed":
+    {seat: error}}``; with ``strict`` the first failure is raised."""
+    from kankan import seatremove
+    tmux = tmux or Tmux()
+    acted: List[str] = []
+    failed: Dict[str, str] = {}
+    to_complete: List[str] = []
+
+    def failure(name: str, err: KankanError) -> None:
+        if strict:
+            raise err
+        failed[name] = err.message
+        project.log("seat_remove_resume_failed", seat=name, error=err.message)
+
+    with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
+        cfg = project.reload_config()
+        for name, seat_cfg in sorted(cfg.seats.items()):
+            if not seat_cfg.removing or (only and name != only):
+                continue
+            alive = seats.liveness(project, name) == "alive"
+            if seat_cfg.removing == "graceful" and alive:
+                continue  # draining: its launcher completes the removal
+            if seat_cfg.removing == "graceful" and seatremove.has_work(project, name):
+                try:
+                    session = agent(project, seat_cfg.type, seat=name, tmux=tmux, qa=seat_cfg.role == "qa",
+                                    create=False)
+                    seatremove.await_start(project, name, session)
+                    acted.append(name)
+                except KankanError as err:
+                    failure(name, err)
+            else:
+                to_complete.append(name)
+    for name in to_complete:
+        try:
+            if project.reload_config().seats.get(name) is not None \
+                    and project.cfg.seats[name].removing == "immediate":
+                seatremove.stop_seat(project, name, kill_alive=True)
+            seatremove.complete(project, name)
+            acted.append(name)
+        except KankanError as err:
+            failure(name, err)
+    return {"acted": acted, "failed": failed}
+
+
 def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None, qa: Optional[str] = None) -> List[str]:
     """Start only the missing agents, and the Q&A agent of type ``qa`` if it does not run (replacing a Q&A seat of
-    another type); serialized by ``up.lock`` so concurrent calls never over-start."""
+    another type); serialized by ``up.lock`` so concurrent calls never over-start. Seats being removed are
+    restarted or completed first (seat T§5)."""
     tmux = tmux or Tmux()
+    resume_removals(project, tmux)
     started: List[str] = []
     with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
         live = live_counts(project)

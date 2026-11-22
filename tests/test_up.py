@@ -10,7 +10,7 @@ from kankan import agents_cmd, build, seats
 from kankan.errors import KankanError, Status
 from kankan.seatstate import load_state
 from tests.conftest import ROOT, git
-from tests.helpers import bind_project
+from tests.helpers import remove_seat, bind_project
 from tests.launcher_helpers import launcher_state, pid_alive, proc_info, wait_for
 
 pytestmark = [pytest.mark.tmux, pytest.mark.slow]
@@ -312,7 +312,7 @@ def test_a_registered_qa_seat_that_never_started_is_removed(qa_project, env):
     with pytest.raises(KankanError):
         agents_cmd.agent(qa_project, "claude", qa=True)
     assert qa_project.reload_config().qa_seat() == "claude-qa"
-    diag.seat_remove(qa_project, "claude-qa")
+    remove_seat(qa_project, "claude-qa")
     assert qa_project.reload_config().qa_seat() is None
 
 

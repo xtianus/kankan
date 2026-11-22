@@ -137,7 +137,7 @@ def test_cli_without_terminal_needs_yes(kproject, monkeypatch, capsys):
     assert cli.main(["stop"]) == Status.USAGE_ERROR.exit_code
     assert "--yes" in capsys.readouterr().err
     assert agents_cmd.unit_path(kproject).exists()
-    assert cli.main(["stop", "claude-1", "--graceful"]) == Status.USAGE_ERROR.exit_code
+    assert cli.main(["stop", "claude-1", "--graceful"]) == Status.USAGE_ERROR.exit_code  # no seat argument any more
 
 
 # ---------------------------------------------------------------------- kankan start
@@ -261,7 +261,7 @@ def test_graceful_with_the_same_kankan_stops(kproject, holders):
 
 
 def test_stop_seat_refuses_an_agent_of_another_kankan(kproject, holders, monkeypatch, capsys):
-    """`kankan stop <seat>` also waits for the task to end: refused when the agent runs another kankan (F§1)."""
+    """`kankan seat stop <seat>` also waits for the task to end: refused when the agent runs another kankan (F§1)."""
     from kankan import build
     holders += [hold(kproject, "claude-1", mode="ignore"), hold(kproject, "codex-1", mode="ignore")]
     record_launcher_code(kproject, "claude-1")
@@ -269,11 +269,11 @@ def test_stop_seat_refuses_an_agent_of_another_kankan(kproject, holders, monkeyp
     monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
     record_launcher_code(kproject, "codex-1")  # codex-1 was restarted after the upgrade
     monkeypatch.chdir(kproject.paths.repo)
-    assert cli.main(["stop", "claude-1"]) == Status.USAGE_ERROR.exit_code
+    assert cli.main(["seat", "stop", "claude-1"]) == Status.USAGE_ERROR.exit_code
     err = capsys.readouterr().err
     assert "claude-1 runs kankan" in err and "kankan seat recover claude-1 --kill" in err
     assert not load_state(kproject.paths, "claude-1").stop_requested
-    assert cli.main(["stop", "codex-1"]) == 0
+    assert cli.main(["seat", "stop", "codex-1"]) == 0
     assert load_state(kproject.paths, "codex-1").stop_requested
 
 
@@ -286,5 +286,5 @@ def test_stop_of_a_stopped_seat_is_not_checked(kproject, monkeypatch):
     monkeypatch.setattr(build, "code_id", lambda: "0" * 12)
     monkeypatch.chdir(kproject.paths.repo)
     update_state(kproject.paths, "claude-1", lambda s: setattr(s, "stop_requested", False))
-    assert cli.main(["stop", "claude-1"]) == 0
+    assert cli.main(["seat", "stop", "claude-1"]) == 0
     assert load_state(kproject.paths, "claude-1").stop_requested

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import asdict, dataclass, field, fields
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from kankan import attachments, clock, faults, labels
 from kankan.config import project_lock
@@ -85,13 +85,44 @@ class TransitionResult:
     moved: bool
 
 
+def _seat_number(name: str) -> int:
+    try:
+        return int(name.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def implemented_list(cfg, implementer: Optional[str]) -> Optional[str]:
+    """seat T§3: the ``Implemented`` list a card implemented by ``implementer`` goes to: its own while the seat is
+    registered and not being removed, otherwise another work seat's (same type first, by seat number), else None."""
+    own = cfg.seats.get(implementer) if implementer else None
+    if own is not None and own.role != "qa" and not own.removing:
+        return own.implemented
+    usable = [(name, sc) for name, sc in cfg.work_seats().items() if not sc.removing]
+    kind = implementer.rsplit("-", 1)[0] if implementer else None
+    same = sorted((n for n, sc in usable if sc.type == kind), key=_seat_number)
+    if same:
+        return cfg.seats[same[0]].implemented
+    others = sorted(usable, key=lambda item: (item[1].type, _seat_number(item[0])))
+    return others[0][1].implemented if others else None
+
+
+def implemented_destination(cfg, implementer: Optional[str]) -> Tuple[str, str, Optional[str]]:
+    """``(phase, target list, cause)`` of a card going back to review: ``implemented`` in ``implemented_list``,
+    or ``parked`` to ``Backlog`` with cause ``seat_removed`` when no work seat is left (seat T§3)."""
+    target = implemented_list(cfg, implementer)
+    if target is None:
+        return Phase.PARKED.value, cfg.backlog, "seat_removed"
+    return Phase.IMPLEMENTED.value, target, None
+
+
 def target_list_for(cfg, phase: str, seat: Optional[str], implementer: Optional[str], cause: Optional[str] = None
                     ) -> Optional[str]:
     """Destination list of each phase (§10.3)."""
     if phase == Phase.IMPL.value:
         return cfg.seats[seat].in_progress
     if phase == Phase.IMPLEMENTED.value:
-        return cfg.seats[implementer].implemented
+        return implemented_list(cfg, implementer)
     if phase == Phase.REVIEW.value:
         return cfg.seats[seat].review
     if phase == Phase.INTEGRATED.value:
@@ -99,7 +130,7 @@ def target_list_for(cfg, phase: str, seat: Optional[str], implementer: Optional[
     if phase == Phase.QA.value:
         return cfg.qa_list
     if phase == Phase.PARKED.value:
-        if cause in ("yield", "handoff"):
+        if cause in ("yield", "handoff", "seat_removed"):
             return cfg.backlog
         if cause == "block":
             return cfg.blocked

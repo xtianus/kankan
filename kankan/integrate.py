@@ -607,7 +607,7 @@ def resolve_help(project, short: str, blocked: Path, remaining: List[str]) -> st
 
 
 def resolve(project, short: str, done: bool, tmux=None) -> dict:
-    from kankan.cards import AdminActor, target_list_for, transition
+    from kankan.cards import AdminActor, implemented_destination, transition
     value = find_card_ref(project, short)
     if value is None or value.meta.get("phase") != Phase.PARKED.value:
         raise KankanError(Status.INELIGIBLE, f"card {short} is not blocked")
@@ -641,13 +641,16 @@ def resolve(project, short: str, done: bool, tmux=None) -> dict:
     if card is None:
         raise KankanError(Status.INELIGIBLE, f"card {short} no longer exists")
     implementer = value.meta.get("implementer")
-    if implementer not in project.cfg.seats:
-        raise KankanError(Status.NEEDS_RECONCILIATION, f"the implementer seat {implementer} is not configured")
-    new = CardMeta.from_dict(value.meta).evolve(phase=Phase.IMPLEMENTED.value, owner=None, session=None, cause=None,
-                                                target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None,
-                                                                            implementer))
-    transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
-    return {"short": short, "phase": "implemented"}, f"card {short} is back in {implementer}'s Implemented list"
+    with project_lock(project.paths):  # seat T§3: an existing seat's Implemented when the implementer's seat is gone
+        cfg = project.reload_config()
+        phase, target, cause = implemented_destination(cfg, implementer)
+        new = CardMeta.from_dict(value.meta).evolve(phase=phase, owner=None, session=None, cause=cause,
+                                                    target_list=target)
+        transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
+    if phase != Phase.IMPLEMENTED.value:
+        return {"short": short, "phase": phase}, f"card {short} is back in Backlog: no work seat is left to review it"
+    owner = next((name for name, sc in cfg.seats.items() if sc.implemented == target), implementer)
+    return {"short": short, "phase": phase}, f"card {short} is back in {owner}'s Implemented list"
 
 
 def merge_request(project, branch: Optional[str] = None, remote: bool = False, top: bool = True,

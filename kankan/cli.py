@@ -78,10 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("release", "administration: park a card's ref (needs --force)")
     p.add_argument("card")
     p.add_argument("--force", action="store_true")
-    p = add("seat", "seat administration")
-    p.add_argument("action", choices=["recover", "remove"])
+    p = add("seat", "commands acting on one seat: start, stop, recover, remove")
+    p.add_argument("action", choices=["start", "stop", "recover", "remove"])
     p.add_argument("seat")
-    p.add_argument("--kill", action="store_true")
+    p.add_argument("--attach", action="store_true", help="start: attach to the agent's tmux session")
+    p.add_argument("--kill", action="store_true", help="recover: terminate the seat's processes first")
+    p.add_argument("--graceful", action="store_true", help="remove: let the agent finish its cards first")
+    p.add_argument("--yes", action="store_true", help="remove: do not ask for confirmation")
     p = add("purge-remote", "delete refs/agent-* published on a remote by mistake")
     p.add_argument("--remote", default="origin")
     p = add("reconcile", "report inconsistencies (and repair the certain ones with --fix)")
@@ -89,8 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("skill", "install the shared kankan skill for Claude Code and Codex")
     p.add_argument("action", choices=["install"])
     p.add_argument("--force", action="store_true")
-    p = add("stop", "stop every agent now and disable autostart (or one seat after its current task)")
-    p.add_argument("seat", nargs="?", help="stop only this seat, after its current task (autostart unchanged)")
+    p = add("stop", "stop every agent now and disable autostart (one seat: `kankan seat stop <seat>`)")
     p.add_argument("--graceful", action="store_true", help="wait for each agent to finish its current task")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     add("start", "start again what the last `kankan stop` stopped (agents and autostart)")
@@ -385,49 +387,64 @@ def _cmd_adapter(args):
     return data, f"{result.state} (pattern: {result.pattern})" if result.pattern else result.state
 
 
-@command("stop")
-def _cmd_stop(args):
-    from kankan import seats
-    from kankan.config import Paths, load_config
-    from kankan.seatstate import update_state
-    if args.seat is None:
-        return _stop_all(args)
-    if args.graceful or args.yes:
-        raise KankanError(Status.USAGE_ERROR, "--graceful and --yes apply only to `kankan stop` without a seat")
-    paths = Paths.discover(os.getcwd())
-    cfg = load_config(paths)
-    seat = seats.validate_seat(args.seat)
-    if seat not in cfg.seats:
-        raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
-    from kankan import stopall
-    project = _project()
-    if seats.liveness(project, seat) == "alive":
-        stopall.refuse_other_code(project, [seat], messages.STOP_SEAT_OTHER_CODE.replace("<seat>", seat))
-    update_state(paths, seat, lambda s: setattr(s, "stop_requested", True))
-    auditlog.append(paths, "stop_requested", seat=seat)
-    return {"seat": seat}, f"{seat} stops after its current task"
-
-
-def _stop_all(args):
-    from kankan import stopall
-    project = _project()
-
+def _confirm(args, command: str):
+    """The ``[y/N]`` question of a command (prompt on stderr); ``--yes`` answers it, and is required without a
+    terminal (``usage_error``)."""
     def confirm(text: str) -> bool:
         if args.yes:
             return True
         if not sys.stdin.isatty():
-            raise KankanError(Status.USAGE_ERROR, "kankan stop asks for confirmation: run it in a terminal or pass --yes")
+            raise KankanError(Status.USAGE_ERROR, f"{command} asks for confirmation: run it in a terminal or pass --yes")
         print(text, end="", file=sys.stderr, flush=True)
         try:
             return input().strip().lower() in ("y", "yes")
         except EOFError:
             return False
+    return confirm
 
-    def say(text: str) -> None:
-        print(text, file=sys.stderr, flush=True)
 
-    report = stopall.stop_all(project, graceful=args.graceful, confirm=confirm, say=say)
+def _say(text: str) -> None:
+    print(text, file=sys.stderr, flush=True)
+
+
+@command("stop")
+def _cmd_stop(args):
+    from kankan import stopall
+    project = _project()
+    report = stopall.stop_all(project, graceful=args.graceful, confirm=_confirm(args, "kankan stop"), say=_say)
     return report, stopall.report_text(report)
+
+
+def _seat_stop(project, seat: str):
+    from kankan import seats, stopall
+    from kankan.seatstate import update_state
+    if seats.liveness(project, seat) == "alive":
+        stopall.refuse_other_code(project, [seat], messages.STOP_SEAT_OTHER_CODE.replace("<seat>", seat))
+    update_state(project.paths, seat, lambda s: setattr(s, "stop_requested", True))
+    auditlog.append(project.paths, "stop_requested", seat=seat)
+    return {"seat": seat}, f"{seat} stops after its current task"
+
+
+def _seat_start(project, seat: str, attach: bool):
+    """seat F§2.1: start the agent of an existing seat; the type comes from its name."""
+    from kankan import agents_cmd, seats
+    from kankan.tmux import Tmux, session_name
+    seat_cfg = project.cfg.seats[seat]
+    if seat_cfg.removing == "immediate":
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
+    state = seats.liveness(project, seat)
+    if state == "alive":
+        return {"seat": seat, "started": False}, messages.SEAT_START_RUNNING.format(seat=seat)
+    tmux = Tmux()
+    if state == "unavailable" or tmux.has_session(session_name("ai-", project.paths.project, seat)):
+        raise KankanError(Status.NEEDS_ACTION, messages.SEAT_START_SESSION_OPEN.format(seat=seat))
+    for warning in agents_cmd.warnings_for(project):
+        print(f"warning: {warning}", file=sys.stderr)
+    session = agents_cmd.agent(project, seats.seat_type(seat), seat=seat, attach=attach, tmux=tmux,
+                               qa=seats.is_qa(seat), create=False)
+    from kankan import seatremove
+    seatremove.await_start(project, seat, session)  # a seat being removed may also finish before it is seen running
+    return {"seat": seat, "started": True, "session": session}, f"started {seat}"
 
 
 @command("start")
@@ -436,6 +453,7 @@ def _cmd_start(args):
     from kankan.config import Paths
     paths = Paths.discover(os.getcwd())
     if stopall.load_record(paths) is None:
+        _resume_removals_if_bound()  # seat T§5: seats being removed are restarted or completed in any case
         raise KankanError(Status.NEEDS_ACTION, stopall.no_record_help(paths.repo))
     project = _project()
     for warning in agents_cmd.warnings_for(project):
@@ -489,6 +507,24 @@ def _cmd_agent(args):
     return {"session": name}, f"started tmux session {name}"
 
 
+def _resume_removals_if_bound() -> List[str]:
+    """Restart or complete the seats being removed of a bound clone (nothing in an unbound one); a failure is
+    ``needs_action`` naming the seats."""
+    from kankan import agents_cmd
+    from kankan.config import Paths, load_config
+    try:
+        cfg = load_config(Paths.discover(os.getcwd()))
+    except KankanError:
+        return []
+    if not cfg.board_id or not any(seat.removing for seat in cfg.seats.values()):
+        return []
+    result = agents_cmd.resume_removals(_project())
+    if result["failed"]:
+        raise KankanError(Status.NEEDS_ACTION, messages.UP_RESUME_FAILED.format(
+            failures="; ".join(f"{seat}: {error}" for seat, error in result["failed"].items())), result)
+    return result["acted"]
+
+
 @command("up")
 def _cmd_up(args):
     from kankan import agents_cmd
@@ -496,6 +532,9 @@ def _cmd_up(args):
     if not items:  # every seat registered in the project; before opening it, which an unbound clone refuses
         items = agents_cmd.registered_up_args(os.getcwd()).split()
         if not items:
+            resumed = _resume_removals_if_bound()
+            if resumed:
+                return {"started": [], "resumed": resumed}, messages.UP_RESUMED.format(seats=", ".join(resumed))
             raise KankanError(Status.NEEDS_ACTION, agents_cmd.start_help(os.getcwd(), messages.UP_NO_SEATS))
     project = _project()
     wanted, qa = agents_cmd.parse_wanted(items)
@@ -577,13 +616,31 @@ def _cmd_release(args):
     return diag.release_force(_project(), args.card), "card released"
 
 
+_SEAT_FLAGS = {"attach": "start", "kill": "recover", "graceful": "remove", "yes": "remove"}
+
+
 @command("seat")
 def _cmd_seat(args):
-    from kankan import diag
+    from kankan import diag, seats
+    for flag, action in _SEAT_FLAGS.items():
+        if getattr(args, flag) and args.action != action:
+            raise KankanError(Status.USAGE_ERROR, f"--{flag} applies only to `kankan seat {action}`")
+    seat = seats.validate_seat(args.seat)
     project = _project()
+    if seat not in project.cfg.seats:
+        if args.action == "start":
+            raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_UNKNOWN.format(seat=seat))
+        raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
+    if args.action == "start":
+        return _seat_start(project, seat, args.attach)
+    if args.action == "stop":
+        return _seat_stop(project, seat)
     if args.action == "recover":
-        return diag.seat_recover(project, args.seat, args.kill), f"seat {args.seat} recovered"
-    return diag.seat_remove(project, args.seat), f"seat {args.seat} removed"
+        return diag.seat_recover(project, seat, args.kill), f"seat {seat} recovered"
+    from kankan import seatremove
+    report = seatremove.remove(project, seat, graceful=args.graceful, confirm=_confirm(args, "kankan seat remove"),
+                               say=_say)
+    return report, seatremove.report_text(report, project.cfg)
 
 
 @command("purge-remote")
