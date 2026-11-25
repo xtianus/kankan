@@ -105,12 +105,32 @@ def test_stale_blocked_worktree(board):
     assert find(diag.reconcile(project), "stale_blocked_worktree")
 
 
-def test_old_label(board):
-    project, fake, lease = board
+def _old_error_cause(project, card_id):
     old = clock.iso(clock.now() - timedelta(hours=30))
     update_state(project.paths, "claude-1", lambda s: s.label_causes.update(
-        {"b" * 24: {project.cfg.label_error: {"cause": "fail", "at": old}}}))
-    assert find(diag.reconcile(project), "old_label")
+        {card_id: {project.cfg.label_error: {"cause": "fail", "at": old}}}))
+
+
+def test_old_label(board):
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "c")
+    fake.state["cards"][card["id"]]["idLabels"] = [project.cfg.label_error]
+    _old_error_cause(project, card["id"])
+    assert find(diag.reconcile(project), "old_label")[0].subject == card["id"]
+
+
+def test_old_label_removed_by_the_user_not_reported(board):
+    """The seat state still records why kankan set the label, but the card no longer has it."""
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "c")
+    _old_error_cause(project, card["id"])
+    assert not find(diag.reconcile(project), "old_label")
+
+
+def test_old_label_of_deleted_card_not_reported(board):
+    project, fake, lease = board
+    _old_error_cause(project, "b" * 24)
+    assert not find(diag.reconcile(project), "old_label")
 
 
 def test_push_failed(board):

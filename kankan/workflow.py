@@ -342,6 +342,7 @@ def _prepare(project, lease: Lease, choice: Choice, pair=None) -> Optional[dict]
     if kind == "hold_yield":
         from kankan import agentcmds
         agentcmds.kankan_yield(project, lease, choice.card, choice.ref)
+        _forget_task(project, lease, choice.card.id)
         project.log("hold_yield", card=choice.card.id)
         return None
     if kind == "impl":
@@ -361,6 +362,7 @@ def _prepare(project, lease: Lease, choice: Choice, pair=None) -> Optional[dict]
         if kind == "moved_yield":
             from kankan import agentcmds
             agentcmds.kankan_yield(project, lease, None if cause == "user_deleted" else choice.card, choice.ref, cause)
+            _forget_task(project, lease, choice.card.id)
             project.log("user_move_yield", card=choice.card.id, cause=cause)
             return None
         task = store(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
@@ -456,6 +458,16 @@ def release_unsent(project, lease: Lease, prepared: dict) -> bool:
         update_state(project.paths, lease.seat, clear)
     project.log("stop_yield", seat=lease.seat, card=prepared['card'])
     return True
+
+
+def _forget_task(project, lease: Lease, card_id: str) -> None:
+    """The seat yielded the card without its agent: drop the task a previous launcher run left in the seat state,
+    so `status` and the agent commands no longer see it (the cleanup runs only while the launcher has no task)."""
+    def clear(state):
+        if state.task and state.task.get('card') == card_id:
+            state.task = None
+            state.signal = None
+    update_state(project.paths, lease.seat, clear)
 
 
 def _user_cause(project, card: Card) -> str:

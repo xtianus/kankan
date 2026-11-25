@@ -4,7 +4,7 @@ import pytest
 
 from kankan import agentcmds, cli, seats, workflow
 from kankan.refstore import card_ref
-from kankan.seatstate import update_state
+from kankan.seatstate import load_state, update_state
 from tests.conftest import git
 from tests.flow import agent_ctx, commit, review_setup
 from tests.test_ask import FakeTmux, make_launcher
@@ -50,6 +50,17 @@ def test_idle_seat_yields_moved_card_itself(working):
     assert workflow.tick(project, lease) is None
     meta = project.refs.read(card_ref(card["id"])).meta
     assert meta["cause"] == "user_moved" and fake.card_list(card["id"]) == ideas["id"]
+    assert load_state(project.paths, lease.seat).task is None  # the seat no longer shows the card as its task
+
+
+def test_idle_seat_yields_held_card_itself(working):
+    """A restarted seat finding its card on HOLD parks it and forgets the task left by the previous run."""
+    project, fake, card, lease, task = working
+    assert load_state(project.paths, lease.seat).task["card"] == card["id"]
+    fake.user_label(card["id"], project.cfg.label_hold)
+    assert workflow.tick(project, lease) is None
+    assert project.refs.read(card_ref(card["id"])).meta["phase"] == "parked"
+    assert load_state(project.paths, lease.seat).task is None
 
 
 def run_task(capsys):

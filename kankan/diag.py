@@ -385,12 +385,17 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
     for name in qa.conversations(project.paths):
         if name not in ref_conversations:
             issues.append(Issue("qa_conversation_dir_without_ref", name, "no card ref names this conversation"))
-    # old Error/Question labels
+    # old Error/Question labels, only while the card still has them: the user may have removed them
     limit = LABEL_AGE_HOURS * 3600
     for name in cfg.seats:
         for card_id, causes in load_state(project.paths, name).label_causes.items():
             for label_id, entry in causes.items():
                 if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
+                    card = snap.cards.get(card_id)
+                    if card is None:
+                        card = fetched.setdefault(card_id, project.trello.card(card_id))
+                    if card is None or label_id not in card.label_ids:
+                        continue
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
     for card_id, record in cardsections_feedback.load(project.paths)["cards"].items():
         written = record.get("error_write_started") or record.get("error_confirmed")
