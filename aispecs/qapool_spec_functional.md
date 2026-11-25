@@ -4,7 +4,7 @@
 **Date:** 2026-11-25
 **Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`questions_spec_functional.md`](questions_spec_functional.md), [`seat_spec_functional.md`](seat_spec_functional.md), [`stopall_spec_functional.md`](stopall_spec_functional.md), [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md) and [`boardreader_spec_functional.md`](boardreader_spec_functional.md); this feature changes them as listed in [§9](#9-changes-to-the-initial-specification) and [§10](#10-changes-to-other-feature-specifications).
 **Companion:** [`qapool_spec_technical.md`](qapool_spec_technical.md) — how kankan implements this feature.
-**Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (revised when the feature is implemented, [technical §10](qapool_spec_technical.md#10-trello-usage)); [`proposals/steering.md`](proposals/steering.md) (why comments are not sent to an agent in the middle of an answer).
+**Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (revised when the feature is implemented, [technical §10](qapool_spec_technical.md#10-trello-usage)); [`proposals/steering.md`](proposals/steering.md) (why comments are not sent to an agent in the middle of an answer); the user manual's Q&A section, rewritten when the feature is implemented to explain the pool and the title prefixes ([technical §12](qapool_spec_technical.md#12-tests)).
 
 **Split rule.** This file describes what users and agents observe; the technical file describes how kankan implements it. Section numbers are this feature's own; references to the initial specification name its file.
 
@@ -78,9 +78,9 @@ A conversation ends, as today, when the user moves the card out of `Q&A`, archiv
 ## 7. Stop, start and seat commands
 
 - **Stop.** `kankan stop` and `kankan seat stop <type>-qa` stop every agent of the pool: gracefully (each finishes its current answer) or at once, as for any seat ([stopall §1](stopall_spec_functional.md#1-scope)). The agents other than `<type>-qa` are removed when they stop.
-- **Start.** `kankan start`, autostart, `kankan up qa=<type>`, `kankan seat start <type>-qa` and a reboot start only `<type>-qa`. Every Q&A card is then idle: an answer cut short by an immediate stop is completed first (its remaining parts posted, nothing repeated), the title prefixes are removed, and a card gets an agent only when it has input newer than its latest complete answer ([§4.2](#42-a-card-that-needs-an-agent)). An agent never answers the same input twice because of a stop and start.
+- **Start.** `kankan start`, autostart, `kankan up qa=<type>`, `kankan seat start <type>-qa` and a reboot start only `<type>-qa`. Every Q&A card is then idle: an answer cut short by an immediate stop is completed first (its remaining parts posted, nothing repeated), a question whose agent was stopped before it started answering is answered again, the title prefixes are removed, and a card gets an agent only when it has input newer than its latest complete answer ([§4.2](#42-a-card-that-needs-an-agent)). An agent never answers the same input twice because of a stop and start.
 - **Routing seat restart.** When only the launcher of `<type>-qa` restarts (a crash recovered by its supervisor), the other agents keep their cards and routing continues; `<type>-qa`'s own agent starts cold.
-- **Changing type.** `kankan up qa=codex` with a Claude pool running stops every Claude Q&A agent at once, without asking, removes their seats and starts `codex-qa`, with every card idle as after a start.
+- **Changing type.** `kankan up qa=codex` with a Claude pool running stops every Claude Q&A agent at once, without asking, removes their seats and starts `codex-qa`, with every card idle as after a start. An answer being posted at that moment keeps only the parts already posted, and its question is not answered again (accepted).
 - **Seat commands.** `kankan seat remove <type>-qa` removes the whole pool. The other seats of the pool (`<type>-qa2`, …) are kankan's: `seat start`, `seat stop` and `seat remove` refuse them with `usage_error` naming `<type>-qa`.
 
 ## 8. Acceptance tests
@@ -102,6 +102,10 @@ A conversation ends, as today, when the user moves the card out of `Q&A`, archiv
 15. `kankan seat stop claude-qa2` and `kankan seat remove claude-qa2` give `usage_error`; `kankan seat remove claude-qa` removes the whole pool.
 16. The launcher of `claude-qa` killed and restarted by its supervisor: the other agents keep their cards and keep answering their follow-ups.
 17. A change of the `Q&A Agents` setting restarts each agent between its turns; a restarted agent is cold and can be given another card.
+18. An immediate `kankan stop` while an agent is thinking, before it posted anything: after `kankan start` the question is answered once.
+19. A comment on a card while every agent is answering and no agent can open, for two routing rounds, then a restart of `claude-qa`: the comment is answered once an agent is free, without a second comment.
+20. A follow-up on a card whose cold agent has not polled yet, while another card needs an agent: the follow-up goes to that card's agent and the other card to another agent.
+21. `kankan stop` while `claude-qa` is opening a new agent: after the stop no agent of the pool runs, and only `claude-qa` is still registered.
 
 ## 9. Changes to the initial specification
 

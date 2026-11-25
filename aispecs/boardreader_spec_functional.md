@@ -28,6 +28,8 @@ Nothing the user does changes and commands print what they print today. The visi
 
 `poll_seconds` (default 120), `qa_poll_seconds` (default 30) and `settings_poll_seconds` (default 30) keep their names and defaults. They now mean **how old the data an agent acts on may be**: each launcher still wakes at that interval, but it reaches Trello only when no other kankan process has read the same data recently enough.
 
+The setting bounds the age of the data, not the delay of a reaction. A poll can use a read another process made just before the user's change, so the change is seen at the following poll: a reaction takes at most about twice the setting (one minute for a Q&A comment, four minutes for a work card), against at most once the setting today. Most changes are still seen within one interval, because the shared reads come more often than each launcher's own.
+
 A smaller value still means faster reactions. It costs Trello requests only when no other agent reads the same data more often: while the Q&A agent watches the board every 30 seconds, the work agents' 120-second board checks are answered from its reads and never reach Trello.
 
 ## 4. Trello requests
@@ -36,7 +38,7 @@ The requests kankan makes for data its agents share no longer grow with the numb
 
 ## 5. Comments
 
-kankan finds the new comments of all cards with one request for the whole board, instead of one request per watched card. Answers to `ask` ([initial §14.3](initial_spec_functional.md#143-answers-through-comments)) and Q&A follow-ups ([questions §3.3](questions_spec_functional.md#33-follow-ups)) are delivered as today, within the poll setting of the agent concerned.
+kankan finds the new comments of all cards with one request for the whole board, instead of one request per watched card. Answers to `ask` ([initial §14.3](initial_spec_functional.md#143-answers-through-comments)) and Q&A follow-ups ([questions §3.3](questions_spec_functional.md#33-follow-ups)) are delivered as today, within at most about twice the poll setting of the agent concerned ([§3](#3-poll-settings)). A card with no recent comment costs no request of its own once kankan has caught up with it.
 
 Trello does not report edits or deletions of comments in that read: an edited or deleted comment is seen when the card's whole thread is read, and every `kankan task` reads it live, so an agent always gets the current thread. An edited comment never counts as a new comment, as today.
 
@@ -59,13 +61,14 @@ How this feature changes the initial behaviour described in [`initial_spec_funct
 **§15.2 Situations and behaviour.** Add:
 
 | Trello unreachable while a launcher polls | The poll fails as today and is retried at the next one; no decision is taken on data older than the poll setting. |
+| A user's change made just after another process read the board | Seen at the launcher's following poll: at most about twice the poll setting after the change ([board reader §3](#3-poll-settings)). |
 | Board cache deleted or unreadable | kankan reads Trello again; nothing else changes. |
 
 **§18.3 Acceptance tests.** Add the tests of [§8](#8-acceptance-tests).
 
 ## 8. Acceptance tests
 
-1. Two work agents and a Q&A agent idle on a board with no work: the board is read from Trello about once per `qa_poll_seconds`, not once per agent per interval; the work agents still take a card added to `Backlog` within `poll_seconds`.
+1. Two work agents and a Q&A agent idle on a board with no work: the board is read from Trello about once per `qa_poll_seconds`, not once per agent per interval; the work agents still take a card added to `Backlog` within twice `poll_seconds`.
 2. A user comment answering an `ask` and a Q&A follow-up on another card are both found by one board-wide comment read and delivered as today.
 3. A card moved by the user is seen by a command (`status`, `task`, a claim) at once, even when a launcher read the board a moment before the move.
 4. After kankan moves a card, no launcher reading the board with a 120-second freshness is given the card's former list.
@@ -73,6 +76,9 @@ How this feature changes the initial behaviour described in [`initial_spec_funct
 6. With Trello unreachable, a launcher's poll fails and is retried; with the cache deleted while agents run, they keep working.
 7. An edited comment is shown edited by the next `kankan task` and is not delivered as a new comment.
 8. `kankan destroy` leaves no cache behind.
+9. `kankan doctor` reports revoked credentials as invalid, even after they were valid and cached.
+10. A card's attachments are given to the agent in the card's order, also when they were reordered after the upload and the card was read from the cache.
+11. Ten quiet Q&A cards and a quiet `waiting_human` card cost no request of their own per poll once the comment log covers them, also a day after their last comment.
 
 ## 9. Out of scope
 
