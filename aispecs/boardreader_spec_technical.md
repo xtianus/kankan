@@ -26,7 +26,7 @@ Internally both become a **minimum send time** `not_before` (the call time for `
 | `list_info(list_id, fresh)` | board (lists with `closed`; a list missing from the read is deleted) | `list_info` |
 | `settings_cards(list_id, fresh)` | board (cards of that list and their checklists) | `settings_cards` |
 | `thread(card_id, fresh)` | thread (every comment of the card) | `comments(card_id)` without `since`, `find_comment` |
-| `new_comments(after, fresh, card_id=None)` | comment log, or the card's thread when the log does not reach back to `after` | `comments(card_id, since=…)` |
+| `new_comments(card_id, after, fresh)` | comment log, or the card's comments when the log does not reach back to `after` | `comments(card_id, since=…)` |
 | `members(fresh)`, `admins(fresh)` | members | `board_members`, `board_admins` |
 | `me()`, `card_creator(card_id)` | immutable (read once; the member is kept per credentials, keyed by a hash of the token, and a creator per card) | `me`, `card_creator` |
 | `closed_cards(fresh)`, `board_info(short)`, `member(username)` | none: always live, never cached (used once by `destroy`, `init` and the live tests) | `closed_cards`, `board`, `member` |
@@ -74,7 +74,7 @@ A unit satisfies a read when its send time is at or after `not_before` and after
 The log holds the new comments of the whole board: for each, its action ID, card ID, author, date and text, as M2 returns them.
 - **Start.** The first board-wide read with no log asks for the newest comment action (`limit=1`); its ID becomes both the log's cursor and its **horizon**: the log is complete for every comment after the horizon. With no comment on the board, the horizon is the empty cursor and the log is complete from the start.
 - **Refresh.** `GET /1/boards/{id}/actions?filter=commentCard&since=<cursor>&limit=1000` (newest first; `since` excludes the cursor itself), followed by pages with `before=<oldest ID of the previous page>` while a page is full. The newest ID becomes the cursor.
-- **Serving.** `new_comments(after, …)` returns the logged comments with an ID greater than `after` (of one card, when `card_id` is given); when `after` is older than the horizon, the log cannot answer and the card's thread is read instead (M2 `since=after`, as today).
+- **Serving.** `new_comments(card_id, after, …)` returns the logged comments of that card with an ID greater than `after`, and the log's cursor, up to which the answer is complete; when `after` is older than the horizon, the log cannot answer and the card's comments are read instead (M2 `since=after`, as today), returning the newest ID read as the point of completeness. There is no board-wide variant: a caller watching several cards asks for each, served by the same log refresh.
 - **Pruning.** Entries older than 24 hours are dropped and the horizon moves to the newest dropped ID.
 - **Edits and deletions.** Trello reports neither in this read: an edit changes the text of the existing action and a deletion removes it, with no `updateComment` or `deleteComment` action (observed 2026-11-25 on the test board). The log therefore never changes a comment already logged; the current text of a thread comes only from a thread read, and every agent command reading a thread reads it live ([functional §5](boardreader_spec_functional.md#5-comments)).
 
@@ -89,7 +89,7 @@ The clients keep their own cursors as today (the seat state's `comment_cursor`, 
 | `launcher.start`, `failed_start`, `seats` (seat creation, list checks, `acquire_qa`) | `snapshot`, `card`, `list_info` | `LIVE` |
 | `QaLauncher` idle claim scan, `check_list_while_waiting`, `poll_active` | `snapshot`, `list_info`, `card`, `new_comments` | `max_age(qa_poll_seconds)` |
 | `QaLauncher.open_conversation` (thread at the start of a conversation) | `thread` | `LIVE` |
-| `forward.poll` (`waiting_human`) | `new_comments(card_id=…)` | `max_age(poll_seconds)` |
+| `forward.poll` (`waiting_human`) | `new_comments` (its card) | `max_age(poll_seconds)` |
 | `boardsettings` periodic read | `settings_cards` | `max_age(settings_poll_seconds)` |
 | `boardsettings` and `cardsections_feedback` marker checks before a comment | `thread` | `LIVE` |
 | `notify` from a launcher; from a command | `members`, `admins` | the caller's poll freshness; `LIVE` |
