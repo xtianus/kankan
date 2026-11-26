@@ -10,6 +10,7 @@ import json
 import re
 from typing import Optional
 
+from kankan.boardreader import LIVE
 from kankan import boardconfig, clock, messages, notify
 from kankan.adapters import adapter_types
 from kankan.cardsections import fingerprint, parse
@@ -207,7 +208,7 @@ def _perform(project, card_id: str, action_id: str) -> None:
     if action is None:
         return
     report = record["report"]
-    card = project.trello.card(card_id)  # every read before the lock
+    card = project.board.card(card_id, LIVE)  # every read before the lock
     types = _types(project)
     if card is None:  # deleted
         with project_lock(project.paths):
@@ -243,7 +244,7 @@ def _perform(project, card_id: str, action_id: str) -> None:
         return
     if action["kind"] == "comment":
         me = notify.kankan_member_id(project)
-        posted = any(c.member_id == me and c.text.rstrip().endswith(marker(action_id)) for c in project.trello.comments(card_id))
+        posted = any(c.member_id == me and c.text.rstrip().endswith(marker(action_id)) for c in project.board.thread(card_id, LIVE))
         mention = "" if posted else notify.mention(project, card_id)
         with project_lock(project.paths):
             data, current, _ = _current(project, card_id, report, action_id)

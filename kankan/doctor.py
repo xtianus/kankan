@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional, Sequence
 
+from kankan.boardreader import LIVE
 from kankan import build, gitutil
 from kankan.adapters import WORK_ROLES, adapter_types
 from kankan.errors import KankanError, Status
@@ -348,14 +349,14 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     rest = ("registry", "lists", "qa-list", "labels", "reconcile")
     try:
         project = Project.open(cwd)
-        project.trello.me()
+        project.board.me(LIVE)
     except KankanError as err:
         return [Check("credentials", MANUAL, err.message, "kankan init --reauth")] + \
             [Check(n, SKIPPED, "needs credentials") for n in rest]
     checks = [Check("credentials", OK, "valid")]
     from kankan.init import account_warnings
-    cfg.kankan_member_id = cfg.kankan_member_id or project.trello.me()["id"]
-    cfg.kankan_username = cfg.kankan_username or project.trello.me()["username"]
+    cfg.kankan_member_id = cfg.kankan_member_id or project.board.me(LIVE)["id"]
+    cfg.kankan_username = cfg.kankan_username or project.board.me(LIVE)["username"]
     problems = account_warnings(project.trello, cfg)
     if problems:
         checks.append(Check("notifications", MANUAL, problems[0],
@@ -364,7 +365,7 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     else:
         checks.append(Check("notifications", OK, f"kankan acts as @{cfg.kankan_username}; it mentions each card's "
                             "creator, or the board's admins"))
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     block = registry_block(snap.desc) or {}
     if block.get("registry-id") != cfg.registry_id:
         checks.append(Check("registry", MANUAL, f"the board is bound to {block.get('host')}:{block.get('path')}",
@@ -470,7 +471,7 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
                 report = settings_setup.ensure_instructions_card(project, adapter_types(project.paths), write=False)
                 if report:  # card instructions T§6
                     checks.append(Check("instructions-card", WARN, report, "kankan doctor (without --no-fix)"))
-            read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
+            read = boardsettings.from_snapshot(project, project.board.snapshot(LIVE))
             result = boardsettings.apply_read(project, read, adapters, write=fix)
             if fix:
                 boardsettings.drain_actions(project)

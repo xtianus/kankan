@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from kankan.boardreader import LIVE
 from kankan import clock
 from kankan.errors import KankanError
 from kankan.seatstate import update_state
@@ -65,7 +66,7 @@ def clear_causes(project, seat: str, card_id: str, label_ids) -> None:
 def kankan_label_ids(project, card, board_labels: Optional[Dict] = None):
     """kankan's own labels on ``card``: Question, Error and Resume ones (never HOLD)."""
     if board_labels is None:
-        board_labels = project.trello.snapshot(project.cfg.board_id).labels
+        board_labels = project.board.snapshot(LIVE).labels
     own = {project.cfg.label_question, project.cfg.label_error}
     result = []
     for label_id in card.label_ids:
@@ -91,7 +92,7 @@ def resume_label_name(when) -> str:
 def resume_label(project, when) -> str:
     """Create or reuse the board label ``Resume YYYY-MM-DD hh:mm`` (server time zone)."""
     name = resume_label_name(when)
-    snap = project.trello.snapshot(project.cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     for label in snap.labels.values():
         if label.name == name:
             return label.id
@@ -121,7 +122,7 @@ def gc_resume_labels(project) -> list:
     from kankan.config import project_lock
     deleted = []
     with project_lock(project.paths):
-        snap = project.trello.snapshot(project.cfg.board_id)
+        snap = project.board.snapshot(LIVE)
         used = {label_id for card in snap.cards.values() for label_id in card.label_ids}
         now = clock.now()
         for label in snap.labels.values():

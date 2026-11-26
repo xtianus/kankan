@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from kankan.boardreader import LIVE, max_age
 from kankan import boardconfig, boardsettings, cards, cardsections_feedback, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
 from kankan.adapters import Adapter, Classification, ModelEffort, classify, load_adapter, start_command
 from kankan.config import check_lists, check_registry
@@ -139,7 +140,7 @@ class Launcher:
     def start(self) -> None:
         """§8.3: checks, seat occupation, session rename, agent start."""
         procutil.set_child_subreaper()
-        snap = self.project.trello.snapshot(self.cfg.board_id)
+        snap = self.project.board.snapshot(LIVE)
         check_registry(self.cfg, snap.desc)
         check_lists(self.cfg, snap.lists)
         from kankan import worktrees
@@ -373,7 +374,7 @@ class Launcher:
         # a planned restart without a card (the Q&A seat between conversations) has no card to label
         if prepared and pair and prepared.get('card') and prepared.get('ref_oid'):
             try:
-                card = self.project.trello.card(prepared['card'])
+                card = self.project.board.card(prepared['card'], LIVE)
                 if card:
                     text = messages.MODEL_START_FAILED.format(type=self.type, model=pair.model, effort=pair.effort, reason=reason)
                     if self.cfg.label_error not in card.label_ids:
@@ -840,7 +841,7 @@ class Launcher:
             return
         self.next_board_check = now + self.cfg.poll_seconds
         try:
-            snap = self.project.trello.snapshot(self.cfg.board_id)
+            snap = self.project.board.snapshot(max_age(self.cfg.poll_seconds))
             check_registry(self.cfg, snap.desc)
             boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap), self.adapters or boardsettings.adapters_for(self.project.paths))
             boardsettings.drain_actions(self.project)
@@ -850,6 +851,8 @@ class Launcher:
             else:
                 self.log("board_check_failed", error=err.message)
             return
+        finally:
+            poll_done(self, "board")
         card = snap.cards.get(self.task["card"])
         if card is not None and self.cfg.label_hold in card.label_ids:
             self.request_suspend("hold")
@@ -872,7 +875,7 @@ class Launcher:
         if card is not None and card.list_id in (meta.get("target_list"), meta.get("from_list")):
             return
         if card is None:
-            card = self.project.trello.card(self.task["card"])
+            card = self.project.board.card(self.task["card"], max_age(self.cfg.poll_seconds))
             if card is not None and not card.closed and card.list_id in (meta.get("target_list"), meta.get("from_list")):
                 return
         self.request_suspend("user_moved")
@@ -948,6 +951,14 @@ class Launcher:
             self.idle_since = clock.monotonic()
             self.next_tick = 0.0
             self.set_state("idle")
+
+
+def poll_done(launcher, kind: str) -> None:
+    """Test hook (``KANKAN_TEST_READS=1``): an audit entry when one of the launcher's polls completed, so tests wait
+    for polls instead of counting Trello requests, which another process's shared read may answer (board reader
+    technical §10)."""
+    if os.environ.get("KANKAN_TEST_READS") == "1":
+        launcher.log("poll_done", kind=kind)  # ``log`` adds the seat
 
 
 def main(agent_type: str, seat: Optional[str]) -> int:

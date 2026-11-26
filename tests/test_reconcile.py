@@ -338,7 +338,7 @@ def test_fix_reads_archived_recorded_cards_outside_the_project_lock_and_prunes_t
     _record(project, *archived)
     lock = str(project.paths.kankan_dir / "project.lock")
     reads = []
-    real = TrelloClient.card
+    real = TrelloClient.read_card  # every card read goes through it (board reader)
 
     def card(self, card_id, *args, **kwargs):
         if card_id in archived:
@@ -346,7 +346,7 @@ def test_fix_reads_archived_recorded_cards_outside_the_project_lock_and_prunes_t
             reads.append(entry is not None and entry[1] == threading.get_ident())
             time.sleep(0.2)  # a slow Trello
         return real(self, card_id, *args, **kwargs)
-    monkeypatch.setattr(TrelloClient, "card", card)
+    monkeypatch.setattr(TrelloClient, "read_card", card)
     fixed = diag.reconcile(project, fix=True)
     assert reads == [False, False, False]  # read without the project lock
     assert qa.recorded(project.paths) == set()
@@ -363,14 +363,14 @@ def test_fix_keeps_a_recorded_card_whose_ref_changed_during_the_reads(board, mon
     card_id = fake.add_card(qa_list, "old")["id"]
     fake.user_archive(card_id)
     _record(project, card_id)
-    real = TrelloClient.card
+    real = TrelloClient.read_card  # every card read goes through it (board reader)
 
     def card(self, ident, *args, **kwargs):
         result = real(self, ident, *args, **kwargs)
         if ident == card_id and project.refs.read(card_ref(card_id)) is None:
             put_card_ref(project, card_id, "abcdefgh", phase="parked", owner=None, target_list=qa_list)
         return result
-    monkeypatch.setattr(TrelloClient, "card", card)
+    monkeypatch.setattr(TrelloClient, "read_card", card)
     diag.reconcile(project, fix=True)
     assert qa.recorded(project.paths) == {card_id}
 

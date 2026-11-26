@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from typing import Optional
 
+from kankan.boardreader import LIVE, max_age
 from kankan import boardconfig, boardsettings, clock, labels, messages, procutil, qa, qa_answer, seats, workflow
 from kankan.adapters import Classification, ModelEffort
 from kankan.config import check_registry, qa_list_open
 from kankan.errors import KankanError, Status
-from kankan.launcher import Launcher
+from kankan.launcher import Launcher, poll_done
 from kankan.refstore import RefValue, card_ref
 from kankan.seatstate import load_state, update_state
 
@@ -173,7 +174,10 @@ class QaLauncher(Launcher):
                     self.pair_wait_logged = pair
                 return False
             try:
-                task = self.tick()
+                try:
+                    task = self.tick()
+                finally:
+                    poll_done(self, "board")
             except QaListUnavailable:
                 raise
             except KankanError as err:
@@ -192,7 +196,7 @@ class QaLauncher(Launcher):
     def tick(self) -> Optional[dict]:
         """One board read (B3): checks, the unfinished handoff moves, then the claim of the top eligible card."""
         cfg = self.cfg
-        snap = self.project.trello.snapshot(cfg.board_id)
+        snap = self.project.board.snapshot(max_age(cfg.qa_poll_seconds))  # the claim re-reads live (board reader T§8)
         check_registry(cfg, snap.desc)
         self.check_qa_list(qa_list_open(cfg, snap.lists))
         boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap),
@@ -320,7 +324,7 @@ class QaLauncher(Launcher):
                     if current is None or current.oid != value.oid:
                         continue
                     event = cards.converge_ref(self.project, self.lease, ref, current,
-                                               self.project.trello.card(card_id))
+                                               self.project.board.card(card_id, LIVE))
                 if event:
                     self.log("qa_handoff_converged", card=card_id, result=event)
             except KankanError as err:
@@ -338,7 +342,7 @@ class QaLauncher(Launcher):
             if qa.active_ended(self.cfg, card):
                 self.end_conversation("card_left", turn_running=False)
                 return
-            comments = self.project.trello.comments(card.id)
+            comments = self.project.board.thread(card.id, LIVE)
             cands = qa.candidates(self.project, card, comments) if restart else None
         except KankanError as err:
             self.log("qa_open_failed", status=err.status.value, error=err.message)
@@ -346,7 +350,7 @@ class QaLauncher(Launcher):
                 self.task = None  # taken up again at the next tick
             return  # retried at the next tick
         self.thread = {c.id: c for c in comments}
-        self.cursor = qa.newest(list(self.thread))
+        self.cursor = max((c.date for c in comments), default="")  # a comment point: a date (board reader T§3)
         self.card = card
         self.seen_attachments = frozenset(a.id for a in card.attachment_items)
         if restart:
@@ -609,7 +613,8 @@ class QaLauncher(Launcher):
             return
         self.next_list_check = now + self.cfg.qa_poll_seconds
         try:
-            info = self.project.trello.list_info(self.cfg.qa_list) if self.cfg.qa_list else None
+            info = self.project.board.list_info(self.cfg.qa_list, max_age(self.cfg.qa_poll_seconds)) \
+                if self.cfg.qa_list else None
         except KankanError as err:
             self.log("qa_list_check_failed", error=err.message)
             return
@@ -683,7 +688,10 @@ class QaLauncher(Launcher):
     # ------------------------------------------------------------------ active-card poll
     def periodic_board_check(self) -> None:
         """Replaced by the active-card poll: no board read (B3) during a conversation."""
+        due = self.next_qa_poll
         self.poll_active()
+        if self.next_qa_poll != due:
+            poll_done(self, "card")
 
     def poll_active(self) -> None:
         """Every ``qa_poll_seconds``, without the project lock: one card read (C1) and the comments since the
@@ -697,18 +705,20 @@ class QaLauncher(Launcher):
         self.next_qa_poll = now + self.cfg.qa_poll_seconds
         task = self.task
         try:
-            card = qa.card_state(self.project, task["card"])
+            card = qa.card_state(self.project, task["card"], max_age(self.cfg.qa_poll_seconds))
+            if qa.active_ended(self.cfg, card):  # ending deletes the conversation: confirm it live first
+                card = qa.card_state(self.project, task["card"], LIVE)
             if qa.active_ended(self.cfg, card):
                 self.end_conversation(_end_reason(self.cfg, card), turn_running=self.state != "qa_waiting")
                 return
-            new = self.project.trello.comments(card.id, since=self.cursor)
+            new, point = self.project.board.new_comments(card.id, self.cursor or "", max_age(self.cfg.qa_poll_seconds))
         except KankanError as err:
             self.log("qa_poll_failed", status=err.status.value, error=err.message)
             return
         self.card = card
         for comment in new:
             self.thread[comment.id] = comment
-        self.cursor = qa.newest(list(self.thread)) or self.cursor
+        self.cursor = point  # also with no comment of this card: served by the comment log (board reader T§7)
         attachments = frozenset(a.id for a in card.attachment_items)
         if not (new or attachments != self.seen_attachments or self.recompute):
             return
@@ -718,7 +728,7 @@ class QaLauncher(Launcher):
             self.end_conversation("ref_changed", turn_running=self.state != "qa_waiting")
             return
         try:
-            cands = qa.candidates(self.project, card, list(self.thread.values()))
+            cands = qa.candidates(self.project, card, list(self.thread.values()), max_age(self.cfg.qa_poll_seconds))
         except KankanError as err:
             self.log("qa_poll_failed", status=err.status.value, error=err.message)
             self.recompute = True  # the new items are already in the thread: recomputed at the next poll

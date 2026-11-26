@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from kankan.boardreader import LIVE
 from kankan import attachments, cards, cardsections, messages, notify, qa, worktrees
 from kankan.adapters import adapter_types
 from kankan.cards import CardMeta, Phase, implemented_destination, target_list_for, transition
@@ -187,7 +188,7 @@ def _handoff(project, meta: dict, comments: List[Comment]) -> Optional[str]:
 def _qa_card(ctx: AgentContext):
     """One card read (C1) for a Q&A command: ``not_owner`` when the conversation is over (the card left ``Q&A``,
     was archived or deleted, or got ``HOLD``), even before the launcher's poll has deleted the ref."""
-    card = ctx.project.trello.card(ctx.task["card"])
+    card = ctx.project.board.card(ctx.task["card"], LIVE)
     if qa.active_ended(ctx.project.cfg, card):
         raise _qa_ended(ctx)
     return card
@@ -237,8 +238,8 @@ def _qa_task_data(ctx: AgentContext) -> dict:
         raise
     for entry in inputs:
         entry["new"] = entry["id"] in delivered.attachments
-    comments = _thread(project, project.trello.comments(card.id), set(delivered.comments))
-    latest = project.trello.card(current["card"])
+    comments = _thread(project, project.board.thread(card.id, LIVE), set(delivered.comments))
+    latest = project.board.card(current["card"], LIVE)
     if qa.active_ended(project.cfg, latest) or not _qa_still_ours(ctx):
         _discard_ended_files(ctx, card.short)
         raise _qa_ended(ctx)
@@ -256,13 +257,13 @@ def task(ctx: AgentContext) -> dict:
         return _qa_task_data(ctx)
     phases = {"impl": (Phase.IMPL.value,), "review": (Phase.REVIEW.value,)}.get(current["kind"], cards.OWNED_PHASES)
     value = _own_ref(ctx, phases)
-    card = ctx.project.trello.card(current["card"])
+    card = ctx.project.board.card(current["card"], LIVE)
     if card is None or card.closed:
         raise KankanError(Status.INELIGIBLE, "the card was deleted or archived")
     inputs = attachments.for_task(ctx.project, card, still_held=lambda: _hold(ctx, phases))
     extra = {}
     if current["kind"] == "impl":
-        thread = ctx.project.trello.comments(card.id)
+        thread = ctx.project.board.thread(card.id, LIVE)
         extra = {"comments": _thread(ctx.project, thread), "handoff": _handoff(ctx.project, value.meta, thread)}
     parsed = cardsections.parse(card.desc, adapter_types(ctx.project.paths))
     if current["kind"] in ("impl", "review"):
@@ -356,7 +357,7 @@ def done(ctx: AgentContext) -> dict:
 
 
 def _trello_card(ctx: AgentContext):
-    card = ctx.project.trello.card(ctx.task["card"])
+    card = ctx.project.board.card(ctx.task["card"], LIVE)
     if card is None:
         from kankan.trello import Card
         card = Card(id=ctx.task["card"], short=ctx.task.get("short", ""), board_id="", name="", desc="", url="",
@@ -437,7 +438,7 @@ def yield_(ctx: AgentContext) -> dict:
     state = load_state(ctx.project.paths, ctx.seat)
     reason = (state.suspend_requested or {}).get("reason") or (state.task or {}).get("suspend_cause")
     cause = "yield"
-    card = ctx.project.trello.card(current["card"])
+    card = ctx.project.board.card(current["card"], LIVE)
     if reason == "user_moved" or reason in ("user_deleted", "user_archived"):
         cause = "user_deleted" if card is None else ("user_archived" if card.closed else "user_moved")
     phase = kankan_yield(ctx.project, ctx.lease, card, value, cause)
@@ -494,7 +495,7 @@ def _label_and_comment(ctx: AgentContext, text: str, label_id: str, cause: str, 
     def record(state):
         state.label_causes.setdefault(card_id, {})[label_id] = {"cause": cause, "at": clock.iso(clock.now())}
         if not in_qa:
-            state.comment_cursor[card_id] = comment.id
+            state.comment_cursor[card_id] = comment.date or comment.id  # a comment point: its date (board reader T§3)
     update_state(project.paths, ctx.seat, record)
     project.log(cause, seat=ctx.seat, card=card_id)
     signal(ctx, cause, {"turn": token} if in_qa else None)

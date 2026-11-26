@@ -99,15 +99,25 @@ def _wait_gets(env, path, cycles, timeout):
     assert wait_for(lambda: _gets(env, path) >= start + cycles, timeout=timeout), f"no {cycles} reads of {path}"
 
 
+def _polls(env, kind):
+    return sum(1 for e in auditlog.read(env.project.paths) if e["event"] == "poll_done" and e.get("kind") == kind)
+
+
+def _wait_polls(env, kind, cycles, timeout):
+    start = _polls(env, kind)
+    assert wait_for(lambda: _polls(env, kind) >= start + cycles, timeout=timeout), f"no {cycles} {kind} polls"
+
+
 def wait_card_polls(env, card, cycles=2, timeout=15):
-    """Wait until the launcher has read ``card``'s comments ``cycles`` more times (the active-card poll, once per
-    ``qa_poll_seconds``): every poll before the last one, and what it delivers, is complete."""
-    _wait_gets(env, f"/1/cards/{card['id']}/actions", cycles, timeout)
+    """Wait until the launcher has polled its active card ``cycles`` more times (once per ``qa_poll_seconds``):
+    every poll before the last one, and what it delivers, is complete. Polls are counted by the launcher's
+    ``poll_done`` audit entries (``KANKAN_TEST_READS``), not by Trello requests, which shared reads may answer."""
+    _wait_polls(env, "card", cycles, timeout)
 
 
 def wait_board_polls(env, cycles=2, timeout=15):
-    """Wait until the idle launcher has read the board ``cycles`` more times (its tick, which claims)."""
-    _wait_gets(env, f"/1/boards/{env.project.cfg.board_id}", cycles, timeout)
+    """Wait until the idle launcher has polled the board ``cycles`` more times (its tick, which claims)."""
+    _wait_polls(env, "board", cycles, timeout)
 
 
 # ---------------------------------------------------------------------- conversation

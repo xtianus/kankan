@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from kankan.boardreader import LIVE
 from kankan import build, messages, seats, worktrees
 from kankan.adapters import WORK_ROLES
 from kankan.config import file_lock
@@ -100,7 +101,7 @@ def _check_collision(project, tmux: Tmux) -> None:
 
 def _check_qa_list(project) -> None:
     cfg = project.reload_config()
-    info = project.trello.list_info(cfg.qa_list) if cfg.qa_list else None
+    info = project.board.list_info(cfg.qa_list, LIVE) if cfg.qa_list else None
     if info is None or info.closed:
         raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
 

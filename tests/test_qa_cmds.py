@@ -349,7 +349,7 @@ def test_an_old_task_ending_late_keeps_the_files_of_a_newer_task_of_the_same_sea
     from pathlib import Path
     from kankan.trello import TrelloClient
     conv.fake.upload(conv.card["id"], "a.txt", b"content")
-    real = TrelloClient.comments
+    real = TrelloClient.read_comments  # every thread read goes through it (board reader)
     newer = {}
 
     def comments(self, *args, **kwargs):
@@ -359,7 +359,7 @@ def test_an_old_task_ending_late_keeps_the_files_of_a_newer_task_of_the_same_sea
             qa.claim(conv.project, conv.lease, conv.project.trello.card(conv.card["id"]), PAIR)
             newer["data"] = agentcmds.task(fresh(conv))
         return real(self, *args, **kwargs)
-    monkeypatch.setattr(TrelloClient, "comments", comments)
+    monkeypatch.setattr(TrelloClient, "read_comments", comments)
     assert status_of(lambda: agentcmds.task(conv.ctx)) == Status.NOT_OWNER
     paths = [entry["path"] for entry in newer["data"]["attachments"]]
     assert paths and all(Path(path).exists() for path in paths)

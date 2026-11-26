@@ -11,6 +11,7 @@ import copy
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
 
+from kankan.boardreader import LIVE
 from kankan import agents_cmd, auditlog, clock, gitutil, labels, messages, seats, worktrees
 from kankan.cards import (AdminActor, CardMeta, Phase, _hold_after_integration, confirm_move, delete_integrated_ref,
                           implemented_destination, parse_refs, transition)
@@ -86,7 +87,7 @@ def plan_moves(project, seat: str) -> List[Move]:
             raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_MALFORMED.format(
                 seat=seat, card=ref[len(CARD_PREFIX):], error=value.message), {"ref": ref})
         refs[ref[len(CARD_PREFIX):]] = value
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     for card_id, value in refs.items():  # before anything is changed: a claim missing a field stops the removal
         meta = value.meta
         if meta.get("owner") == seat or meta.get("target_list") in lists or meta.get("from_list") in lists:
@@ -102,7 +103,7 @@ def plan_moves(project, seat: str) -> List[Move]:
             ids.add(card_id)
     moves = []
     for card_id in sorted(ids):
-        card = snap.cards.get(card_id) or project.trello.card(card_id)
+        card = snap.cards.get(card_id) or project.board.card(card_id, LIVE)
         value = refs.get(card_id)
         row, to = _classify(cfg, seat, lists, value, card)
         if row:
@@ -133,7 +134,7 @@ def apply_move(project, seat: str, move: Move) -> Optional[Move]:
         cfg = removing_cfg(project, seat)
         lists = seat_lists(cfg, seat)
         value = project.refs.read(card_ref(move.card_id))
-        card = project.trello.card(move.card_id)
+        card = project.board.card(move.card_id, LIVE)
         row, to = _classify(cfg, seat, lists, value, card)
         if not row:
             return None
@@ -192,7 +193,7 @@ def _close_integrated(project, seat: str, value: RefValue, card: Card) -> bool:
         except KankanError as err:
             project.log("seat_remove_move_failed", card=card.id, error=err.message)
             return False
-    fresh = project.trello.card(card.id) or card
+    fresh = project.board.card(card.id, LIVE) or card
     _hold_after_integration(project, fresh, value.meta)
     delete_integrated_ref(project, card_ref(card.id), value)
     return True
@@ -305,7 +306,7 @@ def remaining_cards(project, seat: str) -> List[str]:
     lists = seat_lists(cfg, seat)
     if not lists:
         return []
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     left = {card.short for card in snap.cards.values() if card.list_id in lists}
     for value in parse_refs(project).values():
         if not isinstance(value, RefValue):
@@ -323,7 +324,7 @@ def _sweep_labels(project, seat: str) -> None:
     """Clear every label cause the seat still records, except on cards in ``Blocked`` and on closed cards."""
     causes = load_state(project.paths, seat).label_causes
     for card_id, by_label in list(causes.items()):
-        card = project.trello.card(card_id)
+        card = project.board.card(card_id, LIVE)
         if card is None or card.closed or card.list_id == project.cfg.blocked:
             continue
         labels.clear_causes(project, seat, card_id, list(by_label))
@@ -408,7 +409,7 @@ def _complete(project, seat: str, is_qa: bool) -> dict:
     if not is_qa:
         cfg = project.reload_config()
         for list_id in sorted(seat_lists(cfg, seat)):
-            info = project.trello.list_info(list_id)
+            info = project.board.list_info(list_id, LIVE)
             if info is not None and not info.closed:
                 project.trello.archive_list(list_id)
             archived += 1

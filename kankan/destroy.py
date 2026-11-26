@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
+from kankan.boardreader import BoardReader
 from kankan import agents_cmd, auditlog, gitutil, init, messages, seats, stopall, worktrees
 from kankan.config import (Config, Paths, load_credentials, project_lock, read_json, registry_state,
                            remove_registry_block, try_load)
@@ -1058,7 +1059,7 @@ def board_plan(ctx: Ctx) -> Tuple[Optional[BoardPlan], Optional[str]]:
     if ctx.trello is None:
         return None, "unreadable: credentials"
     try:
-        data = ctx.trello.board(cfg.board_id)
+        data = BoardReader.unbound(ctx.trello, cfg.board_id).board_info(cfg.board_id)
     except KankanError as err:
         status = _unreadable_status(err)
         if status is not None:
@@ -1075,8 +1076,8 @@ def board_plan(ctx: Ctx) -> Tuple[Optional[BoardPlan], Optional[str]]:
     if state == "valid" and registry_id != cfg.registry_id:
         return None, "another clone"
     try:
-        payload = ctx.trello.board_payload(cfg.board_id)
-        archived = ctx.trello.closed_cards(cfg.board_id)
+        payload = BoardReader.unbound(ctx.trello, cfg.board_id).board_payload()
+        archived = BoardReader.unbound(ctx.trello, cfg.board_id).closed_cards()
     except KankanError as err:
         if err.status == Status.NEEDS_ACTION:
             raise  # a full page of archived cards: its own message
@@ -1658,7 +1659,7 @@ def _board_step(ctx: Ctx, board: BoardPlan, report: dict, say: Callable[[str], N
     for index, (list_id, card_id) in enumerate(order):
         try:
             # read right before the delete: a card a user moved out of kankan's lists during the run is skipped
-            place = client.card_place(card_id)
+            place = BoardReader.unbound(client).card_place(card_id)
             if place is not None and place[0] not in board.targets:
                 info["cards_skipped"] += 1
                 continue

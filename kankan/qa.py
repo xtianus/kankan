@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
+from kankan.boardreader import LIVE
 from kankan import attachments, auditlog, clock, deps, faults, gitutil, messages, notify, worktrees
 from kankan.cards import CardMeta, Phase, parse_refs
 from kankan.config import Paths, atomic_write_json, project_lock, read_json
@@ -222,11 +223,11 @@ CHUNK_PREFIX = re.compile(r"^([0-9]+)/([0-9]+)\n\n")  # "k/n" before each part o
 QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
 
 
-def candidates(project, card: Card, comments: List[Comment]) -> Inputs:
+def candidates(project, card: Card, comments: List[Comment], fresh=None) -> Inputs:
     """The items that can reach the agent: comments and attachments by board members other than kankan's
     account (``notify.input_members``), without comments carrying any kankan marker and without dependency
-    attachments (``task`` does not list them). ``card`` comes from ``trello.card`` (``attachment_items``)."""
-    members = notify.input_members(project)
+    attachments (``task`` does not list them). ``card`` comes from ``board.card`` (``attachment_items``)."""
+    members = notify.input_members(project, fresh)
     marker = f"`{MARKER_PREFIX}"
     return Inputs([c.id for c in sorted(comments, key=lambda c: c.id)
                    if c.member_id in members and marker not in c.text],
@@ -378,9 +379,9 @@ def eligible(project, snap: Snapshot, refs: Dict[str, RefValue]) -> Optional[Car
     return None
 
 
-def card_state(project, card_id: str) -> Optional[Card]:
-    """One card read (C1, with the attachment fields); None when the card was deleted."""
-    return project.trello.card(card_id)
+def card_state(project, card_id: str, fresh=None) -> Optional[Card]:
+    """One card (C1, with the attachment fields), live unless ``fresh`` allows older data; None when deleted."""
+    return project.board.card(card_id, fresh or LIVE)
 
 
 def active_ended(cfg, card: Optional[Card]) -> bool:
@@ -449,7 +450,7 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
         if seat_cfg is not None and seat_cfg.removing:  # seat T§5: a seat being removed takes no new card
             project.log("qa_claim_skipped", card=card.id, reason="the seat is being removed")
             return None
-        fresh = project.trello.card(card.id)
+        fresh = project.board.card(card.id, LIVE)
         if active_ended(cfg, fresh):
             project.log("qa_claim_skipped", card=card.id, reason="card left Q&A, closed or on HOLD")
             return None
@@ -578,7 +579,7 @@ def handoff_transition(project, lease, task: dict, comment_ids: List[str]) -> No
     conversation = task.get("conversation")
     ended = KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
     with project_lock(project.paths):
-        card = project.trello.card(task["card"])
+        card = project.board.card(task["card"], LIVE)
         if active_ended(cfg, card):
             raise ended
         value = project.refs.read(ref)

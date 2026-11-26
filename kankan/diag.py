@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from kankan.boardreader import LIVE
 from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, seats, workflow
 from kankan.adapters import ModelEffort, adapter_types
 from kankan.config import qa_list_open
@@ -40,7 +41,7 @@ def status(project) -> dict:
             seat_rows[-1]["running_selection"] = state.running_selection
     # the Q&A seat implements and reviews nothing: only work seats make a type active
     types = {row["type"] for row in seat_rows if row["liveness"] == "alive" and cfg.seats[row["seat"]].role != "qa"}
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     refs = workflow.card_refs(project)
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
     waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
@@ -257,7 +258,7 @@ def _fix_stranded(project) -> List[Issue]:
     # called under the project lock: fresh refs (malformed ones count as present) and lock-free liveness probes
     refs = {ref[len(CARD_PREFIX):]: True for ref in project.refs.list_raw(CARD_PREFIX)}
     liveness = {name: seats._liveness(project, name) for name in project.reload_config().seats}
-    snap = project.trello.snapshot(project.cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     for card, list_name, _ in stranded_cards(project, snap, refs, liveness):
         try:
             project.trello.move_card(card.id, project.cfg.backlog, "top")
@@ -279,7 +280,7 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
     """Report inconsistencies (§15.3); with ``fix`` repair only the certain cases."""
     cfg = project.reload_config()
     issues: List[Issue] = []
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     try:
         check_registry(cfg, snap.desc)
     except KankanError as err:
@@ -302,7 +303,7 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
         meta = value.meta
         card = snap.cards.get(card_id)
         if card is None:
-            card = fetched.setdefault(card_id, project.trello.card(card_id))
+            card = fetched.setdefault(card_id, project.board.card(card_id, LIVE))
         if meta.get("phase") == cards.Phase.QA.value:
             if meta.get("owner") not in cfg.seats:  # an unfinished replacement whose new seat was removed (T§2)
                 issues.append(Issue("qa_owner_unregistered", card_id,
@@ -393,7 +394,7 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
                 if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
                     card = snap.cards.get(card_id)
                     if card is None:
-                        card = fetched.setdefault(card_id, project.trello.card(card_id))
+                        card = fetched.setdefault(card_id, project.board.card(card_id, LIVE))
                     if card is None or label_id not in card.label_ids:
                         continue
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
@@ -444,7 +445,7 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
         fixed += _fix_conversation_dirs(project)
         for label_id in labels.gc_resume_labels(project):
             fixed.append(Issue("resume_label_deleted", label_id, "unused or expired", True))
-        snap = project.trello.snapshot(cfg.board_id)
+        snap = project.board.snapshot(LIVE)
         for card in snap.cards.values():
             if card.list_id != cfg.done:
                 continue
@@ -481,7 +482,7 @@ def _qa_record_gone(project, snap) -> Dict[str, tuple]:
     for card_id in sorted(qa.recorded(project.paths) - set(snap.cards)):
         try:
             before = project.refs.read(card_ref(card_id))
-            card = project.trello.card(card_id)
+            card = project.board.card(card_id, LIVE)
         except KankanError as err:
             project.log("qa_record_read_failed", card=card_id, error=err.message)
             continue
@@ -559,7 +560,7 @@ def release_force(project, card: str) -> dict:
     """Bring a card's ref to ``parked`` (cause admin_release); the card stays where it is."""
     with project_lock(project.paths):
         card_id, value = _find_ref(project, card)
-        trello_card = project.trello.card(card_id) or workflow._gone_card(card_id, value.meta)
+        trello_card = project.board.card(card_id, LIVE) or workflow._gone_card(card_id, value.meta)
         new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None,
                                                     cause="admin_release", target_list=None)
         transition(project, AdminActor("release --force"), trello_card, value, new, messages.ADMIN_RELEASED)

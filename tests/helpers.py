@@ -38,7 +38,7 @@ def bind_project(repo, fake, monkeypatch=None, board=None, **cfg_overrides) -> P
     paths = Paths.discover(repo)
     save_config(paths, cfg)
     project = Project.open(repo)
-    project.board = board
+    project.fake_board = board  # the fake board dict; ``project.board`` is the board reader
     return project
 
 

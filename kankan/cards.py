@@ -6,6 +6,7 @@ import enum
 from dataclasses import asdict, dataclass, field, fields
 from typing import Dict, List, Optional, Tuple, Union
 
+from kankan.boardreader import LIVE, max_age
 from kankan import attachments, clock, faults, labels
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
@@ -142,7 +143,7 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
                comment: Optional[str]) -> TransitionResult:
     """Git first, then Trello: one ref transaction, then a verified move and a de-duplicated comment."""
     with project_lock(project.paths):
-        fresh = project.trello.card(card.id)
+        fresh = project.board.card(card.id, LIVE)
         user_park = new is not None and new.phase == Phase.PARKED.value and (new.cause or "").startswith("user_")
         if isinstance(actor, Lease) and expect is not None and new is not None and not user_park \
                 and expect.meta.get("phase") in OWNED_PHASES and not _where_expected(fresh, expect.meta):
@@ -248,8 +249,8 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
     events: List[str] = []
     with project_lock(project.paths):
         cfg = project.cfg
-        if snap is None:
-            snap = project.trello.snapshot(cfg.board_id)
+        if snap is None:  # under the lock with no cycle snapshot: live, never waiting for a poll
+            snap = project.board.snapshot(LIVE)
         for ref, value in parse_refs(project).items():
             card_id = ref[len(CARD_PREFIX):]
             if isinstance(value, KankanError):
@@ -258,10 +259,19 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
             if _skipped(lease, value.meta):
                 continue
             card = snap.cards.get(card_id)
-            if card is None:
-                card = project.trello.card(card_id)
+            if not _settled(cfg, value.meta, card):
+                card = project.board.card(card_id, LIVE)  # before any step, under the lock (board reader T§8)
             events += _converge_ref(project, lease, ref, value, card, snap.labels)
     return events
+
+
+def _settled(cfg, meta: dict, card: Optional[Card]) -> bool:
+    """The snapshot shows the card where its ref expects it, with no move to confirm: convergence has no step to take,
+    so the snapshot, which may be as old as ``poll_seconds``, is enough and no card is read (board reader T§8)."""
+    if card is None or card.closed or meta.get("phase") == Phase.INTEGRATED.value:
+        return False
+    target = meta.get("target_list")
+    return target is None or (card.list_id == target and not meta.get("from_list"))
 
 
 def converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Optional[Card],

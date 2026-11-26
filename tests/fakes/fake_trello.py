@@ -19,7 +19,7 @@ import secrets
 import string
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -56,6 +56,8 @@ class FakeTrello:
         self.timeout_delay = 0.6
         self.response_delay = 1.0  # the "delay" fault: the request is served normally after this many seconds
         self.response_date = "auto"
+        self.shuffled_comment_ids = False  # comment IDs of one second out of creation order, as on Trello
+        self._last_now = None
         self.me = {"id": self.new_id(), "username": "kankanbot", "fullName": "Kankan Bot"}  # the token owner
         self.owner = {"id": self.new_id(), "username": "boardowner", "fullName": "Board Owner"}  # the human
         self.members = {self.me["id"]: self.me, self.owner["id"]: self.owner}
@@ -90,7 +92,51 @@ class FakeTrello:
             self.faults.append([method.upper(), re.compile(path_regex), fault, times])
 
     def _now(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        """Trello's dates have milliseconds; here they also strictly increase, so no two actions tie."""
+        now = datetime.now(timezone.utc)
+        now = now.replace(microsecond=now.microsecond // 1000 * 1000)
+        if self._last_now is not None and now <= self._last_now:
+            now = self._last_now + timedelta(milliseconds=1)
+        self._last_now = now
+        return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+    def _comment_id(self) -> str:
+        if not self.shuffled_comment_ids:
+            return self.new_id()
+        return f"{int(datetime.now(timezone.utc).timestamp()):08x}{secrets.token_hex(8)}"
+
+    def _point(self, value: str) -> str:
+        """A ``since``/``before`` value as a date: an action ID resolves to its date, a deleted one to the start of
+        the second in its ID (observed on Trello); anything else is an ISO date."""
+        if re.fullmatch(r"[0-9a-f]{24}", value):
+            action = self.state["comments"].get(value)
+            if action is not None:
+                return action["date"]
+            return datetime.fromtimestamp(int(value[:8], 16), timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return value
+
+    def _comment_actions(self, card_ids, p: dict):
+        limit = int(p.get("limit", 50))
+        if limit > 1000:
+            return 400, "invalid value for limit"
+        rows = sorted((c for c in self.state["comments"].values() if c["data"]["card"]["id"] in card_ids),
+                      key=lambda c: (c["date"], c["id"]), reverse=True)
+        if p.get("since"):
+            since = self._point(p["since"])
+            rows = [c for c in rows if c["date"] > since]
+        if p.get("before"):
+            before = self._point(p["before"])
+            rows = [c for c in rows if c["date"] < before]
+        return 200, [copy.deepcopy(c) for c in rows[:limit]]
+
+    def user_edit_comment(self, comment_id: str, text: str) -> None:
+        """An edit in the Trello UI: the action's text changes, its date stays, no new action."""
+        with self.lock:
+            self.state["comments"][comment_id]["data"]["text"] = text
+
+    def user_delete_comment(self, comment_id: str) -> None:
+        with self.lock:
+            self.state["comments"].pop(comment_id, None)
 
     def add_board(self, name: str = "board", desc: str = "", url_slug: str = None) -> dict:
         with self.lock:
@@ -215,14 +261,14 @@ class FakeTrello:
 
     def _comment(self, card_id: str, text: str, member_id: str) -> dict:
         member = self.members[member_id]
-        comment = {"id": self.new_id(), "idMemberCreator": member_id, "type": "commentCard", "date": self._now(),
+        comment = {"id": self._comment_id(), "idMemberCreator": member_id, "type": "commentCard", "date": self._now(),
                    "data": {"text": text, "card": {"id": card_id}}, "memberCreator": {"id": member_id, "username": member["username"]}}
         self.state["comments"][comment["id"]] = comment
         return comment
 
     def card_comments(self, card_id: str) -> list:
         with self.lock:
-            return [c["data"]["text"] for c in sorted(self.state["comments"].values(), key=lambda c: c["id"])
+            return [c["data"]["text"] for c in sorted(self.state["comments"].values(), key=lambda c: (c["date"], c["id"]))
                     if c["data"]["card"]["id"] == card_id]
 
     def card_list(self, card_id: str) -> str:
@@ -417,7 +463,8 @@ class FakeTrello:
                                     for l in st["lists"].values() if l["idBoard"] == board["id"]
                                     and (p["lists"] == "all" or not l["closed"])]
                 if p.get("cards"):
-                    out["cards"] = [self._card_out(c, p.get("card_attachments") == "true", checklists=False)
+                    out["cards"] = [self._card_out(c, p.get("card_attachments") == "true", checklists=False,
+                                                   attachment_fields=p.get("card_attachment_fields", ""))
                                     for c in st["cards"].values() if c["idBoard"] == board["id"] and not c["closed"]]
                 if p.get("checklists"):
                     out["checklists"] = [copy.deepcopy(c) for c in st["checklists"].values() if st["cards"].get(c["idCard"], {}).get("idBoard") == board["id"]]
@@ -430,6 +477,8 @@ class FakeTrello:
                 if "desc" in p:
                     board["desc"] = p["desc"]
                 return 200, board
+            if len(parts) == 3 and parts[2] == "actions" and method == "GET" and p.get("filter") == "commentCard":
+                return self._comment_actions({c["id"] for c in st["cards"].values() if c["idBoard"] == board["id"]}, p)
             if len(parts) == 3 and parts[2] == "memberships" and method == "GET":
                 out = []
                 for m in board.get("memberships", []):
@@ -565,13 +614,7 @@ class FakeTrello:
                 return 200, [{"id": card["id"], "type": "createCard", "idMemberCreator": creator["id"],
                               "memberCreator": {"id": creator["id"], "username": creator["username"]}}]
             if parts[2:] == ["actions"] and method == "GET":
-                comments = sorted((c for c in st["comments"].values() if c["data"]["card"]["id"] == card["id"]),
-                                  key=lambda c: c["id"], reverse=True)
-                if p.get("since"):
-                    comments = [c for c in comments if c["id"] > p["since"]]
-                if p.get("before"):
-                    comments = [c for c in comments if c["id"] < p["before"]]
-                return 200, comments[:int(p.get("limit", 50))]
+                return self._comment_actions({card["id"]}, p)
             if parts[2:] == ["attachments"] and method == "POST":
                 if "file" in p:
                     file_name, content, mime_type = p["file"]

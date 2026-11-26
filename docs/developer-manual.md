@@ -21,6 +21,8 @@ The local tests use a fake Trello server, real Git in temporary directories, rea
 
 The process tests (markers `tmux` and `slow`) mostly wait for launchers running as real processes, so the full run uses more workers than cores (`-n 16`) and `--dist worksteal` to spread the long tests; a single file runs quickly without `-n`. For speed, the tests set `KANKAN_SCREEN_POLL=0.5`, which makes launchers read the screen every 0.5 s instead of every second (values from 0.05 to 1 are accepted, anything else is ignored); `tests/test_e2e.py::test_card_goes_from_backlog_to_done` unsets it to keep one flow at the real pace. In the pytest process `os.fsync` does nothing, and each test copies one session-wide template Git repository instead of creating its own.
 
+Every Trello read goes through the board reader (`kankan/boardreader.py`); `tests/test_static_reads.py` fails when another module calls a read method of `TrelloClient`. Tests change the fake board directly, which sets no write mark, so an autouse fixture sets `KANKAN_TEST_NO_CACHE=1` (every polling read live) and `KANKAN_TEST_READS=1` (each launcher logs a `poll_done` audit entry when a poll completes; wait for those, not for Trello request counts, which another process's shared read may answer). Tests of the cache itself unset `KANKAN_TEST_NO_CACHE`; tests of comment order set `FakeTrello.shuffled_comment_ids` so that comment IDs of one second come out of creation order, as on Trello.
+
 ## 2. Agent adapters
 
 The default adapters are in `kankan/adapters_default.json`; the screens they were built from are in `tests/fixtures/screens/` and described in [`adapter-notes.md`](adapter-notes.md).

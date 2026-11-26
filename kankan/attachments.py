@@ -23,6 +23,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
+from kankan.boardreader import LIVE
 from kankan import auditlog, clock, config, deps, messages, notify
 from kankan.config import Paths
 from kankan.errors import KankanError, Status
@@ -183,7 +184,10 @@ def for_task(project, card: Card, still_held: Callable[[], Hold]) -> List[dict]:
     result: List[dict] = []
     files = []  # (entry, attachment, api path) still to serve from the cache or download
     listed_at = time.time()  # wall clock, comparable with st_mtime: copies published later are not pruned
-    for att in project.trello.attachments(card.id):
+    listed = project.board.card(card.id, LIVE)  # after ``listed_at``: copies published later are never pruned
+    if listed is None:
+        raise KankanError(Status.INELIGIBLE, messages.NOT_HELD)  # the card was deleted since the task's read
+    for att in listed.attachment_items:  # the card's order (board reader T§9)
         if deps.attachment_short(att.url):
             continue
         entry = {"id": att.id, "name": att.name, "kind": "file" if att.is_upload else "link", "url": att.url}

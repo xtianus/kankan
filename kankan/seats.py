@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from kankan.boardreader import LIVE
 from kankan import clock, faults, gitutil, procutil
 from kankan.config import SeatConfig, atomic_write_json, project_lock, read_json, save_config
 from kankan.errors import KankanError, Status
@@ -193,7 +194,7 @@ def acquire_qa(project, agent_type: str, pids: Optional[dict] = None, create: bo
     """
     name = qa_seat_name(agent_type)
     cfg = project.reload_config()
-    info = project.trello.list_info(cfg.qa_list) if cfg.qa_list else None
+    info = project.board.list_info(cfg.qa_list, LIVE) if cfg.qa_list else None
     if info is None or info.closed:
         raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
     with project_lock(project.paths):
@@ -280,7 +281,7 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
             # seat T§5: lists archived by a removal are never re-created, nor its entry rewritten without its flag
             raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
         if existing is None or not _lists_open(project, existing):
-            snap_lists = project.trello.snapshot(cfg.board_id).lists
+            snap_lists = project.board.snapshot(LIVE).lists
             ids = {}
             for attr, suffix in LIST_SUFFIXES:
                 name = list_name(seat, suffix)
@@ -314,7 +315,7 @@ def _ensure_qa_seat(project, seat: str, agent_type: str) -> SeatConfig:
 
 def _lists_open(project, seat_cfg: SeatConfig) -> bool:
     for list_id in (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review):
-        info = project.trello.list_info(list_id)
+        info = project.board.list_info(list_id, LIVE)
         if info is None or info.closed:
             return False
     return True

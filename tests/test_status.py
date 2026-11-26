@@ -57,13 +57,13 @@ def test_status_reports_settings_without_writes(kproject, fake_trello):
     update_state(kproject.paths, lease.seat, lambda state: setattr(state, 'running_selection', {'model': 'sonnet', 'effort': 'high'}))
     state = boardconfig.SettingsState(settings={'implementation': {'value': {'claude': {'model': 'opus', 'effort': 'max'}}, 'invalid': True, 'card_id': 'settings-card'}})
     atomic_write_json(kproject.paths.kankan_dir / 'board-settings.json', state.to_dict())
-    before = {str(p): p.read_bytes() for p in kproject.paths.kankan_dir.rglob('*') if p.is_file()}
+    before = {str(p): p.read_bytes() for p in kproject.paths.kankan_dir.rglob('*') if p.is_file() and 'board-cache' not in p.parts}
     data = diag.status(kproject)
     assert data['settings']['implementation']['value']['claude'] == {'model': 'opus', 'effort': 'max'}
     assert data['settings']['implementation']['structural_error']
     assert data['seats'][0]['running_selection'] == {'model': 'sonnet', 'effort': 'high'}
     assert data['settings_warning']
-    after = {str(p): p.read_bytes() for p in kproject.paths.kankan_dir.rglob('*') if p.is_file()}
+    after = {str(p): p.read_bytes() for p in kproject.paths.kankan_dir.rglob('*') if p.is_file() and 'board-cache' not in p.parts}
     assert before == after
 
 

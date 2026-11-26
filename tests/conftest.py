@@ -34,6 +34,14 @@ def _git_repo_template(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def board_reader_test_hooks(monkeypatch):
+    """Board reader test switches (plan Task 9): polling reads behave as live ones, since tests change the fake
+    board directly, which sets no write mark (the reader's own tests unset it); launchers log ``poll_done``."""
+    monkeypatch.setenv("KANKAN_TEST_NO_CACHE", "1")
+    monkeypatch.setenv("KANKAN_TEST_READS", "1")
+
+
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Keep every test away from the real ~/.config, ~/coding/.kankan and skills."""
     monkeypatch.setenv("KANKAN_REAL_HOME", os.environ.get("KANKAN_REAL_HOME") or os.path.expanduser("~"))

@@ -684,9 +684,11 @@ Edit the file only with no agent running (`kankan stop`, edit, `kankan start`): 
 
 **Board polling**
 
-- `poll_seconds` (seconds, default `120`): how often an idle agent checks the board for work and comments. Lower means faster reactions and more Trello requests.
+- `poll_seconds` (seconds, default `120`): how old the board data an idle or waiting agent acts on may be, when it checks the board for work and comments. Lower means faster reactions; it costs Trello requests only when no other agent reads the same data more often, since the agents of a project share their reads.
 - `qa_poll_seconds` (seconds, default `30`): the same for the Q&A agent ([section 5.3](#53-questions-qa-cards)).
-- `settings_poll_seconds` (seconds, default `30`): how often the board's setting cards are read ([section 4.2](#42-model-and-effort)).
+- `settings_poll_seconds` (seconds, default `30`): how old the board's setting cards may be when they are read ([section 4.2](#42-model-and-effort)).
+
+A reaction to your change can take up to about twice the setting: an agent may use a read another agent made just before your change, and sees it at its following check. Commands (`status`, `task`, a claim, …) always read Trello as it is. kankan keeps the data it read in `.git/kankan/board-cache/`, private to the clone; deleting it is harmless.
 - `trello_timeout` (seconds, default `5.0`): how long one Trello request may take before it counts as a network error.
 
 **Branches and integration**

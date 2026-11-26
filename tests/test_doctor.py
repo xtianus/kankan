@@ -149,7 +149,9 @@ def test_no_fix_never_mutates(bound, fake_trello, fakebin):
     labels_before = dict(fake_trello.state["labels"])
     def files():
         return {str(path): path.read_bytes() for root in (bound.paths.kankan_dir, Path.home()/'.config', Path.home()/'.cache')
-                if root.exists() for path in root.rglob('*') if path.is_file() and not path.is_symlink()}
+                if root.exists() for path in root.rglob('*') if path.is_file() and not path.is_symlink()
+                and 'board-cache' not in path.parts and not (path.name.startswith('board-') and path.suffix == '.lock')}
+    # reads fill the shared board cache and create its lock files (board reader F§6)
     files_before = files()
     checks = by_name(doctor.run(bound.paths.repo, fix=False, online=True))
     assert checks["hook"].status == checks["exclude"].status == checks["labels"].status == doctor.MANUAL
@@ -376,15 +378,15 @@ def test_label_fix_keeps_concurrent_seat(bound, fake_trello, fakebin, monkeypatc
     from kankan import seats
     del fake_trello.state["labels"][bound.cfg.label_question]
     from kankan.trello import TrelloClient
-    real_snapshot = TrelloClient.snapshot
+    real_read = TrelloClient.read_board  # every board view goes through it (board reader)
     added = []
 
     def snapshot_and_add_seat(self, board_id):
         if not added:  # a launcher registers a seat after doctor read the configuration
             added.append(True)
             seats.ensure_created(bound, "claude-1", "claude")
-        return real_snapshot(self, board_id)
-    monkeypatch.setattr(TrelloClient, "snapshot", snapshot_and_add_seat)
+        return real_read(self, board_id)
+    monkeypatch.setattr(TrelloClient, "read_board", snapshot_and_add_seat)
     doctor.run(bound.paths.repo, fix=True, online=True)
     assert "claude-1" in load_config(bound.paths).seats
 
