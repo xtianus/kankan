@@ -4,7 +4,7 @@
 **Date:** 2026-11-25
 **Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md) and [`questions_spec_functional.md`](questions_spec_functional.md); this feature changes the initial one as listed in [§7](#7-changes-to-the-initial-specification); the reading of setting cards and of Q&A follow-ups changes only in how kankan implements it ([technical §13](boardreader_spec_technical.md#13-changes-to-other-technical-specifications)).
 **Companion:** [`boardreader_spec_technical.md`](boardreader_spec_technical.md) — how kankan implements this feature.
-**Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (revised when the feature is implemented, [technical §9](boardreader_spec_technical.md#9-trello-usage)); the Q&A agent pool (`qapool_spec_*`, to be specified) builds on this feature.
+**Related documents:** [`kanban_requirements.md`](kanban_requirements.md) (revised when the feature is implemented, [technical §9](boardreader_spec_technical.md#9-trello-usage)); the Q&A agent pool ([`qapool_spec_functional.md`](qapool_spec_functional.md)) builds on this feature.
 
 **Split rule.** This file describes what users and agents observe; the technical file describes how kankan implements it. Section numbers are this feature's own; references to the initial specification name its file.
 
@@ -19,8 +19,8 @@ Nothing the user does changes and commands print what they print today. The visi
 ## 2. Freshness
 
 - **Every read states its freshness.** Agents' launchers, while they wait for work or watch a card, accept data as old as their poll setting ([§3](#3-poll-settings)).
-- **Commands and decisions read live.** Every command the user or an agent runs (`status`, `reconcile`, `doctor`, `task`, `answer`, `done`, …) asks for live data, and so does kankan before every decision it takes under the project lock (claiming a card, checking a move, convergence). These see Trello as it is, as today.
-- **Live means after the request.** A live read is always answered by a Trello read sent after the read was asked for. It is never answered by a read that started earlier, and never by a copy older than kankan's own last change to that data: after kankan moves a card, comments, sets a label or changes a title, no reader is ever given the state before that change as fresh.
+- **Commands and decisions read live.** Every command the user or an agent runs (`status`, `reconcile`, `doctor`, `task`, `answer`, `done`, …) asks for live data, and so does kankan before every step it takes under the project lock that changes Trello or its own records (claiming a card, checking a move, a move or ref change made by convergence). These see Trello as it is, as today. Convergence may find which cards need a step from data as old as `poll_seconds`, but reads each such card live before acting on it.
+- **Live means after the request.** A live read is always answered by a Trello read sent after the read was asked for. It is never answered by a read that started earlier, and never by a copy older than kankan's own last change to that data: after kankan moves a card, comments, sets a label or changes a title, no reader is given the state before that change as fresh. The one exception is a kankan process that crashes between Trello accepting its change and kankan recording it: launchers may then see the former state for at most one poll interval; live reads are not affected.
 - **One request for many pollers.** When several launchers poll for the same data at the same time, Trello is asked once and every waiting launcher gets that answer, as long as it is fresh enough for each of them. A live read never waits for another process's request: it asks Trello itself, so a decision under the project lock is never delayed by another agent's poll.
 - **Errors.** When Trello cannot be reached, a reader that needs fresher data than the kept copy gets the error, as today; kankan never acts on data older than it asked for. Launchers retry at their next poll, as today.
 
@@ -38,13 +38,13 @@ The requests kankan makes for data its agents share no longer grow with the numb
 
 ## 5. Comments
 
-kankan finds the new comments of all cards with one request for the whole board, instead of one request per watched card. Answers to `ask` ([initial §14.3](initial_spec_functional.md#143-answers-through-comments)) and Q&A follow-ups ([questions §3.3](questions_spec_functional.md#33-follow-ups)) are delivered as today, within at most about twice the poll setting of the agent concerned ([§3](#3-poll-settings)). A card with no recent comment costs no request of its own once kankan has caught up with it.
+kankan finds the new comments of all cards with one request for the whole board, instead of one request per watched card. Answers to `ask` ([initial §14.3](initial_spec_functional.md#143-answers-through-comments)) and Q&A follow-ups ([questions §3.3](questions_spec_functional.md#33-follow-ups)) are delivered as today, within at most about twice the poll setting of the agent concerned ([§3](#3-poll-settings)). A card with no recent comment costs no request of its own once kankan has caught up with it, as long as it is polled at least once a day; a card not polled for longer (for example after the agents were stopped for a day) costs one request of its own at its next poll.
 
 Trello does not report edits or deletions of comments in that read: an edited or deleted comment is seen when the card's whole thread is read, and every `kankan task` reads it live, so an agent always gets the current thread. An edited comment never counts as a new comment, as today.
 
 ## 6. Local state
 
-The cache is kept in the project's state directory (`<gcd>/kankan/board-cache/`), which is private to the clone and never committed, like the downloaded attachments. It holds copies of board data: card titles, descriptions, labels, attachment names and comments. Deleting it is harmless: kankan reads Trello again. `kankan destroy` removes it with the rest of the local state.
+The cache is kept in the project's state directory (`<gcd>/kankan/board-cache/`), which is private to the clone and never committed, like the downloaded attachments. It holds copies of board data: card titles, descriptions, labels, attachment names and comments. Deleting it is harmless, also while agents run: kankan reads Trello again (the locks and records that coordinate the processes are kept outside it). `kankan destroy` removes it with the rest of the local state.
 
 ## 7. Changes to the initial specification
 
@@ -79,6 +79,7 @@ How this feature changes the initial behaviour described in [`initial_spec_funct
 9. `kankan doctor` reports revoked credentials as invalid, even after they were valid and cached.
 10. A card's attachments are given to the agent in the card's order, also when they were reordered after the upload and the card was read from the cache.
 11. Ten quiet Q&A cards and a quiet `waiting_human` card cost no request of their own per poll once the comment log covers them, also a day after their last comment.
+12. On a board with no comment at all, a quiet Q&A card costs no request of its own per poll; a launcher whose previous poll read its card's comments directly is never given a comment twice.
 
 ## 9. Out of scope
 

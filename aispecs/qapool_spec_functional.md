@@ -39,7 +39,7 @@ The agent that answered the card gets the comment (or attachment) as a follow-up
 
 ### 4.2 A card that needs an agent
 
-A card of `Q&A` without `HOLD` needs an agent when it has something not yet answered and no agent holds its conversation, or the agent holding it is cold: a new card (its description is the first question), or a comment or attachment by a board member newer than the card's latest complete answer, including what arrived while every agent was stopped. "Newer than the latest answer" is decided as today when a conversation is taken up again ([questions §3.7](questions_spec_functional.md#37-restarts)): a comment posted while an answer was being written, followed by a restart of the agent, counts as already seen (accepted limitation).
+A card of `Q&A` without `HOLD` needs an agent when it has something not yet answered and no agent holds its conversation, or the agent holding it is cold: a new card (its description is the first question), or a comment or attachment by a board member newer than the card's latest complete answer, including what arrived while every agent was stopped. "Newer than the latest answer" is decided as today when a conversation is taken up again ([questions §3.7](questions_spec_functional.md#37-restarts)): a comment posted while an answer was being written, followed by a restart of the agent, counts as already seen (accepted limitation). A comment or attachment deleted before an agent took it up needs no answer: an agent given the card finds nothing new and is not prompted ([seat §4](seat_spec_functional.md#4-qa-card-taken-again-with-nothing-new)).
 
 kankan gives the card to an agent in this order:
 1. the cold agent that still holds the card's conversation, which gets the new input as a follow-up of its session;
@@ -55,9 +55,10 @@ Routing happens every `qa_poll_seconds` (default 30) of data freshness ([board r
 
 ### 4.3 Closing agents
 
-kankan closes an agent (removes its seat and deletes its worktree) in two cases, and never `<type>-qa`, nor an agent that is answering, waiting for a usage limit or starting:
+kankan closes an agent (removes its seat and deletes its worktree) in three cases, and never `<type>-qa`, nor an agent that is answering, waiting for a usage limit or starting:
 - **after a search:** in a routing round where at least one card needed an agent, once the cards are given out, every other idle cold agent of the pool is closed; in a round where no card needed an agent, idle cold agents stay open, at no cost;
-- **when its card's conversation ends** ([§6](#6-end-of-a-conversation)) by a move, an archive, a deletion or `HOLD`: the agent is closed at the next routing round.
+- **when its card's conversation ends** ([§6](#6-end-of-a-conversation)) by a move, an archive, a deletion or `HOLD`: the agent is closed at the next routing round, unless that round gives it another card (an agent with an ended card is available, [§4.2](#42-a-card-that-needs-an-agent) rule 2): giving out cards comes first, closing applies to the agents still without a card;
+- **when it is gone for good:** its pane was closed, or its launcher keeps failing and its supervisor gave up restarting it. It is closed at the next routing round, an answer it had cut short is completed first, and its card needs an agent again when it has something not yet answered.
 
 ## 5. What the user sees
 
@@ -73,14 +74,14 @@ Changing a title has a cost the user accepts with this feature: Trello cannot ma
 
 ## 6. End of a conversation
 
-A conversation ends, as today, when the user moves the card out of `Q&A`, archives or deletes it, or puts `HOLD` on it ([questions §3.6](questions_spec_functional.md#36-end-of-a-conversation)); its agent becomes available and is closed at the next routing round ([§4.3](#43-closing-agents)), unless it is `<type>-qa`. A conversation also ends when its agent is given another card or closes: the card stays in `Q&A` with its whole thread, and its next comment makes it need an agent again ([§4.2](#42-a-card-that-needs-an-agent)). Moving a card out of `Q&A` is therefore no longer needed to have the next card answered.
+A conversation ends, as today, when the user moves the card out of `Q&A`, archives or deletes it, or puts `HOLD` on it ([questions §3.6](questions_spec_functional.md#36-end-of-a-conversation)); its agent becomes available and is closed at the next routing round unless that round gives it another card, or it is `<type>-qa` ([§4.3](#43-closing-agents)). A conversation also ends when its agent is given another card or closes: the card stays in `Q&A` with its whole thread, and its next comment makes it need an agent again ([§4.2](#42-a-card-that-needs-an-agent)). Moving a card out of `Q&A` is therefore no longer needed to have the next card answered.
 
 ## 7. Stop, start and seat commands
 
-- **Stop.** `kankan stop` and `kankan seat stop <type>-qa` stop every agent of the pool: gracefully (each finishes its current answer) or at once, as for any seat ([stopall §1](stopall_spec_functional.md#1-scope)). The agents other than `<type>-qa` are removed when they stop.
+- **Stop.** `kankan stop` and `kankan seat stop <type>-qa` stop every agent of the pool: gracefully (each finishes its current answer) or at once, as for any seat ([stopall §1](stopall_spec_functional.md#1-scope)). The agents other than `<type>-qa` are removed when they stop; an answer one of them was posting when stopped at once is completed as it is removed (its remaining parts posted, nothing repeated), or, when Trello cannot be reached then, by the next start, the agent staying registered until then.
 - **Start.** `kankan start`, autostart, `kankan up qa=<type>`, `kankan seat start <type>-qa` and a reboot start only `<type>-qa`. Every Q&A card is then idle: an answer cut short by an immediate stop is completed first (its remaining parts posted, nothing repeated), a question whose agent was stopped before it started answering is answered again, the title prefixes are removed, and a card gets an agent only when it has input newer than its latest complete answer ([§4.2](#42-a-card-that-needs-an-agent)). An agent never answers the same input twice because of a stop and start.
-- **Routing seat restart.** When only the launcher of `<type>-qa` restarts (a crash recovered by its supervisor), the other agents keep their cards and routing continues; `<type>-qa`'s own agent starts cold.
-- **Changing type.** `kankan up qa=codex` with a Claude pool running stops every Claude Q&A agent at once, without asking, removes their seats and starts `codex-qa`, with every card idle as after a start. An answer being posted at that moment keeps only the parts already posted, and its question is not answered again (accepted).
+- **Routing seat restart.** When only the launcher of `<type>-qa` restarts (a crash recovered by its supervisor), the other agents keep their cards and routing continues; `<type>-qa`'s own agent starts cold. A restart during a stop does not undo it: the pool stays stopped until a start command.
+- **Changing type.** `kankan up qa=codex` (also when the autostart unit runs it) and `kankan agent codex --qa`, with a Claude pool running, stop every Claude Q&A agent at once, without asking, remove their seats and start `codex-qa`, with every card idle as after a start: an answer being posted at that moment is completed as the old agent is removed (nothing repeated), and a question whose old agent had not started its answer is answered by the new pool. When an old agent cannot be removed (its answer cannot be completed because Trello cannot be reached), the command stops with `needs_action` before starting `codex-qa`, the pool staying stopped; running it again resumes.
 - **Seat commands.** `kankan seat remove <type>-qa` removes the whole pool. The other seats of the pool (`<type>-qa2`, …) are kankan's: `seat start`, `seat stop` and `seat remove` refuse them with `usage_error` naming `<type>-qa`.
 
 ## 8. Acceptance tests
@@ -91,21 +92,25 @@ A conversation ends, as today, when the user moves the card out of `Q&A`, archiv
 4. A comment on a card whose agent is cold: that agent answers it in its own session, as a follow-up.
 5. A comment on a card whose agent was closed, with `claude-qa2` and `claude-qa3` cold and idle: `claude-qa2` takes the card with a new session over the whole thread, and `claude-qa3` is closed (seat removed, worktree deleted).
 6. Two cards needing an agent at once, one agent available: the card with the older unanswered input is taken first, the other gets a new agent.
-7. Every answer ends with the expiry note: exact wording for Claude, "may expire" for Codex; a Claude agent that reported no expiry gets the "may expire" wording.
+7. Every answer ends with the expiry note: the exact wording for a Claude agent whose expiry reading was recorded before it ran `kankan answer`, "may expire" for Codex; a Claude agent that reported no expiry gets the "may expire" wording.
 8. The prefix: none before the first answer; `🟢 ` while warm; `⚪ ` after the expiry time; removed when the card goes to `Done`, after a handoff, and on all Q&A cards when the pool starts; a title edited by the user to drop the prefix is not touched until the card's next change of state; `kankan task` and the merge commit message of a handed-off card show the title without the prefix.
 9. Moving the card of `claude-qa2` to `Done` closes `claude-qa2` at the next routing round; moving the card of `claude-qa` to `Done` leaves `claude-qa` running; an idle cold `claude-qa2` stays open while no card needs an agent.
 10. Opening an agent fails: the card goes to the idle warm agent whose cache expires soonest; with every agent answering, the card waits and the opening is retried.
 11. A usage limit on one agent: no agent opens while it lasts.
 12. `kankan stop` with three agents, one answering: every agent stops, the answer is completed; `kankan start` starts only `claude-qa`, removes the prefixes, and a card with a comment written while stopped is answered once.
-13. An immediate `kankan stop` during a long answer: after `kankan start` the answer is completed without repeating its posted parts.
-14. `kankan up qa=codex` with a Claude pool running stops it at once and starts `codex-qa`; every card is idle.
+13. An immediate `kankan stop` during a long answer, once of `claude-qa` and once of `claude-qa2`: the answer is completed without repeating its posted parts (for `claude-qa2` as it is removed, or with Trello unreachable then, at `kankan start`).
+14. `kankan up qa=codex` with a Claude pool running, `claude-qa2` posting a long answer: the pool stops at once, the answer is completed without repeating its posted parts, `codex-qa` starts and every card is idle; with Trello unreachable the command stops with `needs_action` before starting `codex-qa`, and a rerun completes it. The same with `kankan agent codex --qa`.
 15. `kankan seat stop claude-qa2` and `kankan seat remove claude-qa2` give `usage_error`; `kankan seat remove claude-qa` removes the whole pool.
 16. The launcher of `claude-qa` killed and restarted by its supervisor: the other agents keep their cards and keep answering their follow-ups.
 17. A change of the `Q&A Agents` setting restarts each agent between its turns; a restarted agent is cold and can be given another card.
-18. An immediate `kankan stop` while an agent is thinking, before it posted anything: after `kankan start` the question is answered once.
+18. An immediate `kankan stop` while `claude-qa` or `claude-qa2` is thinking, before it posted anything: after `kankan start` the question is answered once.
 19. A comment on a card while every agent is answering and no agent can open, for two routing rounds, then a restart of `claude-qa`: the comment is answered once an agent is free, without a second comment.
 20. A follow-up on a card whose cold agent has not polled yet, while another card needs an agent: the follow-up goes to that card's agent and the other card to another agent.
 21. `kankan stop` while `claude-qa` is opening a new agent: after the stop no agent of the pool runs, and only `claude-qa` is still registered.
+22. The pane of `claude-qa2` closed while it waits for the user on a card: `claude-qa2` is closed at the next routing round and a new comment on the card is answered by another agent; while its supervisor only restarts its launcher, `claude-qa2` keeps the card.
+23. The launcher of `claude-qa` killed during `kankan stop` and restarted by its supervisor: the pool stays stopped, no agent opens, and `kankan start` starts it again.
+24. A comment deleted before any agent took its card is not answered. A comment arriving while the card's agent answers an earlier one, followed by a failed turn and a restart of that agent, is answered once.
+25. The card of `claude-qa2` moved to `Done` while another card needs an agent: `claude-qa2` takes that card in the same routing round instead of being closed.
 
 ## 9. Changes to the initial specification
 

@@ -18,6 +18,7 @@
 - Seat state (`<gcd>/kankan/seats/<seat>.state.json`) is changed only through `seatstate.update_state`.
 - The launcher shares the pane's terminal with the agent: it never prints while the agent runs; events go to `<gcd>/kankan/log.jsonl`.
 - The launcher checks its seat lease every poll interval and exits when `seat recover` revoked it.
+- The seat flock is held by the launcher, not the supervisor: while the supervisor waits to restart a crashed launcher, `seats.liveness` reads `dead` (and a pane closed by SIGHUP also leaves `dead`); telling a restarting seat from an abandoned one needs the supervisor process itself.
 - `seat recover --kill` terminates only the recorded processes (pid + start time); a whole session is terminated only when it is the recorded supervisor-led pane session.
 - Seat recovery terminates the processes of the recorded pane session only when that session was created by a kankan supervisor (`KANKAN_SUPERVISOR_PID` equals the session id) and the session leader's start time still matches; otherwise it kills nothing.
 - `Launcher.start` clears a stale `stop_requested` before publishing `starting` (a stop seen after `starting` must survive); a launcher restarted by its supervisor still clears it, so `kankan stop --graceful` re-asserts the request while it waits.
