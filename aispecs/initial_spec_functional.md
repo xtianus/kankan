@@ -230,7 +230,7 @@ The `pre-push` hook enforces the single writer only for pushes from the kankan c
 The [`SKILL.md`](../kankan/skill/SKILL.md) skill instructs the agent to:
 1. read the task with `kankan task --json`, including the card's attachments ([13.3](#133-card-attachments)), which are part of the card's specification;
 2. implementation: work on the prepared branch, commit, run the tests, close with `done`;
-3. review: read the differences from the integration branch, fix with separate commits, then `sync`, tests, `verify`, `integrate` (repeating on `main_moved`), finally `done`;
+3. review: read the differences from the integration branch, fix with separate commits, then `sync`, tests, `verify`, `integrate` (repeating on `main_moved`), finally `done`; the card's description is the implementer's task: the reviewer checks the branch against it and never carries out its actions again (for example, a card asking to add the agent's own name gets no second name from the reviewer);
 4. publish progress with `kankan note` when useful;
 5. use `ask` before stopping for a question, `fail` for an error that needs the user, `block` for an obstacle that prevents completing the card;
 6. on a suspension request or on `on_hold`, make a WIP commit and call `yield`;
