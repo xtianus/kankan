@@ -334,3 +334,17 @@ def test_autostart_enable_with_qa(calls, capsys):
 def test_up_with_a_bad_qa_argument_is_usage_error(calls, capsys, argv):
     code, out = run(capsys, *argv)
     assert out["status"] == "usage_error" and "up" not in calls
+
+
+def test_task_shows_an_edited_comment_edited_with_the_cache_on(agent, capsys, monkeypatch):
+    """Board reader functional test 7: the next ``kankan task`` reads the thread live, so a comment edited after
+    another read cached the thread is shown edited."""
+    from kankan.boardreader import max_age
+    monkeypatch.delenv("KANKAN_TEST_NO_CACHE")
+    project, fake, lease, task, wt, card = agent
+    comment = fake.user_comment(card["id"], "original question")
+    assert any(c.text == "original question" for c in project.board.thread(card["id"], max_age(600)))  # cached
+    fake.user_edit_comment(comment["id"], "edited question")
+    code, out = run(capsys, "task")
+    texts = [c["text"] for c in out["data"]["comments"]]
+    assert code == 0 and "edited question" in texts and "original question" not in texts

@@ -157,7 +157,7 @@ class BoardReader:
                     self._ensure_cache()
                     path = _unit_path(self._cache, key)
                     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    atomic_write_json(path, document, sort_keys=False)
+                    _write_cache_file(path, document)
                     break
                 except FileNotFoundError:
                     continue
@@ -173,7 +173,9 @@ class BoardReader:
             marks = self._marks()
             for key in _effect_keys(effect):
                 marks[key] = max(now, marks.get(key, now))
-            atomic_write_json(self.state_dir / MARKS, {"format": FORMAT, "board_id": self.board_id, "marks": marks})
+            # without fsync: marks matter only while processes run, and a crash of the machine ends them all
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            _write_cache_file(self.state_dir / MARKS, {"format": FORMAT, "board_id": self.board_id, "marks": marks})
 
     # ------------------------------------------------------------------ reads
     def _usable(self, read: Optional[Read], key: str, not_before: float, marks: Dict[str, float]) -> bool:
@@ -465,6 +467,20 @@ class BoardReader:
         comments = [decode_comment(raw) for raw in self.client.read_comments(card_id, after or None).payload
                     if raw["date"] > after]
         return comments, max([cursor, after] + [c.date for c in comments])
+
+
+def _write_cache_file(path: Path, document: dict) -> None:
+    """Write a cache file through a temporary file and a rename, without fsync: a cache file lost by a crash is
+    only read from Trello again, and an fsync per read slowed every poll."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(document, handle)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _lock_kind(key: str) -> str:

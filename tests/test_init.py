@@ -326,3 +326,23 @@ def test_takeover_warns_when_origin_lacks_the_integration_branch(git_repo, tmp_p
     said = []
     run_init(other, board, takeover=True, prompt=answers("y"), say=said.append)
     assert any("origin has no branch kankan-agents" in line for line in said)
+
+
+def test_init_uses_unbound_reader(git_repo, env, monkeypatch):
+    """Before the binding exists, init reads through a reader without a cache (board reader technical §1): every
+    read live, nothing stored."""
+    from kankan import boardreader
+    fake, board = env
+    monkeypatch.delenv("KANKAN_TEST_NO_CACHE")
+    unbound = []
+    real = boardreader.BoardReader.unbound.__func__
+
+    def recording(cls, client, board_id=None):
+        reader = real(cls, client, board_id)
+        unbound.append(reader)
+        return reader
+    monkeypatch.setattr(boardreader.BoardReader, "unbound", classmethod(recording))
+    cfg, _ = run_init(git_repo, board, prompt=answers("make test"))
+    # the credentials check, the board lookup and the reads before the binding: no cache, nothing stored
+    assert len(unbound) >= 3 and all(reader.state_dir is None for reader in unbound)
+    assert any(reader.board_id is None for reader in unbound) and any(reader.board_id == board["id"] for reader in unbound)

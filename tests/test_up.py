@@ -320,3 +320,40 @@ def json_seeds():
     import json
     from pathlib import Path
     return json.loads((Path.home() / ".config/kankan/agents.json").read_text())
+
+
+# ---------------------------------------------------------------------- shared board reads (board reader F§8.1)
+
+def test_three_idle_agents_share_board_reads_with_the_cache_on(git_repo, fake_trello, monkeypatch, env):
+    """Board reader functional test 1, with the cache on in every launcher: two work agents and the Q&A agent,
+    idle, read the board about once per interval instead of once per agent; a card added to Backlog is still
+    claimed within about twice ``poll_seconds``."""
+    import time
+    from kankan import auditlog
+    from kankan.refstore import card_ref
+    from tests.helpers import add_qa_list, add_questions_seed
+    monkeypatch.delenv("KANKAN_TEST_NO_CACHE")  # inherited by every launcher started below
+    poll = 2
+    project = bind_project(git_repo, fake_trello, monkeypatch, poll_seconds=poll, qa_poll_seconds=poll,
+                           write_quiet_seconds=0, idle_ready_minutes=0.05)
+    add_questions_seed()
+    add_qa_list(project, fake_trello)
+    assert len(agents_cmd.up(project, {"claude": 2}, qa="claude")) == 3
+    expected = {"claude-1", "claude-2", "claude-qa"}
+
+    def polling():
+        return {e.get("seat") for e in auditlog.read(project.paths) if e["event"] == "poll_done"}
+    assert wait_for(lambda: expected <= polling(), timeout=60), polling()
+    board_path = f"/1/boards/{project.cfg.board_id}"
+    start = sum(1 for m, p in list(fake_trello.requests) if m == "GET" and p == board_path)
+    polls_before = sum(1 for e in auditlog.read(project.paths) if e["event"] == "poll_done")
+    window = 10
+    time.sleep(window)
+    reads = sum(1 for m, p in list(fake_trello.requests) if m == "GET" and p == board_path) - start
+    polls = sum(1 for e in auditlog.read(project.paths) if e["event"] == "poll_done") - polls_before
+    assert polls >= 2 * window // poll  # the launchers kept polling...
+    assert reads <= window // poll + 3, (reads, polls)  # ...but the board was read about once per interval
+    card = fake_trello.add_card(project.cfg.backlog, "new work")
+    added = time.monotonic()
+    assert wait_for(lambda: project.refs.read(card_ref(card["id"])) is not None, timeout=4 * poll + 5)
+    assert time.monotonic() - added <= 2 * poll + 3  # within about twice the setting (board reader F§3)

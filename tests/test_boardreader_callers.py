@@ -114,3 +114,53 @@ def test_quiet_poll_never_rewinds_a_newer_cursor(cached, monkeypatch):
                                      task={"card": card["id"], "id": "t"}, log=lambda *a, **k: None)
     forward.poll(launcher)
     assert load_state(project.paths, lease.seat).comment_cursor[card["id"]] == newer
+
+
+def test_claim_sees_a_user_move_at_once(cached):
+    """Functional test 3: a card moved by the user just after a launcher's board read is never claimed from that
+    read: the claim re-reads the board live under the project lock."""
+    from kankan import seats, workflow
+    from kankan.refstore import card_ref
+    project, fake = cached
+    card = fake.add_card(project.cfg.backlog, "work")
+    lease = seats.acquire(project, "claude")
+    project.board.snapshot(max_age(600))  # a launcher's read: the card is in Backlog
+    fake.user_move(card["id"], project.cfg.done)
+    assert workflow.tick(project, lease) is None
+    assert project.refs.read(card_ref(card["id"])) is None and fake.card_list(card["id"]) == project.cfg.done
+
+
+def test_status_sees_a_user_move_at_once(cached):
+    from kankan import diag
+    project, fake = cached
+    card = fake.add_card(project.cfg.backlog, "work")
+    project.board.snapshot(max_age(600))
+    fake.user_move(card["id"], project.cfg.done)
+    assert card["id"] not in {c.id for c in project.board.snapshot(max_age(600)).cards.values()
+                              if c.list_id == project.cfg.done}  # the cached view still has the old list
+    assert diag.status(project)  # status reads live: it does not fail on the moved card
+    assert project.board.snapshot(LIVE).cards[card["id"]].list_id == project.cfg.done
+
+
+def test_settings_same_outcome_through_live_and_cached_read(cached):
+    """Technical §10: a setting edit applied through a live read and through another process's cached read gives
+    the same outcome, the cached read carrying the live read's response date for the quiet period."""
+    from datetime import datetime, timedelta, timezone
+    from kankan.adapters import load_adapter
+    from kankan.config import save_config
+    from kankan.project import Project
+    project, fake = cached
+    settings = fake.add_list(project.cfg.board_id, "kankan")
+    project.cfg.settings_list = settings["id"]
+    save_config(project.paths, project.cfg)
+    card = fake.add_card(settings["id"], "unknown")
+    card["dateLastActivity"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    adapters = {"claude": load_adapter(project.paths, "claude", read_only=True)}
+    live = project.board.settings_cards(settings["id"], LIVE)
+    other = Project.open(project.paths.repo)  # another process's reader on the same cache
+    cached_read = other.board.settings_cards(settings["id"], max_age(600))
+    assert cached_read.response_date == live.response_date
+    assert [c.id for c in cached_read.cards] == [c.id for c in live.cards]
+    first = boardsettings.apply_read(project, live, adapters, write=False)
+    second = boardsettings.apply_read(other, cached_read, adapters, write=False)
+    assert first.checks == second.checks

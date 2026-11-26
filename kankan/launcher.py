@@ -632,7 +632,10 @@ class Launcher:
             if self.type in self.versions or self.type in self.catalogs:
                 self.next_tick = now  # Check again after the nonblocking preparation completes.
                 return False
-            task = workflow.tick(self.project, self.lease, defer_assignment=True)
+            try:
+                task = workflow.tick(self.project, self.lease, defer_assignment=True)
+            finally:
+                poll_done(self, "board")
         except KankanError as err:
             self.log("tick_failed", status=err.status.value, error=err.message)
             if err.status == Status.CONFIG_ERROR:
