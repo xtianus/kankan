@@ -4,6 +4,7 @@ The procedures for people (creating the board, the Trello app, key and token, ta
 
 ## Live Trello tests (`-m trello_live`)
 
+- The `live_board` fixture (`tests/live/conftest.py`) holds an exclusive `flock` on `<tmp>/kankan-live-board-<board>.lock` for the whole test and its cleanup, so the tests on the shared board are serialized across xdist workers and concurrent runs; without it, board-wide comment reads (M7 pages, newest action, the board reader's completeness point) see other tests' comments, and 9 parallel writers hit Trello's 429. Tests on their own disposable board use `live_client` and take no lock.
 - Live Trello tests (`-m trello_live`) need `~/.config/kankan/test.properties` or `KANKAN_TEST_BOARD_URL` + `KANKAN_TEST_CREDENTIALS`, and a board whose description contains `kankan-test-board`.
 - The test board belongs to the user's account and workspace and kankan's bot account is invited as a normal member, as in real use; the Trello app, its API key and the token all belong to the bot account.
 - `tests/live/conftest.py` checks the marker before any write and stops the run with `pytest.exit(..., returncode=3)` when it is missing.

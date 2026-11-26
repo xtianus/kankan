@@ -81,7 +81,7 @@ Without a complete configuration the live tests are skipped with "no test board 
 .venv/bin/python -m pytest -q -m trello_live
 ```
 
-The plain `pytest` run includes them too whenever a test board is configured; add `-m 'not trello_live'` to leave them out (offline, or to spare the board).
+The plain `pytest` run includes them too whenever a test board is configured; add `-m 'not trello_live'` to leave them out (offline, or to spare the board). The tests that use the shared test board run one at a time, also in a parallel run and across concurrent runs on one machine: they read the board as a whole (board-wide comment pages, the newest action), so a test writing to it at the same time would break them, and many writers together exceed Trello's rate limit. The tests that create their own board (`destroy`) run alongside.
 
 Each run names its lists, cards and labels with a unique prefix `kt-<timestamp>-<random>`; at the end it deletes the cards and labels and archives the lists. An interrupted run can leave some behind; remove every `kt-` item (and the `ke-` cards and registry block of an interrupted [section 3.5](#35-live-run-with-real-agents) run) from the test board with:
 
