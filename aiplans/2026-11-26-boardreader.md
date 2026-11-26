@@ -10,7 +10,7 @@
 
 **Spec:** [board reader functional](../aispecs/boardreader_spec_functional.md) (F) and [board reader technical](../aispecs/boardreader_spec_technical.md) (T). Read both first; the Q&A pool ([`qapool_spec_technical.md`](../aispecs/qapool_spec_technical.md)) builds on this feature and is planned separately in [2026-11-26-qapool.md](2026-11-26-qapool.md).
 
-**Status:** planned, not started; reviewed by the internal advisor and the Codex advisor (2026-11-26), findings folded in.
+**Status:** implemented locally (2026-11-26, commit ecce242); reviewed by the internal advisor and the Codex advisor before and during the implementation; the live agents run is outstanding.
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@
 - A `LIVE` read never takes a fetch lock (never waits for another process). A `max_age` read takes the unit kind's fetch lock, re-checks the cache, fetches only if still needed; it waits at most the client's time budget + 2 s, then fetches without the lock (T§5).
 - Lock order: every existing kankan lock → fetch lock → store lock; nothing else is taken while holding them. Lock files are never deleted and are **not** under `board-cache/`.
 - Cache files: JSON, written to a temporary file and renamed, mode 0600 in a 0700 directory; each carries `format: 1`, `board_id`, send time and response date; a mismatching or unparsable file counts as missing. Raw Trello payloads are stored and decoded by the existing decoders of `trello.py`, so cached and live results have the same form.
-- Comment cursors are Trello action IDs compared as equal-length hex strings; the local clock never orders comments. The completeness point returned by `new_comments` is never below `after` (T§7).
+- Comment points (cursors, horizon, completeness points) are action **dates** (ISO 8601 with milliseconds, compared as text), sent as `since=<date>`/`before=<date>`; never action IDs, which within one second are not ordered (Task 0 finding, T§3). The local clock never orders comments. The completeness point returned by `new_comments` is never below `after` (T§7). A `comment_cursor` stored as an action ID is converted once (T§7).
 - Callers keep their existing behaviour apart from freshness; `kankan` command outputs are unchanged.
 - **Existing suite and caching.** Many tests change the fake board directly (`FakeTrello.user_move`, `user_comment`, …), which sets no write mark, and then expect the next tick to see it. An autouse fixture in `tests/conftest.py` sets `KANKAN_TEST_NO_CACHE=1`, under which every `max_age` read behaves as `LIVE` (the comment log still serves `new_comments`, refreshed live); the reader's own tests (Tasks 3–7, the caller tests of Tasks 10–11 that count requests) and the process tests unset it. Production code never reads the variable except in `boardreader`.
 - **Client construction sites.** `kankan/project.py` (bound reader, hook installed), `kankan/init.py` (two clients before the binding: unbound reader), `kankan/destroy.py` (its own `Ctx` client: unbound reader, always-live methods, no hook needed since destroy removes the cache). Tests that build a `TrelloClient` directly (`test_e2e_support`, `test_destroy_trello`, `test_branches`, `test_destroy_final`, `tests/live/`) stay as they are: the static rule covers `kankan/` only.
@@ -42,15 +42,16 @@
 - Modify: `tests/live/test_trello_live.py` (probes, kept as live tests: nested attachment `pos` and `date` in the board read with `card_attachment_fields`; `pos` in the single-card read; the board read's checklists and a board-nested card decoding like a C1 card; M7 pages, `since` exclusive; `since` and `before` naming a deleted comment; action IDs of one comment equal in the board-wide and per-card reads and ordered by creation)
 
 - [ ] **Step 1:** run them on the test board per [developer manual §3](../docs/developer-manual.md).
+- Outcome (2026-11-26): nested `pos`, `date`, `idMember` present; per-card and board-wide `since`/`before` exact by date; `since=<ISO date>` accepted and exclusive; an edit keeps the date; **action IDs of one second are not ordered by creation** → points are dates (specs revised).
 - [ ] **Step 2:** record the results in `aiknowledge/trello.md`; a negative result changes Tasks 2, 4 and 6 before they start (nested `pos` missing → T§9's fallback; `since`/`before` unreliable with a deleted cursor → the log keeps the newest surviving ID as its cursor; stop and ask the user if the action IDs are not ordered).
 
 ### Task 1: Fake Trello — board-wide comment actions, attachment fields, edits and deletions
 
 **Files:**
-- Modify: `tests/fakes/fake_trello.py` (`route`: `GET /1/boards/{id}/actions` with `filter=commentCard`, `since`, `before`, `limit` ≤ 1000 (400 above), newest first; the board read honours `card_attachment_fields` including `pos`, `idMember`, `date`; the card read returns attachment `pos` when asked; `user_edit_comment` changes an action's text, `user_delete_comment` removes it; action IDs created in increasing order by `new_id`; a request counter per route kind for the reader's own tests)
+- Modify: `tests/fakes/fake_trello.py` (`route`: `GET /1/boards/{id}/actions` with `filter=commentCard`, `since`, `before`, `limit` ≤ 1000 (400 above), newest first; the board read honours `card_attachment_fields` including `pos`, `idMember`, `date`; the card read returns attachment `pos` when asked; `user_edit_comment` changes an action's text, `user_delete_comment` removes it; action IDs of one second generated out of creation order (random tail) so no test can pass by comparing IDs; `since`/`before` accept an action ID (resolved to its date; a deleted one to the start of its second) or an ISO date, filtered by date; a request counter per route kind for the reader's own tests)
 - Test: `tests/test_fake_trello_actions.py`
 
-- [ ] **Step 1: Write failing tests** — `test_actions_newest_first_since_exclusive`, `test_actions_before_pages`, `test_actions_limit_over_1000_is_400`, `test_actions_since_deleted_id_still_filters`, `test_edit_changes_text_no_new_action`, `test_delete_removes_action`, `test_board_read_attachment_fields_with_pos`, `test_card_read_attachment_pos`.
+- [ ] **Step 1: Write failing tests** — `test_actions_newest_first_since_exclusive`, `test_actions_before_pages`, `test_actions_limit_over_1000_is_400`, `test_actions_since_date_exclusive`, `test_actions_since_deleted_id_falls_back_to_its_second`, `test_same_second_ids_not_ordered`, `test_edit_changes_text_no_new_action`, `test_delete_removes_action`, `test_board_read_attachment_fields_with_pos`, `test_card_read_attachment_pos`.
 - [ ] **Step 2: Run** `.venv/bin/python -m pytest -q tests/test_fake_trello_actions.py` — FAIL.
 - [ ] **Step 3: Implement** the routes and helpers; IDs keep the existing 24-hex format with a time-ordered prefix.
 - [ ] **Step 4: Run** the new file and `tests/test_trello.py` — PASS.
