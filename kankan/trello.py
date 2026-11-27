@@ -892,6 +892,12 @@ class TrelloClient:
         """C9: update a card's description (the `Instructions` card, card instructions T§6)."""
         return _card(self._ok("PUT", f"/1/cards/{card_id}", body={"desc": desc}))
 
+    @_reports("card", card="card_id")
+    def set_card_name(self, card_id: str, name: str) -> Card:
+        """C11: update a card's title (the Q&A title prefix, qapool T§8). Not conditional: a concurrent user edit
+        can be overwritten, or overwrite it (G8)."""
+        return _card(self._ok("PUT", f"/1/cards/{card_id}", body={"name": name}))
+
     @_reports("card_set", list_="list_id")
     def create_card(self, list_id: str, name: str, desc: str = "", pos: str = "bottom") -> Card:
         body = {"idList": list_id, "name": name, "pos": pos}

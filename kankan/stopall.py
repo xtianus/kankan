@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from kankan import agents_cmd, clock, messages, seats
+from kankan import agents_cmd, clock, messages, qapool, seats
 from kankan.config import atomic_write_json, read_json
 from kankan.errors import KankanError, Status
 from kankan.refstore import seat_ref
@@ -24,9 +24,10 @@ class Inventory:
     unit: bool
     unit_args: Optional[str] = None
     alive: List[str] = field(default_factory=list)
+    members: List[str] = field(default_factory=list)  # the Q&A pool's members still registered (qapool T§9)
 
     def nothing_to_stop(self) -> bool:
-        return not self.alive and not self.sessions and not self.unit \
+        return not self.alive and not self.sessions and not self.unit and not self.members \
             and "unavailable" not in self.liveness.values()
 
 
@@ -52,7 +53,8 @@ def inventory(project, tmux: Tmux) -> Inventory:
     unit = agents_cmd.unit_path(project).exists()
     return Inventory(liveness=liveness, sessions=sessions(project, tmux), unit=unit,
                      unit_args=_unit_args(project) if unit else None,
-                     alive=[name for name, state in liveness.items() if state == "alive"])
+                     alive=[name for name, state in liveness.items() if state == "alive"],
+                     members=qapool.members(cfg))
 
 
 def _args_from_seats(project, alive: List[str]) -> str:
@@ -63,7 +65,7 @@ def _args_from_seats(project, alive: List[str]) -> str:
         seat_cfg = cfg.seats.get(name)
         if seat_cfg is None or seat_cfg.removing:  # seat T§5: never restarted for its count
             continue
-        if seat_cfg.role == "qa":
+        if seat_cfg.role == "qa":  # qapool T§9: any running seat of the pool restores its router only
             qa = seat_cfg.type
         else:
             counts[seat_cfg.type] = counts.get(seat_cfg.type, 0) + 1
@@ -216,6 +218,10 @@ def stop_all(project, *, graceful: bool = False, confirm: Callable[[str], bool],
     if not confirm(describe(project, inv, graceful) + "\nProceed? [y/N] "):
         return {"cancelled": True}
     report = dict(base)
+    pool = bool(qapool.pool_seats(project.reload_config()))
+    if pool:  # qapool T§9: the pool opens no member and no Q&A launcher starts until a start command
+        qapool.set_stopping(project, True)
+        inv = _with_new_members(project, tmux, inv)
     args = inv.unit_args or _args_from_seats(project, inv.alive)
     if args:
         # What `kankan start` restores; a rerun with nothing to stop keeps the previous record.
@@ -228,6 +234,9 @@ def stop_all(project, *, graceful: bool = False, confirm: Callable[[str], bool],
             report["autostart"] = "disabled"
         except KankanError as err:
             report["autostart"] = f"error: {err.message}"
+    if graceful:
+        for seat in inv.members:  # each finishes its answer, then completes its own removal as it exits
+            qapool.mark_closing(project, seat)
     for seat in inv.alive:
         _request_stop(project, seat)
     project.log("stop_all", seats=inv.alive, graceful=graceful, autostart=report["autostart"])
@@ -243,6 +252,8 @@ def stop_all(project, *, graceful: bool = False, confirm: Callable[[str], bool],
             report["remaining"].append({"what": f"still running: {', '.join(still)}",
                                         "remedy": "they stop after their current task; rerun "
                                                   "`kankan stop --graceful` to wait, or `kankan stop` to quit them now"})
+    if pool and not report["interrupted"]:
+        _remove_members(project, report)
     final = inventory(project, tmux)
     report["stopped"] = [seat for seat in inv.alive if final.liveness.get(seat) in ("dead", "free")]
     if not report["interrupted"]:
@@ -267,6 +278,24 @@ def stop_all(project, *, graceful: bool = False, confirm: Callable[[str], bool],
     if report["remaining"]:
         raise KankanError(Status.NEEDS_ACTION, report_text(report), report)
     return report
+
+
+def _with_new_members(project, tmux: Tmux, inv: Inventory) -> Inventory:
+    """The inventory taken again once the stopping mark is set: a member the router registered after the first one
+    is stopped too (qapool T§9). It only adds seats: one that stopped in between (a router between two supervisor
+    restarts) keeps its place in the restart record."""
+    again = inventory(project, tmux)
+    alive = sorted(set(inv.alive) | set(again.alive))
+    return Inventory(liveness=again.liveness, sessions=again.sessions, unit=inv.unit, unit_args=inv.unit_args,
+                     alive=alive, members=again.members)
+
+
+def _remove_members(project, report: dict) -> None:
+    """After the stop, every member whose launcher is gone is removed, completing the answer it was posting; a
+    failure (Trello unreachable) leaves it registered for the next start of the router."""
+    for seat, error in qapool.remove_members(project).items():
+        report["remaining"].append({"what": f"Q&A agent {seat} could not be removed yet: {error}",
+                                    "remedy": "kankan start (its answer is completed then)"})
 
 
 def report_text(report: dict) -> str:
@@ -305,6 +334,8 @@ def start_all(project, say: Callable[[str], None] = lambda text: None) -> dict:
     if record is None or not record.get("up"):
         raise KankanError(Status.NEEDS_ACTION, no_record_help(project.paths.repo))
     wanted, qa = agents_cmd.parse_wanted(record["up"].split())
+    if qa:
+        qapool.clear_for_start(project)  # qapool T§9: `kankan start` starts the pool's router again
     started = agents_cmd.up(project, wanted, qa=qa)
     warnings: List[str] = []
     autostart = "unchanged"

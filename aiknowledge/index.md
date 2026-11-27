@@ -8,6 +8,6 @@ kankan is a CLI that coordinates Claude Code and Codex agents through a Trello b
 - [testing.md](testing.md): running the local suite (in parallel), markers, fakes, crash points, speed, rules for writing tests.
 - [live-tests.md](live-tests.md): live Trello tests, cleanup, the live agents run, the pre-publishing check.
 - [boardsettings.md](boardsettings.md): board settings (model and effort) evaluation, locks, model checks.
-- [questions.md](questions.md): the Q&A seat, conversations, turns, locks, seat replacement.
+- [questions.md](questions.md): the Q&A pool (router and members, routing, offers, answer record, prefixes), conversations, turns, locks, stop and type change.
 - [cardinstructions.md](cardinstructions.md): agent sections in card descriptions and the `Instructions` card.
 - [destroy.md](destroy.md): `kankan destroy` safety rules and re-check boundaries.

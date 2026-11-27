@@ -168,6 +168,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in ("supervisor", "launcher"):
         return _internal(argv)
+    if argv and argv[0] == "pool-remove" and len(argv) == 2:  # hidden: the router's removal of a gone member
+        from kankan import qapool
+        return qapool.remove_member_main(os.getcwd(), argv[1])
+    if argv and argv[0] == "statusline":  # hidden: Claude Code's status line of Q&A agents (qapool T§3)
+        from kankan import statusline
+        try:
+            text = sys.stdin.read()
+        except Exception:  # noqa: BLE001 - the status line always exits 0
+            text = ""
+        return statusline.main(text, os.getcwd())
     as_json = "--json" in argv
     command = None
     try:
@@ -416,13 +426,24 @@ def _cmd_stop(args):
 
 
 def _seat_stop(project, seat: str):
-    from kankan import seats, stopall
+    from kankan import qapool, seats, stopall
     from kankan.seatstate import update_state
-    if seats.liveness(project, seat) == "alive":
-        stopall.refuse_other_code(project, [seat], messages.STOP_SEAT_OTHER_CODE.replace("<seat>", seat))
-    update_state(project.paths, seat, lambda s: setattr(s, "stop_requested", True))
-    auditlog.append(project.paths, "stop_requested", seat=seat)
-    return {"seat": seat}, f"{seat} stops after its current task"
+    pool = qapool.pool_seats(project.reload_config()) if seats.is_qa(seat) else [seat]
+    alive = [name for name in pool if seats.liveness(project, name) == "alive"]
+    if alive:
+        stopall.refuse_other_code(project, alive, messages.STOP_SEAT_OTHER_CODE.replace("<seat>", seat))
+    if seats.is_qa(seat):  # qapool T§9: the whole pool stops; the members are removed as they stop
+        qapool.set_stopping(project, True)
+        pool = qapool.pool_seats(project.reload_config())
+        for name in qapool.members(project.reload_config()):
+            qapool.mark_closing(project, name)
+    for name in pool:
+        update_state(project.paths, name, lambda s: setattr(s, "stop_requested", True))
+        auditlog.append(project.paths, "stop_requested", seat=name)
+    if not seats.is_qa(seat):
+        return {"seat": seat}, f"{seat} stops after its current task"
+    qapool.remove_members(project)  # those already stopped; the others complete their removal as they exit
+    return {"seat": seat, "seats": pool}, f"{', '.join(pool)} stop after their current answer"
 
 
 def _seat_start(project, seat: str, attach: bool):
@@ -440,6 +461,9 @@ def _seat_start(project, seat: str, attach: bool):
         raise KankanError(Status.NEEDS_ACTION, messages.SEAT_START_SESSION_OPEN.format(seat=seat))
     for warning in agents_cmd.warnings_for(project):
         print(f"warning: {warning}", file=sys.stderr)
+    from kankan import qapool
+    if seats.is_qa(seat) and not qapool.is_member(seat):
+        qapool.clear_for_start(project)  # qapool T§9: `seat start <type>-qa` starts the pool again
     session = agents_cmd.agent(project, seats.seat_type(seat), seat=seat, attach=attach, tmux=tmux,
                                qa=seats.is_qa(seat), create=False)
     from kankan import seatremove
@@ -631,6 +655,10 @@ def _cmd_seat(args):
         if args.action == "start":
             raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_UNKNOWN.format(seat=seat))
         raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
+    from kankan import qapool
+    if qapool.is_member(seat) and args.action in ("start", "stop", "remove"):  # qapool T§9: kankan's own seats
+        raise KankanError(Status.USAGE_ERROR, messages.QA_MEMBER_SEAT.format(
+            seat=seat, action=args.action, router=seats.qa_seat_name(seats.seat_type(seat))))
     if args.action == "start":
         return _seat_start(project, seat, args.attach)
     if args.action == "stop":
@@ -638,9 +666,36 @@ def _cmd_seat(args):
     if args.action == "recover":
         return diag.seat_recover(project, seat, args.kill), f"seat {seat} recovered"
     from kankan import seatremove
+    pool_marked = False
+    if seats.is_qa(seat) and qapool.members(project.reload_config()):
+        _remove_pool_members(project, seat, args)
+        pool_marked = qapool.stopping(project.paths)
     report = seatremove.remove(project, seat, graceful=args.graceful, confirm=_confirm(args, "kankan seat remove"),
                                say=_say)
+    if pool_marked and (report.get("cancelled") or seat in project.reload_config().seats):
+        qapool.clear_for_start(project)  # the router stays: its pool is not left stopped
     return report, seatremove.report_text(report, project.cfg)
+
+
+def _remove_pool_members(project, router: str, args) -> None:
+    """``seat remove <type>-qa`` removes the pool's members first (qapool T§9): gracefully, each is marked and
+    finishes its answer; otherwise each is stopped at once and removed, completing the answer it was posting."""
+    from kankan import qapool, seatremove
+    members = qapool.members(project.reload_config())
+    if not members:
+        return
+    if args.graceful:
+        for name in members:
+            qapool.mark_closing(project, name)
+        return
+    if not _confirm(args, "kankan seat remove")(messages.QA_POOL_REMOVE_CONFIRM.format(router=router,
+                                                                                     members=", ".join(members))):
+        raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_CANCELLED.format(seat=router))
+    qapool.set_stopping(project, True)  # the router opens no member while they are removed
+    members = qapool.members(project.reload_config())  # listed again once marked
+    for name in members:
+        seatremove.stop_seat(project, name, kill_alive=True)
+        seatremove.complete(project, name)
 
 
 @command("purge-remote")

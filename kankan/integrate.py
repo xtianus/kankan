@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from kankan.boardreader import LIVE
-from kankan import clock, faults, gitutil, labels, messages, worktrees
+from kankan import clock, faults, gitutil, labels, messages, qapool, worktrees
 from kankan.cards import CardMeta, Phase, delete_integrated_ref
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
@@ -179,8 +179,8 @@ def card_merged(repo, main: str, short: str) -> Optional[str]:
     return None
 
 
-def _merge_message(card, short: str, tested: str) -> str:
-    title = (card.name if card else "") or short
+def _merge_message(paths, card, short: str, tested: str) -> str:
+    title = (qapool.plain_title(paths, card) if card else "") or short
     url = (card.url if card else "") or ""
     return f"{title}\n\n{url}\n\nKankan-Card: {short}\nKankan-Tested: {tested}\n"
 
@@ -245,7 +245,7 @@ def integrate(ctx, tested: str) -> dict:
             _main_moved(ctx, card)
         tree = gitutil.out(repo, ["rev-parse", f"{tested}^{{tree}}"])
         merge = gitutil.out(repo, ["commit-tree", tree, "-p", main_oid, "-p", tested, "-F", "-"],
-                            input=_merge_message(card, short, tested))
+                            input=_merge_message(project.paths, card, short, tested))
         new = CardMeta.from_dict(meta).evolve(phase=Phase.INTEGRATED.value, owner=None, session=None,
                                               merge=merge, tested=tested, target_list=cfg.done,
                                               from_list=card.list_id if card else None)

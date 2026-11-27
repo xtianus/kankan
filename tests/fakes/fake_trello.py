@@ -570,6 +570,8 @@ class FakeTrello:
                     card["closed"] = str(p["closed"]).lower() == "true"
                 if "desc" in p:
                     card["desc"] = p["desc"]
+                if "name" in p:
+                    card["name"] = p["name"]
                 card["dateLastActivity"] = self._now()
                 return 200, self._card_out(card, False)
             if len(parts) == 2 and method == "DELETE":

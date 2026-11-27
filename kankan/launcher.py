@@ -214,7 +214,7 @@ class Launcher:
             for sig in (signal.SIGINT, signal.SIGTSTP, signal.SIGQUIT):
                 signal.signal(sig, signal.SIG_DFL)
 
-        command = start_command(self.adapter, pair)
+        command = self.agent_command(pair)
         if self.pane and os.isatty(1):
             # The old agent has exited; discard its visible ready prompt before watching the replacement.
             os.write(1, b"\x1b[2J\x1b[H")
@@ -226,6 +226,10 @@ class Launcher:
         self.inactivity_reported = False
         seats.write_proc(self.project, self.lease.seat, agent=self.agent.pid)
         self.log("agent_started", pid=self.agent.pid, command=command)
+
+    def agent_command(self, pair: ModelEffort) -> list:
+        """The agent's command line (hook: Q&A seats add the cache reporter's settings)."""
+        return start_command(self.adapter, pair)
 
     def own_children(self):
         objects = [self.agent, *(p.process for p in self.versions.values()), *(p.process for p in self.catalogs.values()),
@@ -970,7 +974,7 @@ def main(agent_type: str, seat: Optional[str]) -> int:
     project = Project.open(os.getcwd())
     adapter = load_adapter(project.paths, agent_type)
     kind = Launcher
-    if seat and seat.endswith("-qa"):
+    if seat and seats.is_qa(seat):  # the Q&A router and the pool's members (qapool T§2)
         from kankan.qa_launcher import QaLauncher
         kind = QaLauncher
     launcher = kind(project, adapter, Tmux(), agent_type, seat)
@@ -979,4 +983,6 @@ def main(agent_type: str, seat: Optional[str]) -> int:
     except KankanError as err:
         project.log("launcher_error", status=err.status.value, error=err.message)
         print(f"kankan launcher: {err.status.value}: {err.message}", flush=True)
+        if (err.data or {}).get("qa_pool_refused"):
+            return 0  # an expected refusal of the Q&A pool (stopping, a closed member): the supervisor ends too
         return FATAL_EXIT if err.status in (Status.CONFIG_ERROR, Status.USAGE_ERROR) else 2

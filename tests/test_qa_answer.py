@@ -200,7 +200,7 @@ def test_crash_after_chunk_one_resumes_with_the_remaining_chunks(conv, monkeypat
     comments = marked(conv)
     assert posts == 2 and len(comments) == 3
     assert [c.split("\n", 1)[0] for c in comments] == ["1/3", "2/3", "3/3"]
-    assert sum("@" in c.rsplit("\n\n", 2)[-2] for c in comments) == 1
+    assert sum("\n\n@" in c for c in comments) == 1 and "\n\n@" in comments[-1]  # the mention, then the cache note
 
 
 def test_another_text_for_the_same_turn_while_pending_gives_needs_action(conv, monkeypatch):

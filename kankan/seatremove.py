@@ -377,12 +377,80 @@ def _finish_block(project, seat: str) -> None:
         seats.release(project, lease)
 
 
+def _pending_tasks(project, seat: str) -> List[dict]:
+    """The conversations of ``seat`` holding ``pending.json``: those of its own ``qa`` refs, and that of its
+    persisted task (a handoff whose transition committed before a crash left a ``parked`` ref without owner). One
+    task per conversation; another seat's conversation is never listed."""
+    from kankan import qa, qa_answer
+    tasks: Dict[str, dict] = {}
+    for value in qa._owned(project, seat):
+        meta = value.meta
+        conversation = meta.get("conversation")
+        if qa.valid_conversation(conversation):
+            tasks.setdefault(conversation, {"kind": "qa", "card": meta.get("card"), "short": meta.get("short", ""),
+                                            "conversation": conversation})
+    task = load_state(project.paths, seat).task
+    if task and task.get("kind") == "qa" and task.get("card") and qa.valid_conversation(task.get("conversation")) \
+            and task["conversation"] not in tasks:
+        value = project.refs.read(card_ref(task["card"]))
+        meta = value.meta if value is not None else {}
+        if not (meta.get("phase") == Phase.QA.value and meta.get("owner") != seat):  # never another seat's
+            tasks[task["conversation"]] = dict(task)
+    return [task for conversation, task in tasks.items()
+            if qa_answer.read_pending(project.paths, conversation) is not None]
+
+
+def _pending_ended(project, seat: str, lease, task: dict) -> bool:
+    """After ``NOT_OWNER`` from a completion: True when the conversation is over (its card left ``Q&A``, was archived,
+    deleted or got ``HOLD``, or its ref is gone or names another conversation), so ``end_admin`` ends it as without
+    a pending operation. Raises ``NEEDS_ACTION`` when the lease was revoked meanwhile (``seat recover``)."""
+    from kankan import qa
+    current = project.refs.read(seat_ref(seat))
+    if current is None or current.oid != lease.seat_oid:
+        raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_QA_PENDING.format(
+            seat=seat, card=task.get("short") or task["card"], error=messages.SEAT_REMOVE_QA_LEASE_LOST))
+    value = project.refs.read(card_ref(task["card"]))
+    conversation = task["conversation"]
+    if not qa.ours(value, seat, conversation) and not qa.handed_off(value, conversation):
+        return True
+    return qa.active_ended(project.cfg, qa.card_state(project, task["card"]))
+
+
+def complete_qa_pending(project, seat: str) -> None:
+    """qapool T§14 (seat §6): complete the pending answer or handoff of each conversation of the stopped Q&A
+    ``seat`` with a temporary administrative lease (``seats.occupy_admin``), without a signal, before the worktree
+    is dropped and the conversations are ended. Called under the removal lock, never with the Q&A lifecycle lock or
+    the pool lock held. A conversation that ended meanwhile is left to ``qa.end_admin``; any other failure raises
+    ``NEEDS_ACTION`` and keeps ``pending.json``. The lease is released before returning: ``end_admin`` requires an
+    absent seat ref."""
+    from kankan import qa_answer
+    tasks = _pending_tasks(project, seat)
+    if not tasks:
+        return
+    lease = seats.occupy_admin(project, seat)
+    try:
+        for task in tasks:
+            try:
+                qa_answer.complete_pending(project, lease, task, admin=True)
+            except KankanError as err:
+                if err.status == Status.NOT_OWNER and _pending_ended(project, seat, lease, task):
+                    project.log("seat_remove_qa_pending_ended", seat=seat, card=task["card"],
+                                conversation=task["conversation"])
+                    continue
+                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_QA_PENDING.format(
+                    seat=seat, card=task.get("short") or task["card"], error=err.message), err.data) from err
+    finally:
+        seats.release(project, lease)
+
+
 def _complete(project, seat: str, is_qa: bool) -> dict:
     worktree = project.paths.seat_worktree(seat)
     had_worktree = (worktree / ".git").exists()
     if not is_qa:
         plan_moves(project, seat)  # a malformed claim stops the removal before anything is changed
         _finish_block(project, seat)
+    if is_qa:
+        complete_qa_pending(project, seat)  # before the worktree goes and the conversations end
     discarded = drop_worktree(project, seat)
     moved: List[dict] = []
     if is_qa:
@@ -390,7 +458,6 @@ def _complete(project, seat: str, is_qa: bool) -> dict:
         with qa.lifecycle_lock(project.paths):
             qa.end_admin(project, seat)
             with project_lock(project.paths):
-                qa.drop_stale_record(project, None)
                 owned = [v.meta.get("short") or v.meta.get("card") for v in qa._owned(project, seat)]
             if owned:
                 raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_QA_OWNED.format(
@@ -423,6 +490,9 @@ def _complete(project, seat: str, is_qa: bool) -> dict:
 # ---------------------------------------------------------------------- autostart and stop record (seat T§7)
 
 def _lowered(args: str, cfg, seat: str) -> str:
+    from kankan import qapool
+    if qapool.is_member(seat):  # qapool T§2: a member never appears in the unit or the stop record
+        return args.strip()
     wanted, qa_type = agents_cmd.parse_wanted(args.split()) if args.strip() else ({}, None)
     seat_cfg = cfg.seats.get(seat)
     if seat_cfg is not None and seat_cfg.role == "qa":

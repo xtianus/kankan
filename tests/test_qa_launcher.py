@@ -61,6 +61,14 @@ def ref_meta(env, card):
     return value.meta if value else None
 
 
+def model_args(argv):
+    """The model and effort arguments, without the cache reporter's ``--settings`` (qapool T§3)."""
+    if "--settings" in argv:
+        index = argv.index("--settings")
+        argv = argv[:index] + argv[index + 2:]
+    return argv[-4:]
+
+
 def state(env):
     return launcher_state(env.project, SEAT)
 
@@ -113,6 +121,11 @@ def wait_card_polls(env, card, cycles=2, timeout=15):
     every poll before the last one, and what it delivers, is complete. Polls are counted by the launcher's
     ``poll_done`` audit entries (``KANKAN_TEST_READS``), not by Trello requests, which shared reads may answer."""
     _wait_polls(env, "card", cycles, timeout)
+
+
+def wait_polls(env, kind, cycles=2, timeout=15):
+    """Wait for ``cycles`` more polls of ``kind`` (``route``: the router's routing rounds, qapool T§5)."""
+    _wait_polls(env, kind, cycles, timeout)
 
 
 def wait_board_polls(env, cycles=2, timeout=15):
@@ -259,7 +272,6 @@ def test_stale_signal_from_an_older_turn_is_dropped(kproject, fake_trello):
 def test_card_moved_to_done_while_working_ends_at_once(chain):
     env = chain
     first = env.fake.add_card(env.qa_list, "first", desc="question one")
-    second = env.fake.add_card(env.qa_list, "second", desc="question two")
     out = env.tmp / "late.txt"
     log = start(env, [
         {"shell": f"sleep 6; kankan answer --turn {{turn}} --file {{file}} > {out} 2>&1", "text": "late answer"},
@@ -272,6 +284,9 @@ def test_card_moved_to_done_while_working_ends_at_once(chain):
     time.sleep(1)  # the ended conversation is no longer polled: only time shows that the clear waits
     assert pane_writes(env).count("/clear") == 1  # the clear waits for "ready"
     assert wait_for(lambda: out.exists() and "not_owner" in out.read_text(), timeout=15)
+    assert wait_for(lambda: state(env) == "idle", timeout=15)
+    # qapool F§4.2: a card created now goes to claude-qa, whose card ended (no member opens)
+    second = env.fake.add_card(env.qa_list, "second", desc="question two")
     assert wait_for(lambda: with_text(env, second, "second card answer"), timeout=30)
     assert not with_text(env, first, "late answer")
     assert env.fake.card_list(first["id"]) == env.project.cfg.done  # never moved back
@@ -279,7 +294,8 @@ def test_card_moved_to_done_while_working_ends_at_once(chain):
     suspend = lines.index(messages.QA_SUSPEND)
     assert lines[suspend + 1] == "/clear"
     assert lines[suspend + 2] == messages.QA_PROMPT.format(turn=tokens(log)[1])
-    assert ref_meta(env, second)["phase"] == "qa"
+    assert ref_meta(env, second)["phase"] == "qa" and ref_meta(env, second)["owner"] == SEAT
+    assert "claude-qa2" not in env.project.reload_config().seats
 
 
 def test_hold_in_qa_waiting_ends_the_conversation_and_the_card_stays(chain):
@@ -798,7 +814,10 @@ def restart_followups(log):
     return [line for line in agent_inputs(log) if line.startswith(messages.QA_RESTART_FOLLOWUP.split("{")[0])]
 
 
-def test_launcher_restart_in_qa_waiting_resumes_with_a_new_task(chain):
+def test_router_launcher_restart_ends_its_conversation_and_a_comment_starts_a_new_one(chain):
+    """qapool T§9 router start: a restarted router (its own agent cold) completes and ends its own conversation, the
+    card staying in ``Q&A``; nothing new means no prompt; the next comment starts a new conversation over the whole
+    thread (qapool F§4.2 rule 2)."""
     env = chain
     card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
     log = start(env, [answer("first answer")])
@@ -806,22 +825,16 @@ def test_launcher_restart_in_qa_waiting_resumes_with_a_new_task(chain):
     before = load_state(env.project.paths, SEAT).task
     conversation = ref_meta(env, card)["conversation"]
     rewrite_steps(log, [answer("after the restart")])
-    comments = len(env.fake.card_comments(card["id"]))
     kill_launcher(env)
-    assert wait_for(lambda: load_state(env.project.paths, SEAT).task["id"] != before["id"]
-                    and state(env) == "qa_waiting", timeout=40)
-    wait_card_polls(env, card)
-    # nothing new since the answer: the fresh agent gets no prompt and the card no comment (questions T§4)
-    assert len(prompts(log)) == 1 and not restart_prompts(log)
-    added = env.fake.card_comments(card["id"])[comments:]
-    assert all("was recovered after its previous holder died" in text for text in added)  # the seat recovery only
+    assert wait_for(lambda: ref_meta(env, card) is None and state(env) == "idle", timeout=40)
+    assert env.fake.card_list(card["id"]) == env.qa_list
+    wait_polls(env, "route")
+    assert len(prompts(log)) == 1  # nothing new since the answer: no prompt
     env.fake.user_comment(card["id"], "and what about X?")
-    assert wait_for(lambda: with_text(env, card, "after the restart"), timeout=20)
+    assert wait_for(lambda: with_text(env, card, "after the restart"), timeout=30)
     after = load_state(env.project.paths, SEAT).task
-    assert after["id"] != before["id"] and after["conversation"] == conversation
-    assert restart_followups(log) == [messages.QA_RESTART_FOLLOWUP.format(counts="1 comment", turn=tokens(log)[-1])]
-    assert ref_meta(env, card)["phase"] == "qa" and ref_meta(env, card)["conversation"] == conversation
-    assert "/clear" not in agent_inputs(log)[agent_inputs(log).index(restart_followups(log)[0]) - 1:]
+    assert after["id"] != before["id"] and after["conversation"] != conversation
+    assert ref_meta(env, card)["phase"] == "qa" and ref_meta(env, card)["owner"] == SEAT
 
 
 def test_comment_added_while_the_answer_was_written_is_new_after_a_restart(chain):
@@ -836,10 +849,15 @@ def test_comment_added_while_the_answer_was_written_is_new_after_a_restart(chain
     rewrite_steps(log, [{"shell": f"kankan task --json > {out} && kankan answer --turn {{turn}} --file {{file}}",
                          "text": "second answer"}])
     kill_launcher(env)  # the agent is still busy: the comment was never delivered
+    # qapool F§4.2 accepted limitation: a comment posted while an answer was written, followed by a restart, counts
+    # as seen: the restarted router is not prompted; the next comment is answered, the late one shown as not new
+    assert wait_for(lambda: ref_meta(env, card) is None and state(env) == "idle", timeout=40)
+    wait_polls(env, "route")
+    assert len(prompts(log)) == 1
+    nudge = env.fake.user_comment(card["id"], "hello?")
     assert wait_for(lambda: with_text(env, card, "second answer"), timeout=40)
     data = task_json(out)["data"]
-    assert comment_new(data, late["id"]) is True
-    assert len(prompts(log)) == 2 and restart_prompts(log)
+    assert comment_new(data, late["id"]) is False and comment_new(data, nudge["id"]) is True
 
 
 def test_changed_questions_pair_restarts_the_agent_in_qa_waiting(chain):
@@ -851,7 +869,7 @@ def test_changed_questions_pair_restarts_the_agent_in_qa_waiting(chain):
     rewrite_steps(log, [answer("with opus")])
     set_questions_pair(env, "opus")
     assert wait_for(lambda: len(starts(log)) == 2, timeout=40)
-    assert starts(log)[-1]["argv"][-4:] == ["--model", "opus", "--effort", "high"]
+    assert model_args(starts(log)[-1]["argv"]) == ["--model", "opus", "--effort", "high"]
     assert wait_for(lambda: state(env) == "qa_waiting" and load_state(env.project.paths, SEAT).task["model"] == "opus",
                     timeout=30)
     wait_card_polls(env, card)
@@ -870,7 +888,7 @@ def test_changed_questions_pair_restarts_the_agent_in_idle(chain):
     rewrite_steps(log, [answer("with opus")])  # the steps of the replacement agent
     set_questions_pair(env, "opus")
     assert wait_for(lambda: len(starts(log)) == 2, timeout=40)
-    assert starts(log)[-1]["argv"][-4:] == ["--model", "opus", "--effort", "high"]
+    assert model_args(starts(log)[-1]["argv"]) == ["--model", "opus", "--effort", "high"]
     assert wait_for(lambda: state(env) == "idle", timeout=20)
     card = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
     assert wait_for(lambda: with_text(env, card, "with opus"), timeout=30)
@@ -906,12 +924,12 @@ def test_unstartable_questions_pair_keeps_the_conversation_without_fallback(chai
     assert wait_for(lambda: env.project.cfg.label_error in labels_of(env, card), timeout=10)
     assert wait_for(lambda: with_text(env, card, "could not start"), timeout=10)
     rewrite_steps(log, [answer("finally started")], startup_exit=0)
-    assert wait_for(lambda: state(env) == "qa_waiting" and env.project.cfg.label_error not in labels_of(env, card),
-                    timeout=60)
+    # the launcher restarts (its supervisor): the router's start ends its conversation, the card stays in Q&A
+    assert wait_for(lambda: state(env) == "idle" and ref_meta(env, card) is None, timeout=60)
     env.fake.user_comment(card["id"], "are you back?")
     assert wait_for(lambda: with_text(env, card, "finally started"), timeout=30)
-    assert all(s["argv"][-4:] == ["--model", "opus", "--effort", "high"] for s in starts(log)[1:])
-    assert ref_meta(env, card)["conversation"] == conversation
+    assert all(model_args(s["argv"]) == ["--model", "opus", "--effort", "high"] for s in starts(log)[1:])
+    assert ref_meta(env, card)["conversation"] != conversation
     assert wait_for(lambda: env.project.cfg.label_error not in labels_of(env, card), timeout=10)
 
 
@@ -921,6 +939,8 @@ def test_stop_in_qa_waiting_keeps_the_conversation_until_the_next_start(chain, m
     log = start(env, [answer("first answer")])
     assert wait_for(lambda: with_text(env, card, "first answer") and state(env) == "qa_waiting", timeout=40)
     conversation = ref_meta(env, card)["conversation"]
+    env.tmux.new_session("keep-server", str(env.tmp), ["sleep", "600"])  # the private server outlives the stop
+    monkeypatch.setenv("KANKAN_TMUX_SOCKET", env.tmux.socket)  # the CLI's sessions go to the private server
     monkeypatch.chdir(env.project.paths.repo)
     assert cli.main(["seat", "stop", SEAT]) == 0
     assert wait_for(lambda: not env.tmux.has_session(seat_session(env.project, SEAT)), timeout=30)
@@ -928,12 +948,22 @@ def test_stop_in_qa_waiting_keeps_the_conversation_until_the_next_start(chain, m
     assert load_state(env.project.paths, SEAT).task["conversation"] == conversation
     followup = env.fake.user_comment(card["id"], "still there?")
     out = env.tmp / "after-stop.json"
-    log2 = start(env, [{"shell": f"kankan task --json > {out} && kankan answer --turn {{turn}} --file {{file}}",
-                        "text": "back again"}])
+    start(env, [])  # a launcher restarted while the pool is stopped is refused (qapool F test 23)
+    assert wait_for(lambda: any(e["event"] == "launcher_error" for e in audit(env, "launcher_error")), timeout=40)
+    assert ref_meta(env, card)["conversation"] == conversation
+    # qapool T§9: `kankan seat start` reopens the pool; the router's start ends the conversation and the comment
+    # written meanwhile makes the card need an agent: answered once, in a new conversation
+    scenario_dir = env.tmp / "seat-start"
+    scenario_dir.mkdir()
+    (scenario_dir / f"{SEAT}.json").write_text(json.dumps({"log": str(env.tmp / "after.log"), "steps": [
+        {"shell": f"kankan task --json > {out} && kankan answer --turn {{turn}} --file {{file}}",
+         "text": "back again"}]}))
+    env.tmux.run(["set-environment", "-g", "FAKE_AGENT_SCENARIO_DIR", str(scenario_dir)])
+    assert cli.main(["seat", "start", SEAT]) == 0
     assert wait_for(lambda: with_text(env, card, "back again"), timeout=40)
-    assert restart_prompts(log2)
     data = task_json(out)["data"]
     assert comment_new(data, followup["id"]) is True
+    assert ref_meta(env, card)["conversation"] != conversation
 
 
 def test_usage_limit_sets_resume_and_follow_ups_wait_for_the_resumption(chain):

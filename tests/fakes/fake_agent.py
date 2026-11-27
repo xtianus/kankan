@@ -54,6 +54,11 @@ def main() -> int:
     parser.add_argument("--scenario", default=os.environ.get("FAKE_AGENT_SCENARIO"))
     args, _ = parser.parse_known_args()
     agent_type = args.type if args.type in SCREENS else "claude"
+    # Per seat: ``<FAKE_AGENT_SCENARIO_DIR>/<KANKAN_SEAT>.json`` when it exists (seats kankan starts itself, such as
+    # the Q&A pool's members), otherwise the scenario of FAKE_AGENT_SCENARIO / --scenario.
+    seat_dir, seat_name = os.environ.get("FAKE_AGENT_SCENARIO_DIR"), os.environ.get("KANKAN_SEAT")
+    if seat_dir and seat_name and os.path.exists(os.path.join(seat_dir, f"{seat_name}.json")):
+        args.scenario = os.path.join(seat_dir, f"{seat_name}.json")
     scenario = {}
     if args.scenario and os.path.exists(args.scenario):
         with open(args.scenario) as handle:
@@ -125,11 +130,31 @@ def main() -> int:
             show(screens["ready"])
             continue
         step = steps.pop(0) if steps else {}
+        status_line(scenario, log, step)  # Claude Code runs it after each request, also during a turn
         run_step(step, screens, show, log, text)
+        status_line(scenario, log, step)
         if step.get("exit"):
             log("exit")
             return int(step.get("exit_code", 0))
         show(screens["ready"])
+
+
+def status_line(scenario, log, step=None):
+    """With ``--settings`` naming a status line command (kankan's cache reporter), run it as Claude Code does, with
+    ``prompt_cache.expires_at`` = now + the step's or else the scenario's ``cache_seconds`` (default 3600; ``null``
+    reports no cache)."""
+    if "--settings" not in sys.argv:
+        return
+    try:
+        settings = json.loads(sys.argv[sys.argv.index("--settings") + 1])
+        command = settings["statusLine"]["command"]
+    except (IndexError, ValueError, KeyError, TypeError):
+        return
+    seconds = (step or {}).get("cache_seconds", scenario.get("cache_seconds", 3600))
+    cache = None if seconds is None else {"expires_at": int(time.time() + seconds), "ttl": "1h", "warm": True}
+    proc = subprocess.run(["sh", "-c", command], input=json.dumps({"prompt_cache": cache}), capture_output=True,
+                          text=True)
+    log("status_line", code=proc.returncode, expires_at=cache and cache["expires_at"])
 
 
 def substitute(step, prompt):

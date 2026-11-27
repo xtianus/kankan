@@ -97,7 +97,6 @@ def test_question_follow_up_and_handoff_implemented_reviewed_and_integrated(stac
     env = stack
     cfg = env.project.cfg
     first = env.fake.add_card(env.qa_list, "how", desc="how does it work?")
-    second = env.fake.add_card(env.qa_list, "second", desc="a second question")
     before = refs(env)
     qa2, qa5 = env.out / "qa2.json", env.out / "qa5.json"
     _, qa_log = start_qa_agent(env.tmux, env.project, scenario={"steps": [
@@ -117,9 +116,6 @@ def test_question_follow_up_and_handoff_implemented_reviewed_and_integrated(stac
     assert env.fake.card_list(first["id"]) == env.qa_list and env.fake.state["cards"][first["id"]]["idLabels"] == []
     card_ref_name = f"refs/agent-cards/{first['id']}"
     assert {line.split()[0] for line in refs(env) ^ before} == {card_ref_name}
-    # F§8 9: the card below the active one waits
-    assert ref_meta(env, second) is None and env.fake.card_comments(second["id"]) == []
-
     # F§8 2, 3: a follow-up with a comment and an attachment, delivered once, marked new, downloaded
     env.fake.user_comment(first["id"], "and the log?")
     env.fake.upload(first["id"], "log.txt", b"all good\n", "text/plain")
@@ -147,7 +143,9 @@ def test_question_follow_up_and_handoff_implemented_reviewed_and_integrated(stac
     assert f"Kankan-Card: {first['shortLink']}" in log
     assert git(env.project.paths.repo, "show", "kankan-agents:feature.txt") == "feature"
 
-    # F§8 6, 9: the next card of the queue starts in a cleared conversation
+    # F§8 6: the next card, created once the handed-off conversation ended, goes to claude-qa (its card ended: no
+    # member opens, qapool F§4.2) and starts in a cleared conversation
+    second = env.fake.add_card(env.qa_list, "second", desc="a second question")
     assert wait_for(lambda: comments(env, second, "Second answer."), timeout=60)
     inputs = agent_inputs(qa_log)
     prompts = [i for i, line in enumerate(inputs) if line not in ("/clear", "/new")]

@@ -9,10 +9,15 @@ with ``kankan task --json``.
 
 from __future__ import annotations
 
+import json
+import shlex
+import time
 from typing import Optional
 
 from kankan.boardreader import LIVE, max_age
-from kankan import boardconfig, boardsettings, clock, labels, messages, procutil, qa, qa_answer, seats, workflow
+from kankan import boardconfig, boardsettings, clock, faults, labels, messages, procutil, qa, qa_answer, seats, workflow
+from kankan import qapool
+from kankan.qapool import clear_offer
 from kankan.adapters import Classification, ModelEffort
 from kankan.config import check_registry, qa_list_open
 from kankan.errors import KankanError, Status
@@ -42,6 +47,8 @@ class QaLauncher(Launcher):
         self.pair_wait_logged = None
         self.held_logged = False
         self.next_list_check = 0.0
+        self.router: Optional[qapool.Router] = None  # the routing round, for the router ``<type>-qa`` (qapool T§5)
+        self.next_route = 0.0
         self.reset_conversation()
 
     def reset_conversation(self) -> None:
@@ -66,13 +73,53 @@ class QaLauncher(Launcher):
 
     # ------------------------------------------------------------------ hooks
     def acquire(self, pids: dict):
-        """Complete a replacement of another type's Q&A seat by this one, if one is registered (questions T§2), then
-        occupy the seat; a relaunched replaced seat is refused by ``acquire_qa`` (``FATAL_EXIT``)."""
-        qa.replace_seat(self.project, self.type, initiate=False)
-        return seats.acquire_qa(self.project, self.type, pids, create=not seats.existing_only())
+        """Occupy this launcher's own seat, the router or a member (qapool T§2): a closed member and any Q&A seat
+        while the pool is stopping are refused by ``acquire_qa`` (``FATAL_EXIT``). The router then runs its start
+        (qapool T§9): its own conversations completed and ended, the members whose launcher is gone removed, the
+        title prefixes removed."""
+        lease = seats.acquire_qa(self.project, self.type, pids, create=not seats.existing_only(),
+                                 seat=self.wanted_seat)
+        if not qapool.is_member(lease.seat):
+            try:
+                qapool.router_start(self.project, lease)
+            except BaseException:
+                seats.release(self.project, lease)
+                raise
+        return lease
 
     def own_roles(self):
         return ('questions',)
+
+    def agent_command(self, pair: ModelEffort) -> list:
+        """qapool T§3: with the ``claude_status_line`` reporter, Claude Code's status line is ``kankan statusline``,
+        which records the cache expiry and shows the user's own status line."""
+        command = super().agent_command(pair)
+        if (self.adapter.prompt_cache or {}).get("reporter") == "claude_status_line":
+            wrapper = self.project.paths.kankan_dir / "bin" / "kankan"
+            command += ["--settings", json.dumps({"statusLine": {"type": "command",
+                                                                 "command": f"{shlex.quote(str(wrapper))} statusline"}})]
+        return command
+
+    def spawn_agent(self, pair: ModelEffort) -> None:
+        """A new agent process starts cold (qapool T§3): its last turn's end is forgotten."""
+        update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, "turn_ended_at", None))
+        super().spawn_agent(pair)
+
+    def record_turn_end(self) -> None:
+        """The end of a turn (a signal accepted, or the agent ready again without one): ``turn_ended_at`` for the
+        estimated cache expiry (qapool T§3), and the answer record gets the turn's inputs as delivered (T§5 step 3;
+        inputs that arrived during the turn stay listed). A turn cut short by a killed agent never gets here."""
+        now = time.time()
+        update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, "turn_ended_at", now))
+        task = self.task
+        if not task or not self.turn or not qa.valid_conversation(task.get("conversation")):
+            return
+        try:
+            turn = qa.read_turn(self.project.paths, task["conversation"]) or {}
+            if turn.get("token") == self.turn:
+                qapool.turn_ended(self.project, task["card"], qa.Inputs.from_dict(turn.get("inputs")))
+        except KankanError as err:
+            self.log("qa_record_failed", card=task["card"], error=err.message)
 
     def startup_roles(self):
         return ['questions']  # no fallback to another role's pair (questions T§11)
@@ -101,6 +148,7 @@ class QaLauncher(Launcher):
         if self.lease_revoked():
             return True
         procutil.reap_adopted(self.own_children())
+        self.route_step()
         if self.state == 'starting' and self.stop_requested():
             return True
         cls = self.screen() if self.agent is not None or self.state != 'starting' else Classification('unknown')
@@ -130,6 +178,54 @@ class QaLauncher(Launcher):
         if self.state == "closing":
             self.closing(cls)
         return self.exit_now
+
+    def stop_requested(self) -> bool:
+        """A stop request of the seat, or the pool's stopping mark (qapool T§9): ``Launcher.start`` clears a stale
+        request, the mark stays until a start command."""
+        return super().stop_requested() or qapool.stopping(self.project.paths)
+
+    def start(self) -> None:
+        """A stopped pool refuses the launcher on its local mark before any Trello read (qapool T§9); the occupation
+        checks it again under the project lock."""
+        if qapool.stopping(self.project.paths):
+            router = seats.qa_seat_name(self.type)
+            raise KankanError(Status.CONFIG_ERROR, messages.QA_POOL_STOPPING.format(router=router),
+                              seats.POOL_REFUSED)
+        super().start()
+
+    def shutdown(self) -> None:
+        """A graceful stop of the router writes the cold prefix on every card it recorded warm (qapool T§8); an
+        immediate stop does not, and the next start removes the prefixes."""
+        if self.is_router() and self.stop_requested():
+            try:
+                qapool.cold_all(self.project)
+            except Exception as err:  # noqa: BLE001 - shutdown must release the seat
+                self.log("qa_prefix_failed", error=str(err))
+        super().shutdown()
+
+    def is_router(self) -> bool:
+        return self.lease is not None and not qapool.is_member(self.lease.seat)
+
+    def own_children(self):
+        return super().own_children() | (self.router.children() if self.router else set())
+
+    def route_step(self) -> None:
+        """The router runs the routing round every ``qa_poll_seconds`` in every state, also while its own agent
+        answers or is limited (qapool T§5); a failure is logged and the round runs again at the next interval."""
+        if not self.is_router() or self.running_pair is None:
+            return  # the first round waits for the router's own agent: a cold router takes the first card
+        now = clock.monotonic()
+        if now < self.next_route:
+            return
+        self.next_route = now + self.cfg.qa_poll_seconds
+        if self.router is None:
+            self.router = qapool.Router(self.project, self.lease.seat, self.log)
+        try:
+            self.router.round()
+        except KankanError as err:
+            self.log("qa_route_failed", status=err.status.value, error=err.message)
+        finally:
+            poll_done(self, "route")
 
     def removal_drained(self) -> bool:
         """seat T§5: a Q&A seat being removed gracefully exits once no turn runs and no answer is pending; a pending
@@ -173,6 +269,10 @@ class QaLauncher(Launcher):
                              effort=pair.effort if pair else None)
                     self.pair_wait_logged = pair
                 return False
+            if self.take_offer(cls):  # qapool T§4
+                return self.exit_now
+            if not self.is_router():
+                return False  # a member never scans Q&A: it takes the cards offered to it
             try:
                 try:
                     task = self.tick()
@@ -194,7 +294,8 @@ class QaLauncher(Launcher):
         return self.exit_now
 
     def tick(self) -> Optional[dict]:
-        """One board read (B3): checks, the unfinished handoff moves, then the claim of the top eligible card."""
+        """One board read (B3) of the idle router: checks, settings and the unfinished handoff moves; the cards are
+        given out by the routing round (qapool T§5), never claimed here."""
         cfg = self.cfg
         snap = self.project.board.snapshot(max_age(cfg.qa_poll_seconds))  # the claim re-reads live (board reader T§8)
         check_registry(cfg, snap.desc)
@@ -204,15 +305,7 @@ class QaLauncher(Launcher):
         boardsettings.drain_actions(self.project)
         refs = workflow.card_refs(self.project)
         self.converge_handoffs(refs)
-        if any(v.meta.get("phase") == "qa" and v.meta.get("owner") == self.lease.seat for v in refs.values()):
-            if not self.held_logged:  # a conversation of an earlier run: taken up by a restart, never doubled
-                self.log("qa_conversation_held")
-                self.held_logged = True
-            return None
-        card = qa.eligible(self.project, snap, refs)
-        if card is None:
-            return None
-        return qa.claim(self.project, self.lease, card, self.running_pair)
+        return None  # qapool T§5: the routing round gives the cards out, through offers
 
     def track_idle_pane(self, cls: Classification) -> None:
         """The clear sent by ``closing`` holds only while the idle pane stays "ready": once it leaves it (the user
@@ -224,6 +317,74 @@ class QaLauncher(Launcher):
         elif self.idle_saw_ready:
             self.cleared = False
             self.idle_saw_ready = False
+
+    # ------------------------------------------------------------------ offers (qapool T§4)
+    def take_offer(self, cls: Classification) -> bool:
+        """Take the card the router offered this seat, between turns and once no answer is pending: an offer of the
+        card it holds is dropped (its polling delivers the input); otherwise its conversation ends (the card stays in
+        ``Q&A``) and it claims the offered card, whose first turn reads the whole thread; an offer that cannot be
+        taken (the card left, got ``HOLD`` or another holder) is dropped. True when the offer was handled."""
+        offer = load_state(self.project.paths, self.lease.seat).qa_offer
+        if offer is None or self.state not in ("idle", "qa_waiting") or self.pending_writes:
+            return False
+        card_id = offer.get("card")
+        if self.task is not None and self.task.get("card") == card_id:
+            self.drop_offer(offer, "held")
+            return True
+        if self.task is not None and not self.ended and self.settle_pending() is not None:
+            return False  # completed, still being posted or failed: the follow-ups change, taken at a later step
+        try:
+            card = self.project.board.card(card_id, LIVE)
+            value = self.project.refs.read(card_ref(card_id))
+        except KankanError as err:
+            self.log("qa_offer_failed", card=card_id, status=err.status.value, error=err.message)
+            return False
+        if qa.active_ended(self.cfg, card) or not qa.claimable(value):
+            self.drop_offer(offer, "unclaimable")
+            return True
+        if self.task is not None:
+            task = self.task
+            try:
+                qa.end(self.project, self.lease, task, handed_off=self.handoff_done())
+            except KankanError as err:
+                self.log("qa_end_failed", status=err.status.value, error=err.message)
+                return False
+            self.log("qa_conversation_ended", card=task["card"], reason="switched", turn=self.turn)
+            self.forget_task(task)
+            self.cleared = False
+        faults.point("after_old_conversation_ended")
+        try:
+            task = qa.claim(self.project, self.lease, card, self.running_pair)
+        except KankanError as err:
+            self.log("qa_offer_failed", card=card_id, status=err.status.value, error=err.message)
+            return False
+        if task is None:
+            self.drop_offer(offer, "claim refused")
+            return True
+        clear_offer(self.project, self.lease.seat, offer.get("offer_id"))
+        self.log("qa_offer_taken", card=card_id)
+        self.reset_conversation()
+        self.task = task
+        self.set_state("idle")
+        self.open_conversation(cls)
+        return True
+
+    def drop_offer(self, offer: dict, reason: str) -> None:
+        clear_offer(self.project, self.lease.seat, offer.get("offer_id"))
+        self.log("qa_offer_dropped", card=offer.get("card"), reason=reason)
+
+    def forget_task(self, task: dict) -> None:
+        """Clear the seat task of an ended conversation and the launcher's conversation state."""
+        task_id = task["id"]
+
+        def clear(state):
+            if state.task and state.task.get("id") == task_id:
+                state.task = None
+            state.suspend_requested = None
+        update_state(self.project.paths, self.lease.seat, clear)
+        self.task = None
+        self.pending_writes = []
+        self.reset_conversation()
 
     # ------------------------------------------------------------------ restarts (T§4 Restart, board settings T§11)
     def questions_pair(self) -> Optional[ModelEffort]:
@@ -337,6 +498,7 @@ class QaLauncher(Launcher):
         neither ``turn.json`` nor ``covered`` exists) and the prompt is ``QA_RESTART``; when an answer completed and
         nothing is uncovered, the launcher waits for follow-ups without a prompt (questions T§4 Restart)."""
         task = self.task
+        listed = self.listed_inputs(task["card"])  # before the live reads (qapool T§5 step 3, reconciling)
         try:
             card = qa.card_state(self.project, task["card"])
             if qa.active_ended(self.cfg, card):
@@ -360,13 +522,16 @@ class QaLauncher(Launcher):
             context = None
             if turn is None and not ref_covered:  # a crash between the claim and the first turn
                 inputs, context, answered = qa.first_turn(self.project, card, comments)
+                self.reconcile_record(card, comments, listed, cands, inputs)
                 if answered and not inputs.comments and not inputs.attachments:
                     self.start_silently(cls, task, context)
                     return
             else:
                 inputs = qa.uncovered(cands, qa.effective_covered(ref_covered, turn))
-            if ref_covered and not inputs.comments and not inputs.attachments:
-                self.wait_after_restart(task)
+            self.reconcile_record(card, comments, listed, cands, inputs)
+            nothing_new = not inputs.comments and not inputs.attachments
+            if nothing_new and (ref_covered or self.turn_ended_before(task["card"])):
+                self.wait_after_restart(task)  # a failed turn counts as delivered: never asked again
                 return
             token = self.begin_turn(inputs, context)
             if token is None:
@@ -374,6 +539,7 @@ class QaLauncher(Launcher):
             self.pending_writes = [messages.QA_RESTART.format(turn=token)]
         else:
             inputs, context, answered = qa.first_turn(self.project, card, comments)
+            self.reconcile_record(card, comments, listed, qa.candidates(self.project, card, comments), inputs)
             if answered and not inputs.comments and not inputs.attachments:
                 self.start_silently(cls, task, context)
                 return
@@ -383,6 +549,30 @@ class QaLauncher(Launcher):
             self.pending_writes = ([] if self.cleared else [self.adapter.new_conversation]) \
                 + [messages.QA_PROMPT.format(turn=token)]
         self.flush_assignment(cls)
+
+    def turn_ended_before(self, card_id: str) -> bool:
+        """The answer record has a turn on the card that ended (its description delivered), as opposed to a turn cut
+        short by a killed agent, which updated nothing (qapool T§5 step 3)."""
+        entry = qapool.load_record(self.project.paths).get(card_id) or {}
+        return bool((entry.get("delivered") or {}).get("description"))
+
+    def listed_inputs(self, card_id: str) -> set:
+        """The IDs the answer record lists as inputs of the card."""
+        return {item["id"] for item in (qapool.load_record(self.project.paths).get(card_id) or {}).get("inputs") or []}
+
+    def reconcile_record(self, card, comments, listed: set, cands: qa.Inputs, inputs: qa.Inputs) -> None:
+        """qapool T§5 step 3: the entries listed before the live reads that the reads no longer have (deleted by
+        the user) leave the record, and so do those the first turn counts as context, never delivered by a turn."""
+        context = [c for c in cands.comments if c not in inputs.comments] \
+            + [a for a in cands.attachments if a not in inputs.attachments]
+        try:
+            dropped = qapool.reconcile(self.project, card.id, listed, [c.id for c in comments],
+                                       [a.id for a in card.attachment_items], context_ids=context)
+        except KankanError as err:
+            self.log("qa_record_failed", card=card.id, error=err.message)
+            return
+        if dropped:
+            self.log("qa_record_reconciled", card=card.id, dropped=dropped)
 
     def start_silently(self, cls: Classification, task: dict, context: qa.Inputs) -> None:
         """seat F§4: a card taken again whose latest answer is complete and has nothing new waits without a
@@ -464,6 +654,7 @@ class QaLauncher(Launcher):
     def on_signal(self, sig: dict) -> None:
         kind = sig["kind"]
         self.log("signal_received", kind=kind, turn=self.turn)
+        self.record_turn_end()
         if kind in ("answer", "fail") and not self.ended:
             self.turn_over()
         elif self.ended:
@@ -547,6 +738,7 @@ class QaLauncher(Launcher):
         except KankanError as err:
             self.log("label_failed", error=err.message)
         if no_signal:
+            self.record_turn_end()
             self.turn_over()
 
     def settle_pending(self) -> Optional[str]:
@@ -569,6 +761,7 @@ class QaLauncher(Launcher):
             return None
         self.drop_signal(task)  # handled here: the signal of the completed operation is not taken again
         self.log("qa_pending_settled", card=task["card"], kind=kind, turn=self.turn)
+        self.record_turn_end()
         if kind == "handoff":
             self.end_conversation("handoff", turn_running=False)
         else:
@@ -597,6 +790,9 @@ class QaLauncher(Launcher):
             pair = self.questions_pair()
             if pair is not None and pair != self.running_pair and self.agent is not None:
                 self.plan_restart(pair)
+                return
+            # qapool T§4: a known follow-up of the held card is delivered before any offer is taken
+            if pair == self.running_pair and self.followups is None and self.take_offer(cls):
                 return
         if cls.state == "ready":
             self.waiting_saw_ready = True
@@ -637,6 +833,9 @@ class QaLauncher(Launcher):
             self.clear_before_followup = False
             self.waiting_saw_ready = False  # the pane working on the clear is not the user typing a turn
             return  # the follow-up is delivered at the next poll
+        inputs = self.live_followups(inputs)
+        if inputs is None:
+            return
         token = self.begin_turn(inputs)
         if token is None:
             return
@@ -652,6 +851,33 @@ class QaLauncher(Launcher):
         self.clear_errors()
         self.log("qa_delivered", card=self.task["card"], turn=token, comments=len(inputs.comments),
                  attachments=len(inputs.attachments))
+
+    def live_followups(self, inputs: qa.Inputs) -> Optional[qa.Inputs]:
+        """qapool T§5 step 3, reconciling before a follow-up: the card and its thread read live; the comments and
+        attachments deleted since they were found (the comment log keeps them) leave the follow-ups, this run's
+        thread and the answer record. None when nothing remains (no follow-up is sent) or the reads failed (the
+        follow-ups are recomputed at the next poll)."""
+        card_id = self.task["card"]
+        listed = self.listed_inputs(card_id)
+        try:
+            card = qa.card_state(self.project, card_id, LIVE)
+            comments = self.project.board.thread(card_id, LIVE)
+        except KankanError as err:
+            self.log("qa_poll_failed", status=err.status.value, error=err.message)
+            self.followups = None
+            self.recompute = True
+            return None
+        self.card = card
+        self.thread = {c.id: c for c in comments}
+        self.seen_attachments = frozenset(a.id for a in card.attachment_items)
+        kept = qa.Inputs([c for c in inputs.comments if c in self.thread],
+                         [a for a in inputs.attachments if a in self.seen_attachments], inputs.dates)
+        self.reconcile_record(card, comments, listed, kept, kept)
+        if kept.comments or kept.attachments:
+            return kept
+        self.log("qa_followups_deleted", card=card_id)
+        self.followups = None
+        return None
 
     def typed_turn(self) -> None:
         """The user typed in the pane (§8.5 detection): a turn whose inputs are the current candidates."""
@@ -720,7 +946,8 @@ class QaLauncher(Launcher):
             self.thread[comment.id] = comment
         self.cursor = point  # also with no comment of this card: served by the comment log (board reader T§7)
         attachments = frozenset(a.id for a in card.attachment_items)
-        if not (new or attachments != self.seen_attachments or self.recompute):
+        recorded = self.recorded_followups(task["card"])
+        if not (new or attachments != self.seen_attachments or self.recompute or recorded):
             return
         self.seen_attachments = attachments
         value = self.project.refs.read(card_ref(task["card"]))
@@ -738,6 +965,22 @@ class QaLauncher(Launcher):
                                                                                task["conversation"]))
         self.current = qa.uncovered(cands, covered)
         self.followups = qa.to_deliver(cands, covered, self.delivered)
+
+    def recorded_followups(self, card_id: str) -> bool:
+        """qapool T§5 step 3, holder delivery: inputs of the card the answer record lists and this run has not
+        delivered, whatever the cursor's position (found by a round while this seat restarted or answered); a listed
+        comment missing from the thread read so far brings the thread in."""
+        listed = self.listed_inputs(card_id)
+        pending = {i for i in listed if i not in self.delivered.comments and i not in self.delivered.attachments}
+        if not pending:
+            return False
+        if any(i not in self.thread for i in pending if i not in self.seen_attachments):
+            try:
+                for comment in self.project.board.thread(card_id, max_age(self.cfg.qa_poll_seconds)):
+                    self.thread.setdefault(comment.id, comment)
+            except KankanError as err:
+                self.log("qa_poll_failed", status=err.status.value, error=err.message)
+        return True
 
     # ------------------------------------------------------------------ ends
     def handoff_done(self) -> bool:

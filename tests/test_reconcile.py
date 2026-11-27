@@ -409,3 +409,25 @@ def test_old_sections_error_not_written_not_reported(board):
                                                        "error_confirmed": False, "pending": []}}})
     issues = [i for i in diag.reconcile(project) if i.kind == "old_label"]
     assert not any(i.subject == "c" * 24 for i in issues), issues
+
+
+def test_reconcile_fix_prunes_answer_record(board):
+    from kankan import qapool
+    from kankan.config import atomic_write_json
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    live = fake.add_card(qa_list, "still asking")["id"]
+    moved = fake.add_card(project.cfg.backlog, "moved out of Q&A")["id"]  # open: its entry stays
+    archived = fake.add_card(qa_list, "archived")["id"]
+    deleted = fake.add_card(qa_list, "deleted")["id"]
+    fake.user_archive(archived)
+    fake.user_delete(deleted)
+    atomic_write_json(project.paths.kankan_dir / "qa-answered.json",
+                      {"cards": {card_id: qapool.blank_entry() for card_id in (live, moved, archived, deleted)}})
+    reported = find(diag.reconcile(project), "qa_answer_record_stale")
+    assert {i.subject for i in reported} == {archived, deleted} and not any(i.fixed for i in reported)
+    assert set(qapool.load_record(project.paths)) == {live, moved, archived, deleted}  # reporting changes nothing
+    fixed = find(diag.reconcile(project, fix=True), "qa_answer_record_entry_removed")
+    assert {i.subject for i in fixed} == {archived, deleted} and all(i.fixed for i in fixed)
+    assert set(qapool.load_record(project.paths)) == {live, moved}
+    assert not find(diag.reconcile(project), "qa_answer_record_stale")

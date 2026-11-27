@@ -1,6 +1,6 @@
 # kankan Q&A agent pool — functional specification
 
-**Status:** specified, not implemented; requires the board reader ([`boardreader_spec_functional.md`](boardreader_spec_functional.md)), implemented first.
+**Status:** implemented locally (2026-11-27), on top of the board reader ([`boardreader_spec_functional.md`](boardreader_spec_functional.md)); outstanding: the live agents run of [technical §12](qapool_spec_technical.md#12-tests).
 **Date:** 2026-11-25
 **Base:** [`initial_spec_functional.md`](initial_spec_functional.md) v1.3, [`questions_spec_functional.md`](questions_spec_functional.md), [`seat_spec_functional.md`](seat_spec_functional.md), [`stopall_spec_functional.md`](stopall_spec_functional.md), [`boardsettings_spec_functional.md`](boardsettings_spec_functional.md) and [`boardreader_spec_functional.md`](boardreader_spec_functional.md); this feature changes them as listed in [§9](#9-changes-to-the-initial-specification) and [§10](#10-changes-to-other-feature-specifications).
 **Companion:** [`qapool_spec_technical.md`](qapool_spec_technical.md) — how kankan implements this feature.

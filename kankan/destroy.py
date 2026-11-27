@@ -832,7 +832,7 @@ def _symbolic_refs(paths: Paths) -> List[str]:
     return sorted(found)
 
 
-_KANKAN_REF = re.compile(r"refs/(agent-cards/[0-9a-f]{24}|agent-seats/[a-z]+-([0-9]+|qa))")
+_KANKAN_REF = re.compile(r"refs/(agent-cards/[0-9a-f]{24}|agent-seats/[a-z]+-([0-9]+|qa([2-9]|[1-9][0-9]+)?))")
 
 
 def _valid_ref_name(repo: Path, ref: str) -> bool:

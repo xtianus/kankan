@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from kankan.boardreader import LIVE
-from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, seats, workflow
+from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, qapool, seats, workflow
 from kankan.adapters import ModelEffort, adapter_types
 from kankan.config import qa_list_open
 from kankan.seatstate import load_state
@@ -22,9 +23,9 @@ def _age(created: str) -> int:
 
 
 def _seat_order(name: str) -> tuple:
-    """Seats by type, work seats by number, the Q&A seat after them."""
+    """Seats by type, work seats by number, the Q&A pool after them (the router, then the members by number)."""
     agent_type, suffix = name.rsplit("-", 1)
-    return (agent_type, 1, 0) if suffix == "qa" else (agent_type, 0, int(suffix))
+    return (agent_type, 1, qapool.member_number(name)) if suffix.startswith("qa") else (agent_type, 0, int(suffix))
 
 
 def status(project) -> dict:
@@ -44,7 +45,8 @@ def status(project) -> dict:
     snap = project.board.snapshot(LIVE)
     refs = workflow.card_refs(project)
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
-    waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
+    waiting = [{"card": card_id, "short": snap.cards[card_id].short,
+                "title": qapool.plain_title(project.paths, snap.cards[card_id]),
                 "reason": reason} for card_id, reason in sorted(reasons.items(), key=lambda i: snap.cards[i[0]].pos)]
     for row in waiting:
         if row["reason"] == "invalid_headings":  # card instructions T§3
@@ -100,9 +102,47 @@ def _qa_status(project, seat_rows: List[dict], snap, refs, reasons: Dict[str, st
         warning = messages.QA_CARDS_WAIT
     else:
         warning = None
+    rows = {r["seat"]: r for r in seat_rows}
+    pool = [_pool_row(project, name, rows.get(name) or {}, snap, refs) for name in qapool.pool_seats(cfg)]
     return {"seat": seat, "liveness": row["liveness"] if row else None,
             "launcher_state": row["launcher_state"] if row else None, "card": card,
-            "short": active.meta.get("short") if active else None, "turn": turn, "queue": queue, "warning": warning}
+            "short": active.meta.get("short") if active else None, "turn": turn, "queue": queue, "warning": warning,
+            "pool": pool, "waiting_cards": _qa_waiting_cards(project, snap, refs, rows)}
+
+
+def _pool_row(project, seat: str, row: dict, snap, refs) -> dict:
+    """A seat of the Q&A pool: its card (``qa`` ref), launcher state and prompt cache (qapool T§11)."""
+    value = next((v for v in refs.values() if v.meta.get("phase") == "qa" and v.meta.get("owner") == seat), None)
+    card_id = value.meta.get("card") if value else None
+    card = snap.cards.get(card_id) if card_id else None
+    when, exact = qapool.expiry(project, seat)
+    warm = when is not None and when > time.time()
+    return {"seat": seat, "liveness": row.get("liveness"), "launcher_state": row.get("launcher_state"),
+            "card": card_id, "short": value.meta.get("short") if value else None,
+            "title": qapool.plain_title(project.paths, card) if card else None,
+            "cache": "warm" if warm else "cold", "expires_at": when,
+            "until": time.strftime("%H:%M", time.localtime(when)) if warm else None, "exact": exact}
+
+
+def _qa_waiting_cards(project, snap, refs, rows: Dict[str, dict]) -> List[dict]:
+    """The open cards of ``Q&A`` without ``HOLD`` needing an agent, in wait-key order (qapool T§5 step 3)."""
+    cfg = project.cfg
+    if not cfg.qa_list:
+        return []
+    pool = set(qapool.pool_seats(cfg))
+    record = qapool.load_record(project.paths)
+    result = []
+    for card in snap.cards.values():
+        if card.list_id != cfg.qa_list or card.closed or cfg.label_hold in card.label_ids:
+            continue
+        value = refs.get(card.id)
+        owner = value.meta.get("owner") if value is not None and value.meta.get("phase") == "qa" else None
+        holder_alive = owner in pool and (rows.get(owner) or {}).get("liveness") == "alive"
+        entry = record.get(card.id) or qapool.blank_entry()
+        if qapool.needs_agent(entry, value, holder_alive):
+            result.append({"card": card.id, "short": card.short, "title": qapool.plain_title(project.paths, card),
+                           "wait_key": qapool.wait_key(card.id, entry)})
+    return sorted(result, key=lambda item: (qa._when(item["wait_key"]), item["card"]))
 
 
 def branch_divergence(project) -> dict:
@@ -169,6 +209,19 @@ def status_text(data: dict) -> str:
             lines.append(messages.STATUS_QA_NONE.format(queue=qa_row["queue"]))
         if qa_row["warning"]:
             lines.append(qa_row["warning"])
+        if qa_row.get("pool"):
+            lines.append(messages.STATUS_QA_POOL)
+        for seat in qa_row.get("pool") or []:
+            card = f"{seat['short']} {seat['title']}" if seat["short"] and seat["title"] else seat["short"] or "-"
+            cache = messages.STATUS_QA_WARM.format(time=seat["until"], kind="exact" if seat["exact"] else "estimated") \
+                if seat["cache"] == "warm" else messages.STATUS_QA_COLD
+            lines.append(messages.STATUS_QA_POOL_SEAT.format(seat=seat["seat"], liveness=seat["liveness"] or "-",
+                                                             state=seat["launcher_state"] or "-", card=card,
+                                                             cache=cache))
+        if qa_row.get("waiting_cards"):
+            lines.append(messages.STATUS_QA_WAITING)
+        for card in qa_row.get("waiting_cards") or []:
+            lines.append(messages.STATUS_QA_WAITING_CARD.format(**card))
     return "\n".join(lines)
 
 
@@ -411,9 +464,31 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
                     issues.append(Issue("push_failed", event["merge"], "the merge is not on origin"))
     for path in worktrees.main_checked_out(project.paths.repo, cfg.integration_branch):
         issues.append(Issue("main_checked_out", str(path), f"{cfg.integration_branch} is checked out"))
+    # answer-record entries of archived or deleted cards (qapool T§5 step 3), read outside every lock
+    answer_gone = _answer_record_gone(project, snap, fetched)
+    for card_id, detail in answer_gone.items():
+        issues.append(Issue("qa_answer_record_stale", card_id, detail))
     if fix:
-        issues += _fix(project, snap, refs, liveness, qa_ended)
+        issues += _fix(project, snap, refs, liveness, qa_ended, answer_gone)
     return issues
+
+
+def _answer_record_gone(project, snap, fetched: dict) -> Dict[str, str]:
+    """The answer-record entries whose card is archived or deleted, one card read each for the cards missing from
+    the board snapshot, as ``{card_id: detail}``."""
+    gone = {}
+    for card_id in sorted(qapool.load_record(project.paths)):
+        card = snap.cards.get(card_id)
+        if card is None:
+            try:
+                card = fetched[card_id] if card_id in fetched else project.board.card(card_id, LIVE)
+            except KankanError as err:
+                project.log("qa_answer_record_read_failed", card=card_id, error=err.message)
+                continue
+            fetched[card_id] = card
+        if card is None or card.closed:
+            gone[card_id] = "the card was deleted" if card is None else "the card is archived"
+    return gone
 
 
 def _all_merges(project):
@@ -421,7 +496,7 @@ def _all_merges(project):
     return merges_on_main(project.paths.repo, project.cfg.integration_branch, 100000)
 
 
-def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
+def _fix(project, snap, refs, liveness, qa_ended=frozenset(), answer_gone: Optional[Dict[str, str]] = None) -> List[Issue]:
     fixed: List[Issue] = []
     cfg = project.cfg
     gone = _qa_record_gone(project, snap)
@@ -442,6 +517,9 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
         fixed += _fix_stranded(project)
         fixed += _fix_attachment_dirs(project)
         fixed += _fix_qa_record(project, gone)
+        answer_gone = answer_gone or {}
+        for card_id in qapool.drop(project, answer_gone):  # the answer-record lock after the project lock (T§4)
+            fixed.append(Issue("qa_answer_record_entry_removed", card_id, answer_gone[card_id], True))
         fixed += _fix_conversation_dirs(project)
         for label_id in labels.gc_resume_labels(project):
             fixed.append(Issue("resume_label_deleted", label_id, "unused or expired", True))

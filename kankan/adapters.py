@@ -23,6 +23,8 @@ _FLAGS = re.I | re.M
 
 
 WORK_ROLES = ("implementation", "review")
+CACHE_REPORTERS = ("claude_status_line",)  # the mechanisms kankan knows for an exact cache expiry (qapool T§3)
+DEFAULT_PROMPT_CACHE = {"expiry": "estimated", "lifetime_minutes": 30, "reporter": None}
 ROLES = WORK_ROLES + ("questions",)
 
 
@@ -71,6 +73,8 @@ class Adapter:
     restart_keep: List[str] = field(default_factory=list)
     seed_sources: dict = field(default_factory=dict)
     stale_seeds: dict = field(default_factory=dict)  # seeds the agent's catalog no longer lists (treated as missing)
+    # how the prompt cache's expiry is known (qapool T§2): exact with a reporter, or estimated from the last turn's end
+    prompt_cache: dict = field(default_factory=lambda: dict(DEFAULT_PROMPT_CACHE))
 
 
 
@@ -219,6 +223,7 @@ def load_adapter(paths, agent_type: str, *, read_only: bool = False) -> Adapter:
             value = getattr(adapter, key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{key} must be positive")
+        _check_prompt_cache(adapter)
         if not _name(adapter.exit_command):
             raise ValueError("invalid exit command")
         for group in (adapter.ready, adapter.working, adapter.limit, adapter.limit_reset, adapter.trust, adapter.restart_keep):
@@ -227,6 +232,25 @@ def load_adapter(paths, agent_type: str, *, read_only: bool = False) -> Adapter:
         return adapter
     except (TypeError, ValueError, KeyError) as err:
         raise KankanError(Status.CONFIG_ERROR, f"invalid adapter for {agent_type}: {err}")
+
+
+def _check_prompt_cache(adapter: Adapter) -> None:
+    """``prompt_cache`` (qapool T§2): ``expiry`` exact (with a known reporter) or estimated, a positive lifetime."""
+    cache = adapter.prompt_cache
+    if not isinstance(cache, dict):
+        raise ValueError("prompt_cache must be an object")
+    cache = dict(DEFAULT_PROMPT_CACHE, **cache)
+    lifetime = cache["lifetime_minutes"]
+    if cache["expiry"] not in ("exact", "estimated"):
+        raise ValueError("prompt_cache.expiry must be exact or estimated")
+    if isinstance(lifetime, bool) or not isinstance(lifetime, (int, float)) or not math.isfinite(lifetime) \
+            or lifetime <= 0:
+        raise ValueError("prompt_cache.lifetime_minutes must be positive")
+    if cache["reporter"] is not None and cache["reporter"] not in CACHE_REPORTERS:
+        raise ValueError(f"prompt_cache.reporter must be one of {', '.join(CACHE_REPORTERS)} or null")
+    if cache["expiry"] == "exact" and cache["reporter"] is None:
+        raise ValueError("prompt_cache.expiry exact needs a reporter")
+    adapter.prompt_cache = cache
 
 
 def _compile(pattern: str) -> re.Pattern:

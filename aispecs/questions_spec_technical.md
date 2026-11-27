@@ -1,6 +1,6 @@
 # kankan questions (Q&A) — technical specification
 
-**Status:** implemented locally; the live agents run with the Q&A dialogue ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) remains outstanding.
+**Status:** implemented locally; the live agents run with the Q&A dialogue ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) remains outstanding. The single Q&A seat, its queue and its seat replacement are changed by the Q&A pool ([`qapool_spec_technical.md`](qapool_spec_technical.md)), implemented locally.
 **Date:** 2026-11-15
 **Base:** [`initial_spec_technical.md`](initial_spec_technical.md) and [`boardsettings_spec_technical.md`](boardsettings_spec_technical.md); this feature changes them as listed in [§10](#10-changes-to-the-initial-technical-specification) and [§11](#11-changes-to-the-board-settings-technical-specification).
 **Companion:** [`questions_spec_functional.md`](questions_spec_functional.md) — what users and agents observe.

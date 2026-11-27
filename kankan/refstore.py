@@ -24,7 +24,7 @@ SEAT_PREFIX = "refs/agent-seats/"
 
 _CARD_RE = re.compile(r"^[0-9a-f]{24}$")
 _SHORT_RE = re.compile(r"^[A-Za-z0-9]{8}$")
-_SEAT_RE = re.compile(r"^[a-z]+-([0-9]+|qa)$")
+_SEAT_RE = re.compile(r"^[a-z]+-([0-9]+|qa([2-9]|[1-9][0-9]+)?)$")
 # expected-value mismatches and lock-file contention only; anything else (permissions...) is an error
 _MISMATCH = ("but expected", "reference already exists", "unable to resolve reference", "File exists")
 

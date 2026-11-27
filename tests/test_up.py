@@ -206,10 +206,13 @@ def test_up_with_qa_is_idempotent(qa_project, env):
     assert agents_cmd.up(qa_project, {"claude": 2, "codex": 1}, qa="codex") == []
 
 
-def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project, fake_trello, env, tmp_path):
-    from kankan import messages
+def test_up_qa_of_another_type_stops_and_removes_the_pool_then_starts_the_new_router(qa_project, fake_trello, env,
+                                                                                     tmp_path):
+    """qapool F§7 type change: `up qa=codex` with a Claude pool running stops it at once without asking, removes its
+    seats and starts codex-qa; every card is idle, and the next comment is answered by the new pool in a new
+    conversation over the whole thread."""
+    from kankan import qapool
     from kankan.refstore import card_ref, seat_ref
-    from tests.launcher_helpers import agent_inputs
     project, fake = qa_project, fake_trello
     card = fake.add_card(project.qa_list, "how", desc="how does it work?")
     scenario(project, tmp_path, [answer_step("first answer")], "claude")
@@ -217,32 +220,17 @@ def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project
     assert wait_for(lambda: comments_with(fake, card, "first answer")
                     and launcher_state(project, "claude-qa") == "qa_waiting", timeout=40)
     conversation = project.refs.read(card_ref(card["id"])).meta["conversation"]
-    # with a live Q&A seat of another type, the replacement is refused
-    with pytest.raises(KankanError) as exc:
-        agents_cmd.up(project, {}, qa="codex")
-    assert exc.value.status == Status.NEEDS_ACTION
-    info = proc_info(project, "claude-qa")
-    os.kill(info["supervisor"]["pid"], signal.SIGKILL)
-    try:
-        os.kill(info["launcher"]["pid"], signal.SIGKILL)
-    except ProcessLookupError:
-        pass  # the launcher's PDEATHSIG may already have killed it with the supervisor
-    assert wait_for(lambda: not pid_alive(info["launcher"]["pid"]), timeout=10)
-    assert wait_for(lambda: not pid_alive(info["agent"]["pid"]), timeout=10)
-    assert seats.liveness(project, "claude-qa") == "dead"
-    top = fake.add_card(project.qa_list, "another question", pos=0)
-    fake.user_comment(card["id"], "and what about X?")  # something new: the taken-up conversation gets a prompt
-    log = scenario(project, tmp_path, [answer_step("continued by codex")], "codex")
+    scenario(project, tmp_path, [answer_step("continued by codex")], "codex")
     assert len(agents_cmd.up(project, {}, qa="codex")) == 1
-    assert wait_for(lambda: comments_with(fake, card, "continued by codex"), timeout=40)
-    value = project.refs.read(card_ref(card["id"]))
-    assert value.meta["owner"] == "codex-qa" and value.meta["conversation"] == conversation
-    assert project.refs.read(card_ref(top["id"])) is None
-    restart = messages.QA_RESTART.split("{")[0]
-    assert any(line.startswith(restart) for line in agent_inputs(log))
     cfg = project.reload_config()
     assert cfg.qa_seat() == "codex-qa" and "claude-qa" not in cfg.seats
-    assert project.refs.read(seat_ref("claude-qa")) is None
+    assert project.refs.read(seat_ref("claude-qa")) is None and not qapool.stopping(project.paths)
+    assert wait_for(lambda: qa_alive(project, "codex-qa"), timeout=30)
+    assert project.refs.read(card_ref(card["id"])) is None  # idle: nothing new, no agent
+    fake.user_comment(card["id"], "and what about X?")
+    assert wait_for(lambda: comments_with(fake, card, "continued by codex"), timeout=40)
+    value = project.refs.read(card_ref(card["id"]))
+    assert value.meta["owner"] == "codex-qa" and value.meta["conversation"] != conversation
     assert agents_cmd.up(project, {}, qa="codex") == []
 
 
@@ -275,9 +263,9 @@ def test_preflight_checks_only_the_questions_seed_for_the_qa_type(qa_project, en
     _drop_seeds("claude", ("questions",))
     with pytest.raises(KankanError) as exc:
         agents_cmd.up(qa_project, {}, qa="claude")
-    # the replacement comes before the seed check (the live codex-qa refuses it); the missing seed is
-    # covered by test_first_qa_start_without_a_questions_seed_registers_the_seat_so_doctor_asks
-    assert exc.value.status == Status.NEEDS_ACTION and "codex-qa is alive" in exc.value.message
+    # the type change comes before the seed check (qapool F§7: the codex pool is removed, claude-qa registered)
+    assert exc.value.status == Status.NEEDS_ACTION and "claude questions seed" in exc.value.message
+    assert qa_project.reload_config().qa_seat() == "claude-qa"
     assert agents_cmd.up(qa_project, {"claude": 1}) != []  # a missing questions seed never blocks work seats
 
 

@@ -1,6 +1,6 @@
 # kankan Q&A agent pool — technical specification
 
-**Status:** specified, not implemented; requires the board reader ([`boardreader_spec_technical.md`](boardreader_spec_technical.md)), implemented first.
+**Status:** implemented locally (2026-11-27), on top of the board reader ([`boardreader_spec_technical.md`](boardreader_spec_technical.md)); outstanding: the live agents run of [§12](#12-tests).
 **Date:** 2026-11-25
 **Base:** [`initial_spec_technical.md`](initial_spec_technical.md) v1.3, [`questions_spec_technical.md`](questions_spec_technical.md), [`seat_spec_technical.md`](seat_spec_technical.md), [`stopall_spec_technical.md`](stopall_spec_technical.md) and [`boardreader_spec_technical.md`](boardreader_spec_technical.md); this feature changes them as listed in [§13](#13-changes-to-the-initial-technical-specification) and [§14](#14-changes-to-other-technical-specifications).
 **Companion:** [`qapool_spec_functional.md`](qapool_spec_functional.md) — the behaviour this file implements; read it first.

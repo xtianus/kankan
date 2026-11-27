@@ -557,11 +557,22 @@ def test_comments_ordered_and_paged_by_date(fake, board):
     assert [r["id"] for r in raw] == [m["id"] for m in made]
 
 
+def test_set_card_name(fake, board):
+    """C11 (qapool T§10): a title written with set_card_name reads back unchanged, non-ASCII prefix included."""
+    _, _, card = board
+    c = client(fake)
+    name = "\U0001F7E2\U0001F525 What is it?"
+    assert c.set_card_name(card["id"], name).name == name
+    assert c.card(card["id"]).name == name
+    assert ("PUT", f"/1/cards/{card['id']}") in fake.requests
+
+
 WRITE_EFFECTS = [
     ("move_card", lambda c, ids: c.move_card(ids["card"], ids["list"]), ("card", "card")),
     ("add_label", lambda c, ids: c.add_label(ids["card"], ids["label"]), ("card", "card")),
     ("remove_label", lambda c, ids: c.remove_label(ids["card"], ids["label"]), ("card", "card")),
     ("set_card_desc", lambda c, ids: c.set_card_desc(ids["card"], "d"), ("card", "card")),
+    ("set_card_name", lambda c, ids: c.set_card_name(ids["card"], "n"), ("card", "card")),
     ("attach_link", lambda c, ids: c.attach_link(ids["card"], "https://example.com/x", "x"), ("card", "card")),
     ("add_comment", lambda c, ids: c.add_comment(ids["card"], "t", "op-1"), ("comment", "card")),
     ("create_card", lambda c, ids: c.create_card(ids["list"], "n"), ("card_set", "list")),

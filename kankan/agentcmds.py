@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from kankan.boardreader import LIVE
-from kankan import attachments, cards, cardsections, messages, notify, qa, worktrees
+from kankan import attachments, cards, cardsections, messages, notify, qa, qapool, worktrees
 from kankan.adapters import adapter_types
 from kankan.cards import CardMeta, Phase, implemented_destination, target_list_for, transition
 from kankan.config import project_lock
@@ -245,7 +245,8 @@ def _qa_task_data(ctx: AgentContext) -> dict:
         raise _qa_ended(ctx)
     return {
         "task_id": current["id"], "kind": "qa",
-        "card": {"title": card.name, "desc": card.desc, "url": card.url, "shortLink": card.short},
+        "card": {"title": qapool.plain_title(project.paths, card), "desc": card.desc, "url": card.url,
+                 "shortLink": card.short},
         "turn": turn.get("token") or current.get("turn"), "attachments": inputs, "comments": comments,
         "worktree": str(ctx.worktree), "integration": current.get("base"), "instructions": messages.INSTRUCTIONS["qa"],
     }
@@ -273,7 +274,8 @@ def task(ctx: AgentContext) -> dict:
         extra["card_instructions_error"] = None if parsed.valid else cardsections.problems_text(parsed.problems)
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
-        "title": card.name, "url": card.url, "desc": parsed.spec, "phase": value.meta.get("phase"),
+        "title": qapool.plain_title(ctx.project.paths, card), "url": card.url, "desc": parsed.spec,
+        "phase": value.meta.get("phase"),
         "branch": value.meta.get("branch"), "worktree": str(ctx.worktree), "main": ctx.project.cfg.integration_branch,
         "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),

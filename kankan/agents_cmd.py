@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from kankan.boardreader import LIVE
-from kankan import build, messages, seats, worktrees
+from kankan import build, messages, qapool, seats, worktrees
 from kankan.adapters import WORK_ROLES
 from kankan.config import file_lock
 from kankan.errors import KankanError, Status
@@ -49,9 +49,11 @@ def registered_args(cfg) -> str:
     ``kankan up`` without arguments starts and what ``kankan start`` without a stop record suggests."""
     counts: Dict[str, int] = {}
     qa = None
-    for seat_cfg in cfg.seats.values():
+    for name, seat_cfg in cfg.seats.items():
         if seat_cfg.removing:  # seat T§5: a seat being removed is never asked for
             continue
+        if seat_cfg.role == "qa" and qapool.is_member(name):
+            continue  # qapool T§2: the pool's members are kankan's, never asked for
         if seat_cfg.role == "qa":
             qa = seat_cfg.type
         else:
@@ -106,15 +108,19 @@ def _check_qa_list(project) -> None:
         raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
 
 
-def _register_qa_seat(project, agent_type: str) -> None:
-    """The ``Q&A`` list check, then the replacement of a Q&A seat of another type (refused while it runs) and the
-    registration of ``<type>-qa``, before the ``questions`` seed preflight: a start refused for a missing seed
-    leaves the seat registered, so ``kankan doctor`` asks for the seed and creates the ``questions`` card
-    (questions F§7)."""
-    from kankan import qa as qa_policy
+def _register_qa_seat(project, agent_type: str, change: bool = True) -> None:
+    """The ``Q&A`` list check, then the type change of a Q&A pool of another type (qapool T§9: stopped at once and
+    removed, its cut-short answers completed) and the registration of ``<type>-qa`` under ``up.lock``, before the
+    ``questions`` seed preflight: a start refused for a missing seed leaves the router registered, so
+    ``kankan doctor`` asks for the seed and creates the ``questions`` card (questions F§7). ``up`` holds ``up.lock``
+    and has done the type change already (``change=False``): a seat removal never runs under ``up.lock``, and a pool
+    of another type registered meanwhile stops the command (``check_no_other_type``)."""
     _check_qa_list(project)
-    qa_policy.replace_seat(project, agent_type)
-    seats.ensure_created(project, seats.qa_seat_name(agent_type), agent_type)
+    if change:
+        qapool.change_type(project, agent_type)
+    with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
+        qapool.check_no_other_type(project, agent_type)
+        seats.ensure_created(project, seats.qa_seat_name(agent_type), agent_type)
 
 
 def supervisor_argv(agent_type: str, seat: Optional[str]) -> List[str]:
@@ -146,7 +152,7 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
     """Create a tmux session running the supervisor; the launcher renames it to ai-<project>-<seat>.
 
     With ``qa``, the Q&A seat ``<type>-qa`` (questions F§2): the ``Q&A`` list must be open, a Q&A seat of another
-    type is replaced first (``qa.replace_seat``: refused while it runs) and the seat is registered; then only the
+    type is removed first (qapool T§9, the type change) and the router is registered; then only the
     ``questions`` seed is checked."""
     tmux = tmux or Tmux()
     seats.validate_type(agent_type)
@@ -166,6 +172,8 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
     _check_collision(project, tmux)
     if seat is not None and tmux.has_session(session_name("ai-", project.paths.project, seat)):
         raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is already running")
+    if qa and create:
+        qapool.clear_for_start(project)  # qapool T§9: `kankan agent <type> --qa` and `kankan up` start the router
     name = f"ai-{sanitize(project.paths.project)}-{agent_type}-starting-{secrets.token_hex(3)}"
     env = {"PATH": agent_path(None, project.paths)}
     if not create:  # seat T§5: the launcher occupies only a registered seat, also after its restarts
@@ -176,6 +184,23 @@ def agent(project, agent_type: str, seat: Optional[str] = None, attach: bool = F
     if attach:
         session_id = tmux.run(["display-message", "-p", "-t", f"={name}:", "#{session_id}"]).stdout.strip()
         os.execvp("tmux", tmux._base() + ["attach-session", "-t", session_id])
+    return name
+
+
+def start_member(project, seat: str, tmux: Optional[Tmux] = None) -> str:
+    """qapool T§2: start the supervisor of the registered pool member ``seat`` under its exact name in a new tmux
+    session (the launcher renames it to ai-<project>-<seat>) and return the session's name at once. It registers
+    nothing and runs no preflight (the router's); the launcher occupies only the registered seat, also after its
+    supervisor restarts it, and is refused once the member is marked for removal or the pool is stopping."""
+    tmux = tmux or Tmux()
+    if not qapool.is_member(seat):
+        raise KankanError(Status.USAGE_ERROR, messages.QA_NOT_MEMBER.format(seat=seat))
+    agent_type = seats.seat_type(seat)
+    name = f"ai-{sanitize(project.paths.project)}-{agent_type}-starting-{secrets.token_hex(3)}"
+    env = {"PATH": agent_path(None, project.paths), seats.EXISTING_ONLY_ENV: "1"}
+    tmux.new_session(name, str(project.paths.repo), supervisor_argv(agent_type, seat), env=env)
+    tmux.set_option(name, "@kankan_repo", str(project.paths.repo))
+    project.log("qa_member_started", session=name, seat=seat)
     return name
 
 
@@ -228,7 +253,8 @@ def resume_removals(project, tmux: Optional[Tmux] = None, only: Optional[str] = 
             alive = seats.liveness(project, name) == "alive"
             if seat_cfg.removing == "graceful" and alive:
                 continue  # draining: its launcher completes the removal
-            if seat_cfg.removing == "graceful" and seatremove.has_work(project, name):
+            if seat_cfg.removing == "graceful" and not qapool.is_member(name) and seatremove.has_work(project, name):
+                # a member is never started (qapool T§2): its pending answer is completed by the removal itself
                 try:
                     session = agent(project, seat_cfg.type, seat=name, tmux=tmux, qa=seat_cfg.role == "qa",
                                     create=False)
@@ -256,6 +282,9 @@ def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None, qa: Optiona
     restarted or completed first (seat T§5)."""
     tmux = tmux or Tmux()
     resume_removals(project, tmux)
+    if qa:
+        _check_qa_list(project)
+        qapool.change_type(project, qa)  # qapool T§9: a pool of another type is removed first, without asking
     started: List[str] = []
     with file_lock(project.paths.kankan_dir / "up.lock", timeout=UP_WAIT_SECONDS * 10, what="up lock"):
         live = live_counts(project)
@@ -266,7 +295,7 @@ def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None, qa: Optiona
         if missing:
             doctor.preflight(missing, project.paths)
         if qa_missing:
-            _register_qa_seat(project, qa)  # refused while the other Q&A seat runs: before starting anything
+            _register_qa_seat(project, qa, change=False)  # before starting anything
             doctor.preflight([qa], project.paths, roles=QA_ROLES)
         for agent_type, count in wanted.items():
             while live_counts(project).get(agent_type, 0) < count:
@@ -275,7 +304,9 @@ def up(project, wanted: Dict[str, int], tmux: Optional[Tmux] = None, qa: Optiona
                 _wait_started(project, started[-1], agent_type,
                               lambda: live_counts(project).get(agent_type, 0) > before)
         if qa_missing:
-            started.append(agent(project, qa, tmux=tmux, preflight=False, qa=True))
+            qapool.clear_for_start(project)  # qapool T§9: cleared just before the router starts
+            # registered above: the launcher occupies only the registered router (no second type change)
+            started.append(agent(project, qa, tmux=tmux, preflight=False, qa=True, create=False))
             _wait_started(project, started[-1], f"{qa} Q&A", lambda: seats.liveness(project, qa_seat) == "alive")
     return started
 
