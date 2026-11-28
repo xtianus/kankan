@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from kankan.boardreader import LIVE
 from kankan import boardconfig, boardsettings, cardsections, messages
 from kankan.adapters import adapter_types, combinations
 from kankan.config import file_lock, load_config, project_lock, save_config
@@ -13,7 +14,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
     reports = []
     with file_lock(project.paths.kankan_dir / 'settings-construction.lock', what='settings construction lock'):
         cfg = project.reload_config()
-        snap = project.trello.snapshot(cfg.board_id)
+        snap = project.board.snapshot(LIVE)
         from kankan.config import check_registry
         check_registry(cfg, snap.desc)
         existing = snap.lists.get(cfg.settings_list)
@@ -28,7 +29,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
                 fresh.settings_list = ident
                 save_config(project.paths, fresh)
             project.reload_config()
-        read = project.trello.settings_cards(project.cfg.settings_list)
+        read = project.board.settings_cards(project.cfg.settings_list, LIVE)
         boardsettings.apply_read(project, read, adapters)
         boardsettings.drain_actions(project)
         specs = boardconfig.schema(adapters, boardconfig.roles(project.paths))
@@ -48,7 +49,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
             try:
                 card = cards[0] if cards else project.trello._write_once(
                     lambda: project.trello.create_card(project.cfg.settings_list, name, spec.help if spec.kind == 'checklist' else str(values)),
-                    lambda: next((c for c in project.trello.settings_cards(project.cfg.settings_list).cards if c.name == name), None))
+                    lambda: next((c for c in project.board.settings_cards(project.cfg.settings_list, LIVE).cards if c.name == name), None))
                 with project_lock(project.paths):
                     state = boardconfig.load(project.paths)
                     state.construction[key] = {'card_id': card.id, 'creating': creating}
@@ -64,13 +65,14 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
                     allowed = {boardconfig.item_name(pair.name): pair for pair in combinations(adapter)}
                     for item in checklist.items:
                         if boardconfig.item_name(item.name) not in allowed:
-                            project.trello.delete_check_item(checklist.id, item.id)
+                            project.trello.delete_check_item(checklist.id, item.id, card_id=card.id)
                     for index, pair in enumerate(combinations(adapter), 1):
                         matches = [i for i in checklist.items if boardconfig.item_name(i.name) == boardconfig.item_name(pair.name)]
                         if not matches:
                             # Only a new checklist gets a seed/current tick. Existing invalid choices stay invalid.
                             project.trello.create_check_item(checklist.id, pair.name,
-                                bool((new_checklist or creating) and values.get(agent_type) == pair), index * 1024)
+                                bool((new_checklist or creating) and values.get(agent_type) == pair), index * 1024,
+                                card_id=card.id)
                         else:
                             for item in matches:
                                 if item.pos != index * 1024:
@@ -93,7 +95,7 @@ def ensure(project, adapters: dict, *, say) -> list[str]:
         if report:
             reports.append(report)
             say(report)
-        result = boardsettings.apply_read(project, project.trello.settings_cards(project.cfg.settings_list), adapters)
+        result = boardsettings.apply_read(project, project.board.settings_cards(project.cfg.settings_list, LIVE), adapters)
         boardsettings.drain_actions(project)
     return reports
 
@@ -106,7 +108,7 @@ def ensure_instructions_card(project, agent_types, *, write: bool) -> Optional[s
     list_id = project.cfg.settings_list
     if not list_id:
         return None
-    read = project.trello.settings_cards(list_id)
+    read = project.board.settings_cards(list_id, LIVE)
     if not read.list_available:
         return None
     cards = [card for card in read.cards if card.name == cardsections.INSTRUCTIONS_TITLE and not card.closed]
@@ -118,7 +120,7 @@ def ensure_instructions_card(project, agent_types, *, write: bool) -> Optional[s
             return messages.INSTRUCTIONS_CARD_MISSING
         project.trello._write_once(
             lambda: project.trello.create_card(list_id, cardsections.INSTRUCTIONS_TITLE, text, pos="top"),
-            lambda: next((c for c in project.trello.settings_cards(list_id).cards
+            lambda: next((c for c in project.board.settings_cards(list_id, LIVE).cards
                           if c.name == cardsections.INSTRUCTIONS_TITLE), None))
         return messages.INSTRUCTIONS_CARD_CREATED
     card = cards[0]

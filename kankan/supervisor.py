@@ -6,10 +6,11 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+
+from kankan import build
 
 MAX_RESTARTS = 5
 WINDOW_SECONDS = 600
@@ -37,9 +38,29 @@ def _seat_of_supervisor(cwd: str) -> Optional[str]:
     return None
 
 
+def _record_gave_up(cwd: str, seat: Optional[str]) -> None:
+    """Record ``gave_up`` in the seat's process record when it names this supervisor (qapool T§5 step 2): a supervisor
+    that no longer restarts the launcher never counts as running. Best effort; the other fields are kept, and the
+    next occupation of the seat resets the record."""
+    if not seat:
+        return
+    try:
+        from kankan import clock
+        from kankan.config import Paths, atomic_write_json, read_json
+        path = Paths.discover(Path(cwd)).seats_dir / f"{seat}.proc.json"
+        data = read_json(path, None)
+        if not isinstance(data, dict) or (data.get("supervisor") or {}).get("pid") != os.getpid():
+            return
+        data["gave_up"] = True
+        data["gave_up_at"] = clock.iso(clock.now())
+        atomic_write_json(path, data)
+    except Exception:
+        pass
+
+
 def launcher_argv(agent_type: str, seat: Optional[str]) -> List[str]:
     # The type is passed as --type=<type>: the "=" keeps airesumer from mistaking this process for an agent.
-    argv = [sys.executable, "-m", "kankan", "launcher", f"--type={agent_type}"]
+    argv = build.command("launcher", f"--type={agent_type}")
     if seat:
         argv.append(f"--seat={seat}")
     return argv
@@ -58,6 +79,7 @@ def run(project_cwd: str, agent_type: str, seat: Optional[str]) -> int:
         if code == 0:
             return 0
         if code == 3:
+            _record_gave_up(project_cwd, seat or _seat_of_supervisor(project_cwd))
             print("\nkankan: the launcher stopped because of a configuration problem (see the message above); "
                   "this window closes in 10 minutes.", flush=True)
             time.sleep(600)
@@ -66,6 +88,7 @@ def run(project_cwd: str, agent_type: str, seat: Optional[str]) -> int:
         now = time.monotonic()
         restarts = [t for t in restarts if now - t < WINDOW_SECONDS]
         if len(restarts) >= MAX_RESTARTS:
+            _record_gave_up(project_cwd, seat)
             print(f"\nkankan: the launcher failed {len(restarts) + 1} times in {WINDOW_SECONDS // 60} minutes "
                   f"(last exit code {code}); giving up. See <git dir>/kankan/log.jsonl.", flush=True)
             # keep the error visible in the pane until the user closes it

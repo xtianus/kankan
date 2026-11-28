@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import enum
 from dataclasses import asdict, dataclass, field, fields
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
+from kankan.boardreader import LIVE, max_age
 from kankan import attachments, clock, faults, labels
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
@@ -85,13 +86,44 @@ class TransitionResult:
     moved: bool
 
 
+def _seat_number(name: str) -> int:
+    try:
+        return int(name.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def implemented_list(cfg, implementer: Optional[str]) -> Optional[str]:
+    """seat T§3: the ``Implemented`` list a card implemented by ``implementer`` goes to: its own while the seat is
+    registered and not being removed, otherwise another work seat's (same type first, by seat number), else None."""
+    own = cfg.seats.get(implementer) if implementer else None
+    if own is not None and own.role != "qa" and not own.removing:
+        return own.implemented
+    usable = [(name, sc) for name, sc in cfg.work_seats().items() if not sc.removing]
+    kind = implementer.rsplit("-", 1)[0] if implementer else None
+    same = sorted((n for n, sc in usable if sc.type == kind), key=_seat_number)
+    if same:
+        return cfg.seats[same[0]].implemented
+    others = sorted(usable, key=lambda item: (item[1].type, _seat_number(item[0])))
+    return others[0][1].implemented if others else None
+
+
+def implemented_destination(cfg, implementer: Optional[str]) -> Tuple[str, str, Optional[str]]:
+    """``(phase, target list, cause)`` of a card going back to review: ``implemented`` in ``implemented_list``,
+    or ``parked`` to ``Backlog`` with cause ``seat_removed`` when no work seat is left (seat T§3)."""
+    target = implemented_list(cfg, implementer)
+    if target is None:
+        return Phase.PARKED.value, cfg.backlog, "seat_removed"
+    return Phase.IMPLEMENTED.value, target, None
+
+
 def target_list_for(cfg, phase: str, seat: Optional[str], implementer: Optional[str], cause: Optional[str] = None
                     ) -> Optional[str]:
     """Destination list of each phase (§10.3)."""
     if phase == Phase.IMPL.value:
         return cfg.seats[seat].in_progress
     if phase == Phase.IMPLEMENTED.value:
-        return cfg.seats[implementer].implemented
+        return implemented_list(cfg, implementer)
     if phase == Phase.REVIEW.value:
         return cfg.seats[seat].review
     if phase == Phase.INTEGRATED.value:
@@ -99,7 +131,7 @@ def target_list_for(cfg, phase: str, seat: Optional[str], implementer: Optional[
     if phase == Phase.QA.value:
         return cfg.qa_list
     if phase == Phase.PARKED.value:
-        if cause in ("yield", "handoff"):
+        if cause in ("yield", "handoff", "seat_removed"):
             return cfg.backlog
         if cause == "block":
             return cfg.blocked
@@ -111,7 +143,7 @@ def transition(project, actor: Actor, card: Card, expect: Optional[RefValue], ne
                comment: Optional[str]) -> TransitionResult:
     """Git first, then Trello: one ref transaction, then a verified move and a de-duplicated comment."""
     with project_lock(project.paths):
-        fresh = project.trello.card(card.id)
+        fresh = project.board.card(card.id, LIVE)
         user_park = new is not None and new.phase == Phase.PARKED.value and (new.cause or "").startswith("user_")
         if isinstance(actor, Lease) and expect is not None and new is not None and not user_park \
                 and expect.meta.get("phase") in OWNED_PHASES and not _where_expected(fresh, expect.meta):
@@ -186,6 +218,28 @@ def confirm_move(project, ref: str, value: RefValue) -> RefValue:
     return value
 
 
+def settle_parked(project, ref: str, value: RefValue, card: Optional[Card]) -> bool:
+    """Accept where the user put a ``parked`` card whose move is done (§10.4): remove ``target_list`` from the blob,
+    as ``release --force`` leaves it, without a move. Not for a card moved into a seat list, ``Blocked`` or ``Done``,
+    which stays reported by ``reconcile``. The caller holds the project lock; conditional on ``value.oid``."""
+    meta = value.meta
+    target = meta.get("target_list")
+    if meta.get("phase") != Phase.PARKED.value or meta.get("owner") or meta.get("from_list") or not target:
+        return False
+    cfg = project.cfg
+    if card is None or card.closed or card.list_id == target \
+            or card.list_id in set(cfg.seat_lists()) | {cfg.blocked, cfg.done}:
+        return False
+    new = dict(meta)
+    for key in ("target_list", "pos", "nonce"):
+        new.pop(key, None)
+    oid = project.refs.write_blob(new)
+    if not project.refs.update(ref, oid, value.oid):
+        return False
+    project.log("parked_settled", card=card.id, old_target=target, list=card.list_id, old=value.oid, new=oid)
+    return True
+
+
 def parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
     result = {}
     for ref, (oid, kind, body) in project.refs.list_raw(CARD_PREFIX).items():
@@ -217,8 +271,8 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
     events: List[str] = []
     with project_lock(project.paths):
         cfg = project.cfg
-        if snap is None:
-            snap = project.trello.snapshot(cfg.board_id)
+        if snap is None:  # under the lock with no cycle snapshot: live, never waiting for a poll
+            snap = project.board.snapshot(LIVE)
         for ref, value in parse_refs(project).items():
             card_id = ref[len(CARD_PREFIX):]
             if isinstance(value, KankanError):
@@ -227,10 +281,19 @@ def converge(project, lease: Lease, snap=None) -> List[str]:
             if _skipped(lease, value.meta):
                 continue
             card = snap.cards.get(card_id)
-            if card is None:
-                card = project.trello.card(card_id)
+            if not _settled(cfg, value.meta, card):
+                card = project.board.card(card_id, LIVE)  # before any step, under the lock (board reader T§8)
             events += _converge_ref(project, lease, ref, value, card, snap.labels)
     return events
+
+
+def _settled(cfg, meta: dict, card: Optional[Card]) -> bool:
+    """The snapshot shows the card where its ref expects it, with no move to confirm: convergence has no step to take,
+    so the snapshot, which may be as old as ``poll_seconds``, is enough and no card is read (board reader T§8)."""
+    if card is None or card.closed or meta.get("phase") == Phase.INTEGRATED.value:
+        return False
+    target = meta.get("target_list")
+    return target is None or (card.list_id == target and not meta.get("from_list"))
 
 
 def converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Optional[Card],
@@ -276,6 +339,7 @@ def _converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Option
             confirm_move(project, ref, value)
         return events
     if card.list_id != meta.get("from_list"):
+        settle_parked(project, ref, value, card)  # a given-back card the user moved: no longer lagging
         events.append(f"human_moved:{card_id}")
         return events
     if phase == Phase.PARKED.value and meta.get("cause") == "handoff" and cfg.qa_list \

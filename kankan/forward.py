@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
+
 from kankan import clock, faults, labels, messages
+from kankan.boardreader import LIVE, max_age
 from kankan.errors import KankanError
 from kankan.seatstate import load_state, update_state
 from kankan.trello import MARKER_PREFIX
@@ -17,6 +21,18 @@ def _clear_waiting_label(launcher) -> None:
             launcher.log("label_failed", error=err.message)
 
 
+ACTION_ID = re.compile(r"^[0-9a-f]{24}$")
+
+
+def _cursor_date(project, card_id: str, action_id: str) -> str:
+    """A cursor stored as an action ID by an earlier version: that comment's date, or the start of the second in its
+    ID when the comment is gone (board reader T§7)."""
+    found = next((c for c in project.board.thread(card_id, LIVE) if c.id == action_id), None)
+    if found is not None and found.date:
+        return found.date
+    return datetime.fromtimestamp(int(action_id[:8], 16), timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def poll(launcher) -> None:
     """Read new comments; keep the configured member's, never kankan's own; queue them."""
     project, seat, card_id = launcher.project, launcher.lease.seat, launcher.task["card"]
@@ -24,17 +40,24 @@ def poll(launcher) -> None:
     pending = state.pending_forward
     if pending and pending.get("card") == card_id and pending.get("task_id") == launcher.task["id"]:
         return
-    cursor = state.comment_cursor.get(card_id)
+    cursor = state.comment_cursor.get(card_id) or ""
     try:
-        new = project.trello.comments(card_id, since=cursor)
+        if ACTION_ID.match(cursor):
+            cursor = _cursor_date(project, card_id, cursor)
+        new, newest = project.board.new_comments(card_id, cursor, max_age(launcher.cfg.poll_seconds))
     except KankanError as err:
         launcher.log("comments_failed", error=err.message)
         return
     if not new:
+        read_cursor = state.comment_cursor.get(card_id)
+        if newest != read_cursor:  # a quiet card follows the log (board reader T§7)
+            def follow(st):
+                if st.comment_cursor.get(card_id) == read_cursor:  # never over a cursor saved meanwhile (an ask)
+                    st.comment_cursor[card_id] = newest
+            update_state(project.paths, seat, follow)
         return
     from kankan import notify
-    wanted = notify.answers(project, new)
-    newest = max(c.id for c in new)
+    wanted = notify.answers(project, new, max_age(launcher.cfg.poll_seconds))
 
     def save(st):
         st.comment_cursor[card_id] = newest
@@ -57,6 +80,8 @@ def step(launcher, cls) -> None:
     if now >= getattr(launcher, "next_comment_poll", 0.0):
         launcher.next_comment_poll = now + launcher.cfg.poll_seconds
         poll(launcher)
+        from kankan.launcher import poll_done
+        poll_done(launcher, "comments")
     if launcher.suspend_pending():
         # HOLD or a user move while waiting: the suspension request goes first (§9.4, §14.6)
         if launcher.can_write(cls, queue=True):

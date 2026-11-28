@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from kankan.boardreader import LIVE, BoardReader
 from kankan import auditlog, clock, gitutil, messages, seats, worktrees
 from kankan.refstore import CARD_PREFIX, RefStore
 from kankan.config import (Config, CredentialsNotFound, Paths, load_config, load_credentials, project_lock, registry_block, save_config,
@@ -56,7 +57,7 @@ def acquire_credentials(paths: Paths, cfg: Config, base_url: str, prompt: Callab
         try:
             key, token = load_credentials(paths, cfg)
             client = TrelloClient(key, token, base_url=base_url, timeout=cfg.trello_timeout)
-            return client, client.me(), warnings
+            return client, BoardReader.unbound(client).me(LIVE), warnings
         except CredentialsNotFound:
             pass
         except KankanError as err:
@@ -66,7 +67,7 @@ def acquire_credentials(paths: Paths, cfg: Config, base_url: str, prompt: Callab
     key = prompt("Trello API key (from https://trello.com/apps/admin, logged in as kankan's own Trello account): ").strip()
     token = prompt(f"Trello Token (if needed, get it from {AUTH_URL.format(key=key)}): ").strip()
     client = TrelloClient(key, token, base_url=base_url, timeout=cfg.trello_timeout)
-    me = client.me()
+    me = BoardReader.unbound(client).me(LIVE)
     target = Path(cfg.credentials_path) if cfg.credentials_path else user_credentials_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     props = PropertiesFile.load(target, missing_ok=True)
@@ -154,7 +155,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
                 raise KankanError(Status.USAGE_ERROR, "the board URL is required: kankan init <board-url>")
             url = cfg_old.board_short
         short = parse_board_url(url)
-        board = client.board(short)
+        board = BoardReader.unbound(client).board_info(short)
         if cfg_old is not None and cfg_old.board_id and cfg_old.board_id != board["id"]:
             raise KankanError(Status.CONFIG_ERROR, "this clone is already bound to another board")
         cfg.board_id, cfg.board_short = board["id"], board.get("shortLink", short)
@@ -162,7 +163,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
         if stranded:
             warnings.append(f"{stranded} card(s) were left without a claim by the other clone: run "
                             "`kankan reconcile --fix` to move them back to Backlog")
-        snap = client.snapshot(cfg.board_id)
+        snap = BoardReader.unbound(client, cfg.board_id).snapshot(LIVE)
         _ensure_lists(cfg, cfg_old, client, snap, prompt)
         ensure_qa_list(cfg, client, snap, prompt)
         ensure_labels(cfg, client, snap)
@@ -194,7 +195,7 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
     say(messages.INIT_POPULATING_BOARD)
     project = Project.open(paths.repo)
     if not project.cfg.settings_list:
-        snapshot = client.snapshot(cfg.board_id)
+        snapshot = BoardReader.unbound(client, cfg.board_id).snapshot(LIVE)
         matches = [lst for lst in snapshot.lists.values() if lst.name == "kankan" and not lst.closed]
         if matches and _yes(prompt("A list named 'kankan' exists on the board: adopt it? [Y/n] ")):
             with project_lock(paths):
@@ -216,12 +217,12 @@ def init(cwd, url: Optional[str], credentials: Optional[Path] = None, takeover: 
 
 def account_warnings(client: TrelloClient, cfg: Config) -> List[str]:
     """kankan must act through its own Trello account, invited to boards that people administer (spec §14.2)."""
-    admins = client.board_admins(cfg.board_id)
+    admins = BoardReader.unbound(client, cfg.board_id).admins(LIVE)
     if any(member_id == cfg.kankan_member_id for member_id, _ in admins):
         u = cfg.kankan_username
         return [f"the Trello token belongs to @{u}, an admin of this board: kankan treats every comment of its token's "
                 f"owner as its own, so @{u}'s answers would never reach the agents and @{u} would get no notifications. "
-                "Give kankan its own Trello account (user manual §3.1), then `kankan init --reauth`"]
+                "Give kankan its own Trello account (user manual §1.3), then `kankan init --reauth`"]
     if not admins:
         return ["the board has no admin other than kankan: nobody is notified about the cards kankan creates"]
     return []
@@ -330,7 +331,7 @@ def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict,
                           {"registry": block.get("registry-id")})
     stranded = 0
     if block and block.get("registry-id"):
-        lines, stranded = takeover_problems(paths, cfg_old, client.snapshot(cfg.board_id))
+        lines, stranded = takeover_problems(paths, cfg_old, BoardReader.unbound(client, cfg.board_id).snapshot(LIVE))
         if lines:
             say("\n".join(lines))
             try:
@@ -344,7 +345,7 @@ def _bind_registry(paths: Paths, cfg: Config, client: TrelloClient, board: dict,
     client.set_board_desc(cfg.board_id, write_registry_block(board.get("desc", ""), fields))
     if cfg.settle_seconds:
         clock.sleep(cfg.settle_seconds)
-    reread = registry_block(client.board(cfg.board_id).get("desc", ""))
+    reread = registry_block(BoardReader.unbound(client).board_info(cfg.board_id).get("desc", ""))
     if not reread or reread.get("registry-id") != cfg.registry_id:
         raise KankanError(Status.CONFIG_ERROR, "another kankan init wrote the board registry at the same time; "
                           "stop the other clone and retry")

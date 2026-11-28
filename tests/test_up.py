@@ -6,11 +6,11 @@ import threading
 
 import pytest
 
-from kankan import agents_cmd, seats
+from kankan import agents_cmd, build, seats
 from kankan.errors import KankanError, Status
 from kankan.seatstate import load_state
 from tests.conftest import ROOT, git
-from tests.helpers import bind_project
+from tests.helpers import remove_seat, bind_project
 from tests.launcher_helpers import launcher_state, pid_alive, proc_info, wait_for
 
 pytestmark = [pytest.mark.tmux, pytest.mark.slow]
@@ -80,7 +80,7 @@ def test_autostart_unit_content(project, tmp_path, monkeypatch, isolated_home):
     unit = isolated_home / ".config" / "systemd" / "user" / "kankan-up@proj.service"
     text = unit.read_text()
     assert f"WorkingDirectory={project.paths.repo}" in text
-    assert "-m kankan up claude=2 codex=1" in text and "WantedBy=default.target" in text
+    assert f'-c "{build.BOOTSTRAP}" up claude=2 codex=1\n' in text and "WantedBy=default.target" in text
     assert calls.read_text().splitlines() == ["--user daemon-reload", "--user enable kankan-up@proj.service"]
     assert warnings and "linger" in warnings[0]
     agents_cmd.autostart_disable(project)
@@ -206,10 +206,13 @@ def test_up_with_qa_is_idempotent(qa_project, env):
     assert agents_cmd.up(qa_project, {"claude": 2, "codex": 1}, qa="codex") == []
 
 
-def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project, fake_trello, env, tmp_path):
-    from kankan import messages
+def test_up_qa_of_another_type_stops_and_removes_the_pool_then_starts_the_new_router(qa_project, fake_trello, env,
+                                                                                     tmp_path):
+    """qapool F§7 type change: `up qa=codex` with a Claude pool running stops it at once without asking, removes its
+    seats and starts codex-qa; every card is idle, and the next comment is answered by the new pool in a new
+    conversation over the whole thread."""
+    from kankan import qapool
     from kankan.refstore import card_ref, seat_ref
-    from tests.launcher_helpers import agent_inputs
     project, fake = qa_project, fake_trello
     card = fake.add_card(project.qa_list, "how", desc="how does it work?")
     scenario(project, tmp_path, [answer_step("first answer")], "claude")
@@ -217,32 +220,17 @@ def test_up_qa_replaces_a_dead_qa_seat_and_continues_its_conversation(qa_project
     assert wait_for(lambda: comments_with(fake, card, "first answer")
                     and launcher_state(project, "claude-qa") == "qa_waiting", timeout=40)
     conversation = project.refs.read(card_ref(card["id"])).meta["conversation"]
-    # with a live Q&A seat of another type, the replacement is refused
-    with pytest.raises(KankanError) as exc:
-        agents_cmd.up(project, {}, qa="codex")
-    assert exc.value.status == Status.NEEDS_ACTION
-    info = proc_info(project, "claude-qa")
-    os.kill(info["supervisor"]["pid"], signal.SIGKILL)
-    try:
-        os.kill(info["launcher"]["pid"], signal.SIGKILL)
-    except ProcessLookupError:
-        pass  # the launcher's PDEATHSIG may already have killed it with the supervisor
-    assert wait_for(lambda: not pid_alive(info["launcher"]["pid"]), timeout=10)
-    assert wait_for(lambda: not pid_alive(info["agent"]["pid"]), timeout=10)
-    assert seats.liveness(project, "claude-qa") == "dead"
-    top = fake.add_card(project.qa_list, "another question", pos=0)
-    fake.user_comment(card["id"], "and what about X?")  # something new: the taken-up conversation gets a prompt
-    log = scenario(project, tmp_path, [answer_step("continued by codex")], "codex")
+    scenario(project, tmp_path, [answer_step("continued by codex")], "codex")
     assert len(agents_cmd.up(project, {}, qa="codex")) == 1
-    assert wait_for(lambda: comments_with(fake, card, "continued by codex"), timeout=40)
-    value = project.refs.read(card_ref(card["id"]))
-    assert value.meta["owner"] == "codex-qa" and value.meta["conversation"] == conversation
-    assert project.refs.read(card_ref(top["id"])) is None
-    restart = messages.QA_RESTART.split("{")[0]
-    assert any(line.startswith(restart) for line in agent_inputs(log))
     cfg = project.reload_config()
     assert cfg.qa_seat() == "codex-qa" and "claude-qa" not in cfg.seats
-    assert project.refs.read(seat_ref("claude-qa")) is None
+    assert project.refs.read(seat_ref("claude-qa")) is None and not qapool.stopping(project.paths)
+    assert wait_for(lambda: qa_alive(project, "codex-qa"), timeout=30)
+    assert project.refs.read(card_ref(card["id"])) is None  # idle: nothing new, no agent
+    fake.user_comment(card["id"], "and what about X?")
+    assert wait_for(lambda: comments_with(fake, card, "continued by codex"), timeout=40)
+    value = project.refs.read(card_ref(card["id"]))
+    assert value.meta["owner"] == "codex-qa" and value.meta["conversation"] != conversation
     assert agents_cmd.up(project, {}, qa="codex") == []
 
 
@@ -255,7 +243,7 @@ def test_autostart_unit_with_qa(project, tmp_path, monkeypatch, isolated_home):
     monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
     agents_cmd.autostart_enable(project, {"claude": 2}, qa="codex")
     unit = isolated_home / ".config" / "systemd" / "user" / "kankan-up@proj.service"
-    assert "-m kankan up claude=2 qa=codex\n" in unit.read_text()
+    assert f'-c "{build.BOOTSTRAP}" up claude=2 qa=codex\n' in unit.read_text()
 
 
 def _drop_seeds(agent_type, roles):
@@ -275,9 +263,9 @@ def test_preflight_checks_only_the_questions_seed_for_the_qa_type(qa_project, en
     _drop_seeds("claude", ("questions",))
     with pytest.raises(KankanError) as exc:
         agents_cmd.up(qa_project, {}, qa="claude")
-    # the replacement comes before the seed check (the live codex-qa refuses it); the missing seed is
-    # covered by test_first_qa_start_without_a_questions_seed_registers_the_seat_so_doctor_asks
-    assert exc.value.status == Status.NEEDS_ACTION and "codex-qa is alive" in exc.value.message
+    # the type change comes before the seed check (qapool F§7: the codex pool is removed, claude-qa registered)
+    assert exc.value.status == Status.NEEDS_ACTION and "claude questions seed" in exc.value.message
+    assert qa_project.reload_config().qa_seat() == "claude-qa"
     assert agents_cmd.up(qa_project, {"claude": 1}) != []  # a missing questions seed never blocks work seats
 
 
@@ -312,7 +300,7 @@ def test_a_registered_qa_seat_that_never_started_is_removed(qa_project, env):
     with pytest.raises(KankanError):
         agents_cmd.agent(qa_project, "claude", qa=True)
     assert qa_project.reload_config().qa_seat() == "claude-qa"
-    diag.seat_remove(qa_project, "claude-qa")
+    remove_seat(qa_project, "claude-qa")
     assert qa_project.reload_config().qa_seat() is None
 
 
@@ -320,3 +308,40 @@ def json_seeds():
     import json
     from pathlib import Path
     return json.loads((Path.home() / ".config/kankan/agents.json").read_text())
+
+
+# ---------------------------------------------------------------------- shared board reads (board reader F§8.1)
+
+def test_three_idle_agents_share_board_reads_with_the_cache_on(git_repo, fake_trello, monkeypatch, env):
+    """Board reader functional test 1, with the cache on in every launcher: two work agents and the Q&A agent,
+    idle, read the board about once per interval instead of once per agent; a card added to Backlog is still
+    claimed within about twice ``poll_seconds``."""
+    import time
+    from kankan import auditlog
+    from kankan.refstore import card_ref
+    from tests.helpers import add_qa_list, add_questions_seed
+    monkeypatch.delenv("KANKAN_TEST_NO_CACHE")  # inherited by every launcher started below
+    poll = 2
+    project = bind_project(git_repo, fake_trello, monkeypatch, poll_seconds=poll, qa_poll_seconds=poll,
+                           write_quiet_seconds=0, idle_ready_minutes=0.05)
+    add_questions_seed()
+    add_qa_list(project, fake_trello)
+    assert len(agents_cmd.up(project, {"claude": 2}, qa="claude")) == 3
+    expected = {"claude-1", "claude-2", "claude-qa"}
+
+    def polling():
+        return {e.get("seat") for e in auditlog.read(project.paths) if e["event"] == "poll_done"}
+    assert wait_for(lambda: expected <= polling(), timeout=60), polling()
+    board_path = f"/1/boards/{project.cfg.board_id}"
+    start = sum(1 for m, p in list(fake_trello.requests) if m == "GET" and p == board_path)
+    polls_before = sum(1 for e in auditlog.read(project.paths) if e["event"] == "poll_done")
+    window = 10
+    time.sleep(window)
+    reads = sum(1 for m, p in list(fake_trello.requests) if m == "GET" and p == board_path) - start
+    polls = sum(1 for e in auditlog.read(project.paths) if e["event"] == "poll_done") - polls_before
+    assert polls >= 2 * window // poll  # the launchers kept polling...
+    assert reads <= window // poll + 3, (reads, polls)  # ...but the board was read about once per interval
+    card = fake_trello.add_card(project.cfg.backlog, "new work")
+    added = time.monotonic()
+    assert wait_for(lambda: project.refs.read(card_ref(card["id"])) is not None, timeout=4 * poll + 5)
+    assert time.monotonic() - added <= 2 * poll + 3  # within about twice the setting (board reader F§3)

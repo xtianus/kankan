@@ -93,6 +93,8 @@ class SeatConfig:
     implemented: str = ""
     review: str = ""
     role: str = "work"  # "work", or "qa" for the Q&A seat (it has no lists)
+    removing: Optional[str] = None  # "graceful" or "immediate" while `kankan seat remove` runs (seat T§5)
+    remove_error: Optional[str] = None  # why the last completion of that removal stopped (seat T§6)
 
 
 @dataclass
@@ -134,10 +136,16 @@ class Config:
     attachment_max_bytes: int = 26214400  # per downloaded card attachment (spec §13.3)
     qa_list: Optional[str] = None  # the `Q&A` list; missing or archived is never a config_error
     qa_poll_seconds: int = 30
+    qa_prefix_warm: str = "\U0001F7E2"  # the title prefix of a Q&A card whose agent's cache is warm (qapool T§2)
+    qa_prefix_cold: str = "\u26AA"  # … whose agent's cache is presumed expired
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
         data["credentials_keys"] = list(self.credentials_keys)
+        for seat in data["seats"].values():  # only a seat being removed carries these
+            for key in ("removing", "remove_error"):
+                if seat.get(key) is None:
+                    seat.pop(key, None)
         return data
 
     @classmethod
@@ -155,6 +163,10 @@ class Config:
             raise ValueError("settings_poll_seconds must be a positive integer")
         if isinstance(cfg.qa_poll_seconds, bool) or not isinstance(cfg.qa_poll_seconds, int) or cfg.qa_poll_seconds <= 0:
             raise ValueError("qa_poll_seconds must be a positive integer")
+        for key in ("qa_prefix_warm", "qa_prefix_cold"):
+            value = getattr(cfg, key)
+            if not isinstance(value, str) or not value or any(ch.isspace() for ch in value):
+                raise ValueError(f"{key} must be a non-empty string without whitespace, not {value!r}")
         limit = cfg.attachment_max_bytes
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError(f"attachment_max_bytes must be a positive integer, not {limit!r}")
@@ -172,8 +184,9 @@ class Config:
         return {name: seat for name, seat in self.seats.items() if seat.role != "qa"}
 
     def qa_seat(self) -> Optional[str]:
-        """Name of the registered Q&A seat, if any (at most one is registered)."""
-        return next((name for name, seat in self.seats.items() if seat.role == "qa"), None)
+        """Name of the registered Q&A router ``<type>-qa``, if any; the pool's members ``<type>-qaN`` are never it
+        (qapool T§2: ``qapool.members``)."""
+        return next((name for name, seat in self.seats.items() if seat.role == "qa" and name.endswith("-qa")), None)
 
     def workflow_lists(self) -> Dict[str, str]:
         result = {self.backlog: "Backlog", self.done: "Done", self.blocked: "Blocked"}
@@ -187,7 +200,10 @@ class Config:
 
     def required_lists(self) -> Dict[str, str]:
         """The workflow lists whose absence is a ``config_error`` (every one except ``Q&A``)."""
-        return {list_id: name for list_id, name in self.workflow_lists().items() if list_id != self.qa_list}
+        removing = {lst for seat in self.work_seats().values() if seat.removing
+                    for lst in (seat.in_progress, seat.implemented, seat.review)}  # archived during a removal
+        return {list_id: name for list_id, name in self.workflow_lists().items()
+                if list_id != self.qa_list and list_id not in removing}
 
 
 def load_config(paths: Paths) -> Config:

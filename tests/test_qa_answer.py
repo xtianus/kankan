@@ -200,7 +200,7 @@ def test_crash_after_chunk_one_resumes_with_the_remaining_chunks(conv, monkeypat
     comments = marked(conv)
     assert posts == 2 and len(comments) == 3
     assert [c.split("\n", 1)[0] for c in comments] == ["1/3", "2/3", "3/3"]
-    assert sum("@" in c.rsplit("\n\n", 2)[-2] for c in comments) == 1
+    assert sum("\n\n@" in c for c in comments) == 1 and "\n\n@" in comments[-1]  # the mention, then the cache note
 
 
 def test_another_text_for_the_same_turn_while_pending_gives_needs_action(conv, monkeypatch):
@@ -347,6 +347,25 @@ def test_card_moved_to_done_between_chunks_gives_not_owner(conv, monkeypatch):
     assert err.value.status == Status.NOT_OWNER
     assert len(seen) == 1 and len(marked(conv)) == 1
     assert signals(conv) == []
+
+
+def test_an_end_while_answer_holds_the_lock_leaves_no_directory(conv, monkeypatch):
+    # the user moves the card as soon as the answer appears: the end cannot delete the directory while `answer`
+    # holds the conversation lock (it only tries it), so `answer` deletes it on releasing the lock
+    real = conv.ctx.project.trello.comment_once
+
+    def comment_once(card_id, text, op_id):
+        comment = real(card_id, text, op_id)
+        ender = threading.Thread(target=qa.end, args=(conv.project, conv.lease, conv.task))
+        ender.start()
+        ender.join()
+        return comment
+    monkeypatch.setattr(conv.ctx.project.trello, "comment_once", comment_once)
+    with pytest.raises(KankanError) as err:
+        qa_answer.answer(conv.ctx, "answer", conv.token)
+    assert err.value.status == Status.NOT_OWNER
+    assert any(e["event"] == "qa_discard_busy" for e in auditlog.read(conv.project.paths))
+    assert qa.conversations(conv.project.paths) == []
 
 
 def test_answer_after_the_end_gives_not_owner_and_leaves_no_directory(conv):

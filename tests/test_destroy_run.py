@@ -730,7 +730,7 @@ def test_transient_board_read_changes_nothing(full_project, virtual_time):
 def test_full_page_of_archived_cards_asks_and_writes_nothing(full_project, monkeypatch):
     full = full_project
     original = TrelloClient.closed_cards
-    monkeypatch.setattr(TrelloClient, "closed_cards", lambda self, board_id: original(self, board_id, limit=1))
+    monkeypatch.setattr(TrelloClient, "closed_cards", lambda self, board_id, limit=1000: original(self, board_id, limit=1))
     lst = full.fake.add_list(full.cfg.board_id, "Archive")
     full.fake.add_card(lst["id"], "old")["closed"] = True
     before = disk(full.paths)
@@ -775,7 +775,7 @@ def test_integration_branch_report(full_project):
 
 def test_integration_branch_is_user_branch(kproject):
     project = kproject
-    report = run(project.paths.repo, Script(f"destroy {project.board['name']}"))
+    report = run(project.paths.repo, Script(f"destroy {project.fake_board['name']}"))
     integration = report["integration_branch"]
     assert integration["name"] == "main" and integration["is_user_branch"] and integration["commands"] == []
     text = destroy.report_text(report)

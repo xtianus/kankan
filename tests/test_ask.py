@@ -157,7 +157,8 @@ def test_work_seat_fail_moves_the_cursor_and_keeps_its_op_id(kproject, fake_trel
     again = agentcmds.fail(agent_ctx(project, lease, monkeypatch), "tests need a database")
     assert first["comment"] == again["comment"]
     state = load_state(project.paths, "claude-1")
-    assert state.comment_cursor[card["id"]] == first["comment"]
+    posted = next(c for c in fake.state["comments"].values() if c["id"] == first["comment"])
+    assert state.comment_cursor[card["id"]] == posted["date"]  # a comment point is a date (board reader T§3)
     assert state.signal["payload"] == {}
 
 

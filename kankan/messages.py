@@ -9,10 +9,14 @@ REVIEW_CLAIMED = "kankan: {seat} started reviewing this card (branch `{branch}`,
 BRANCH_CONFLICT = "kankan: more than one branch exists for this card ({branches}); delete the extra ones, then remove the Error label."
 HOLD_AFTER_CLAIM = "kankan: HOLD found right after the claim; the card goes back to the Backlog."
 IMPLEMENTED = "kankan: {seat} finished the implementation on `{branch}`; it waits for a review."
+IMPLEMENTED_NO_REVIEWER = ("kankan: {seat} finished the implementation on `{branch}`, but no work seat is left to review "
+                           "it: the card goes back to Backlog, and the next implementer finds the work on the branch.")
 YIELDED = "kankan: {seat} stopped working on this card (yield); the work is on `{branch}`."
 NOT_HELD = "the card of the current task is no longer held by this seat"
 
 REVIEW_YIELDED = "kankan: {seat} stopped reviewing this card (yield); it goes back to the implementer's list."
+REVIEW_YIELDED_BACKLOG = ("kankan: {seat} stopped reviewing this card (yield); no work seat is left to review it, so it "
+                          "goes back to Backlog with the work on `{branch}`.")
 
 INSTRUCTIONS = {
     "impl": "Implement the card on the prepared branch in your worktree, commit, run the tests, then run `kankan done --json`.",
@@ -38,6 +42,8 @@ LIMIT_COMMENT = "kankan: {seat} hit a usage limit; it resumes at {when}."
 MERGE_NOT_COMPLETED = "kankan: merge not completed in `{path}`; finish it with `kankan resolve` before the review."
 BRANCH_ELSEWHERE = "kankan: branch `{branch}` is checked out in `{path}`; free it (detach or remove that worktree), then remove the Error label."
 HOLD_AFTER_CLAIM_REVIEW = "kankan: HOLD found right after the review claim; the card goes back to the implementer's list."
+HOLD_AFTER_CLAIM_REVIEW_BACKLOG = ("kankan: HOLD found right after the review claim; no work seat is left to review it, so the "
+                                   "card goes back to Backlog.")
 
 INTEGRATED = "kankan: {seat} integrated this card into `{main}` with merge `{merge}`."
 MAIN_MOVED_LIMIT = "kankan: the integration branch kept moving during integration ({count} attempts); the card needs a look."
@@ -83,6 +89,21 @@ INIT_POPULATING_BOARD = 'Populating board...'
 SEEDS_MISSING = 'Missing {type} {role} seed: run `kankan doctor` in a terminal, or set the {type} {role} seed in ~/.config/kankan/agents.json.'
 SEEDS_INVALID = 'Invalid {type} {role} seed; choose one of the adapter model/effort combinations.'
 SEEDS_QUESTION = 'Choose the {type} {role} model and effort (one key):'
+CODE_MISMATCH = ('this command runs a different kankan than the {seat} launcher: the launcher runs kankan {launcher}, this '
+                 'command runs kankan {command}. Restart the agents (`kankan stop`, then `kankan start`) so that they '
+                 'run the same kankan')
+CODE_SIDE = '{version} from {package}'
+GRACEFUL_OTHER_CODE = ('kankan was upgraded or changed since these agents started: {seats}; this command runs '
+                       'kankan {command}. Their agents could not finish their current task (this kankan refuses '
+                       'their commands), so --graceful would wait for ever. Nothing was changed. Run '
+                       '`kankan stop` without --graceful: it quits them now and their work resumes at the next start, '
+                       'with `kankan start`')
+GRACEFUL_OTHER_SEAT = '{seat} runs kankan {side}'
+STOP_SEAT_OTHER_CODE = ('kankan was upgraded or changed since this agent started: {seats}; this command runs kankan '
+                        '{command}. The agent could not finish its current task (this kankan refuses its commands), '
+                        'so it would never stop. Nothing was changed. Run `kankan stop` to quit every agent now (their '
+                        'work resumes at the next start, with `kankan start`), or `kankan seat recover <seat> --kill` '
+                        'to quit only this one, then start its agent again')
 SEEDS_STALE = 'The saved {type} {role} seed {model} · {effort} is no longer in the agent\'s model list: choose another.'
 SEEDS_SAVED = '{role}: {type} {pair} (seed saved in {path})'
 SETTINGS_APPLIED = 'applied: `{old}` → `{new}`, from the next task'
@@ -100,26 +121,76 @@ SEAT_NOT_HELD = 'seat {seat} is no longer held by this session'
 INTEGRATION_BRANCH_MISSING = 'integration branch {branch} not found'
 UP_ARG = 'expected <type>=<n> with type claude or codex, got {item!r}'
 UP_NOTHING = 'nothing to start: give e.g. claude=2 codex=1 qa=claude'
+STATUS_REMOVE_ERROR = 'the removal could not complete: {error}; run `kankan seat remove {seat}` again'
+SEAT_START_UNKNOWN = 'unknown seat {seat}: `kankan seat start` starts an existing seat; `kankan agent <type>` and `kankan up` create seats'
+SEAT_START_RUNNING = '{seat} is already running'
+SEAT_START_REMOVING = '{seat} is being removed: run `kankan seat remove {seat}` to complete the removal'
+SEAT_START_SESSION_OPEN = '{seat} has no running agent but its tmux session or processes are still there: run `kankan seat recover {seat} --kill`, then `kankan seat start {seat}`'
+SEAT_REMOVED_BACKLOG = "kankan: seat {seat} was removed; this card goes back to Backlog, and the next implementer continues from the work committed on its branch."
+SEAT_REMOVED_IMPLEMENTED = "kankan: seat {seat} was removed; this card waits for review in {list}."
+SEAT_REMOVED_PENDING = "kankan: seat {seat} was removed; this card continues to {list}."
+SEAT_REMOVED_DONE = "kankan: seat {seat} was removed; this card was already integrated and goes to Done."
+SEAT_REMOVE_MALFORMED = 'cannot remove {seat}: the claim of card {card} cannot be read ({error}); run `kankan reconcile` and fix it first'
+SEAT_REMOVE_ALIVE = '{seat} is running: the removal is completed once its agent has stopped'
+SEAT_REMOVE_SURVIVORS = 'processes of {seat} survive ({pids}): run `kankan seat recover {seat} --kill`, then `kankan seat remove {seat}` again'
+SEAT_REMOVE_CARDS_LEFT = 'cards are still in the lists of {seat}: {cards}; the lists are archived only once they are empty'
+SEAT_REMOVE_INCOMPLETE = 'the removal of {seat} could not complete: {error}. Run `kankan seat remove {seat}` again to finish it'
+SEAT_REMOVE_PLAN = 'kankan seat remove {seat} will stop its agent now, interrupting its task (an implementation goes back to Backlog, a review is lost and the card goes back to Implemented for another reviewer), and move:'
+SEAT_REMOVE_PLAN_QA = '  end the Q&A conversation on {card} (the card stays in Q&A; an answer being written is interrupted)'
+SEAT_REMOVE_PLAN_DISCARD = '  uncommitted changes in its worktree are lost (what is committed on the branch is kept): {files}'
+SEAT_REMOVE_PLAN_AUTOSTART = '  autostart becomes: {autostart}'
+SEAT_REMOVE_CONFIRM = '`kankan seat remove {seat} --graceful` lets the agent finish its cards instead.\nProceed? [y/N] '
+SEAT_REMOVE_CANCELLED = 'nothing changed: {seat} is not removed'
+SEAT_REMOVE_AUTOSTART_FAILED = '{seat} was removed, but autostart could not be updated: {error}; run `kankan autostart enable …` with the counts you want'
+SEAT_REMOVE_GRACEFUL_RUNNING = 'the graceful removal of {seat} is still running ({state}).'
+SEAT_REMOVE_GRACEFUL_AGAIN = 'Wait for it to complete (follow it with `kankan status`), or run `kankan seat remove {seat}` without --graceful to remove the seat now.'
+SEAT_REMOVE_GRACEFUL_REPEATED = SEAT_REMOVE_GRACEFUL_RUNNING + ' ' + SEAT_REMOVE_GRACEFUL_AGAIN
+SEAT_REMOVE_ESCALATE = 'Remove {seat} now instead? [y/N] '
+SEAT_REMOVE_STATE_STOPPED = 'its agent is stopped; `kankan up` starts it again to finish'
+SEAT_REMOVE_OTHER_CODE = ('kankan was upgraded or changed since this agent started: {seats}; this command runs kankan '
+                          '{command}. The agent could not finish its cards (this kankan refuses its commands). Nothing '
+                          'was changed. Run `kankan seat remove <seat>` without --graceful, or restart the agents first '
+                          '(`kankan stop`, then `kankan start`)')
+SEAT_REMOVE_WAITING = 'waiting for {seat} to finish its cards (it takes no new card); Ctrl-C stops only the waiting'
+SEAT_REMOVE_STOPPED_EARLY = 'the agent of {seat} stopped before finishing its cards; the removal stays requested: `kankan up` (or `kankan seat start {seat}`) starts it again to finish'
+SEAT_REMOVE_WAIT_INTERRUPTED = 'stopped waiting; the removal of {seat} stays requested and completes when its agent has finished its cards'
+SEAT_REMOVE_START_FAILED = 'the agent of {seat} could not be started to finish its cards: {error}. The removal stays requested'
+UP_RESUMED = 'restarted or completed the seats being removed: {seats}'
+SEAT_REMOVE_QA_OWNED = 'the Q&A conversation of {seat} on {cards} could not be ended yet (the seat was still occupied); run `kankan seat remove {seat}` again'
+SEAT_ADMIN_OCCUPIED = '{seat} was occupied again before its pending Q&A answers could be completed'
+SEAT_REMOVE_QA_PENDING = 'the pending Q&A answer of {seat} on {card} could not be completed ({error})'
+SEAT_REMOVE_QA_LEASE_LOST = 'the seat was recovered meanwhile'
+UP_RESUME_FAILED = 'seats being removed could not be restarted or completed: {failures}'
+SEAT_NOT_REGISTERED = 'seat {seat} is not registered (it was removed, or never created): `kankan agent <type>` or `kankan up` create seats'
+UP_NO_SEATS = 'no seats registered in this project yet: `kankan up` without arguments starts the seats already registered. To start agents:'
 UP_NOT_STARTED = 'the {what} agent started in tmux session {session} did not occupy a seat within {seconds} s; attach to it to see why'
 QA_INVALID_CONVERSATION = 'invalid conversation ID {conversation!r}'
 QA_NO_ROOM = 'the mention or the marker leaves no room for the text'
 QA_LIST_MISSING = 'The Q&A list is missing or archived; the Q&A seat does not run. Run `kankan doctor`.'
 QA_LIST_UNAVAILABLE = 'The Q&A list is missing or archived: run `kankan doctor` (or `kankan init`) to restore it.'
 QA_SEAT_OTHER = 'cannot start {seat}: the Q&A seat {registered} is registered (`kankan seat remove {registered}` frees it).'
-QA_REPLACE_RUNNING = 'cannot replace the Q&A seat {old} by {new}: {old} is {state}; stop it first (`kankan stop {old}`, or `kankan seat recover {old} --kill` when it is stuck)'
-QA_REPLACE_RACE = 'the Q&A seat {old} changed during its replacement; run the command again'
-QA_OWNER_UNREGISTERED = 'seat {owner} holds this Q&A conversation but is not registered (an unfinished Q&A seat replacement): start the Q&A seat (`kankan agent <type> --qa` or `kankan up qa=<type>`) to take the conversation over'
+QA_TYPE_CHANGE_FAILED = 'cannot switch the Q&A pool to {type}: removing {seat} failed: {error}; the pool stays stopped: run the command again'
+QA_TYPE_CHANGE_RACE = 'cannot switch the Q&A pool to {type}: {seats} registered again meanwhile; run the command again'
+QA_MEMBER_SEAT = '{seat} is a seat kankan opens and closes in the Q&A pool: use `kankan seat {action} {router}` for the whole pool'
+QA_POOL_REMOVE_CONFIRM = 'kankan seat remove {router} also removes the Q&A agents {members}, stopping them now (an answer being posted is completed). Proceed? [y/N] '
+QA_OWNER_UNREGISTERED = 'seat {owner} holds this Q&A conversation but is not registered: the next start of the Q&A router ends it (`kankan agent <type> --qa` or `kankan up qa=<type>`)'
 UNKNOWN_SEAT = 'unknown seat {seat}'
-SEAT_HOLDS_CARDS = 'it holds cards: {cards}'
-SEAT_REMOVE_BLOCKED = 'cannot remove {seat}: {blockers}'
-QA_SEAT_REMOVE_RUNNING = 'cannot remove {seat}: the seat is {state}; stop it first (`kankan stop {seat}`)'
-QA_SEAT_REMOVE_DEAD = 'cannot remove {seat}: the seat is dead; free it first (`kankan seat recover {seat}`)'
-QA_SEAT_REMOVE_UNAVAILABLE = 'cannot remove {seat}: processes of the seat survive; free it first (`kankan seat recover {seat} --kill`)'
 QA_CARDS_WAIT = 'Q&A cards wait: no Q&A seat is running; start one with `kankan agent <type> --qa` or `kankan up qa=<type>`.'
 QA_SEAT_ARG = '--qa starts seat {seat}, not {given}'
+QA_MEMBER_NOT_REGISTERED = 'cannot start {seat}: it is not registered; the Q&A agents other than {router} are opened by {router} only'
+QA_MEMBER_REMOVING = 'cannot start {seat}: {router} closed it (its seat is being removed)'
+QA_SEAT_NOT_OF_TYPE = 'seat {seat} is not a Q&A seat of type {type}'
+QA_NOT_MEMBER = '{seat} is not a member of a Q&A pool (<type>-qaN)'
+QA_POOL_STOPPING = 'the Q&A agents are stopping: {router} and its agents do not start until `kankan start`, `kankan up qa=<type>`, `kankan agent <type> --qa` or `kankan seat start {router}`'
 QA_ARG = 'expected qa=<type> with type claude or codex, given once, got {item!r}'
 STATUS_QA = 'Q&A seat: {seat} ({liveness}, {state}); active card: {card}; queue: {queue}'
 STATUS_QA_NONE = 'Q&A seat: none; queue: {queue}'
+STATUS_QA_POOL = 'Q&A agents:'
+STATUS_QA_POOL_SEAT = '  {seat:<10} {liveness:<11} {state:<13} {card}  {cache}'
+STATUS_QA_WARM = 'warm until {time} ({kind})'
+STATUS_QA_COLD = 'cold'
+STATUS_QA_WAITING = 'Q&A cards waiting for an agent:'
+STATUS_QA_WAITING_CARD = '  {short}  {wait_key}  {title}'
 
 SETTINGS_PROBE_FAILED = '{type} `{pair}` was rejected: {message}'
 
@@ -137,6 +208,8 @@ QA_HEAD_MOVED = 'the checkout is not at the commit it was reset to: restore it w
 QA_PENDING_OTHER = 'another {kind} of this turn is still being posted: repeat that command to finish it'
 QA_ALREADY_POSTED = 'this turn already has a different {kind}: wait for the next turn'
 QA_EMPTY = 'the text is empty'
+QA_CACHE_EXACT = 'Prompt cache expires at {time} ({zone}).'
+QA_CACHE_ESTIMATED = 'Prompt cache may expire at {time} ({zone}).'
 QA_LOCK_TIMEOUT = 'timed out waiting for the conversation lock ({path}): another command of this conversation is running'
 QA_COMMITTED = 'kankan: {seat} made a commit in its checkout during this Q&A conversation, against its rule (the Q&A agent never commits); the answer was posted, but the checkout needs a look.'
 QA_COMMITTED_HANDOFF = 'kankan: {seat} made a commit in its checkout during this Q&A conversation, against its rule (the Q&A agent never commits); the handoff summary was posted and the card handed over, but the Q&A checkout needs a look (the commit is not part of the handoff).'

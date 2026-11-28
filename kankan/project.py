@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kankan import auditlog
+from kankan.boardreader import BoardReader
 from kankan.config import Config, Paths, load_config, load_credentials
 from kankan.refstore import RefStore
 from kankan.trello import TrelloClient
@@ -17,6 +18,7 @@ class Project:
     cfg: Config
     refs: RefStore
     trello: TrelloClient
+    board: BoardReader  # every Trello read goes through it (board reader technical §1)
 
     @classmethod
     def open(cls, cwd) -> "Project":
@@ -24,7 +26,9 @@ class Project:
         cfg = load_config(paths)
         key, token = load_credentials(paths, cfg)
         trello = TrelloClient(key, token, base_url=cfg.trello_base_url, timeout=cfg.trello_timeout)
-        return cls(paths=paths, cfg=cfg, refs=RefStore(paths.repo, cfg.integration_branch), trello=trello)
+        board = BoardReader(paths.kankan_dir, trello, cfg.board_id)
+        trello.on_write = board.on_write
+        return cls(paths=paths, cfg=cfg, refs=RefStore(paths.repo, cfg.integration_branch), trello=trello, board=board)
 
     def reload_config(self) -> Config:
         self.cfg = load_config(self.paths)

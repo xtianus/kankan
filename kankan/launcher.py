@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from kankan.boardreader import LIVE, max_age
 from kankan import boardconfig, boardsettings, cards, cardsections_feedback, clock, labels, messages, model_catalog, modelcheck, procutil, seats, workflow
 from kankan.adapters import Adapter, Classification, ModelEffort, classify, load_adapter, start_command
 from kankan.config import check_lists, check_registry
@@ -139,7 +140,7 @@ class Launcher:
     def start(self) -> None:
         """§8.3: checks, seat occupation, session rename, agent start."""
         procutil.set_child_subreaper()
-        snap = self.project.trello.snapshot(self.cfg.board_id)
+        snap = self.project.board.snapshot(LIVE)
         check_registry(self.cfg, snap.desc)
         check_lists(self.cfg, snap.lists)
         from kankan import worktrees
@@ -148,7 +149,7 @@ class Launcher:
         self.lease = self.acquire(pids)
         self.project.reload_config()
         # A stale stop of a previous run is cleared before `starting` is published: a stop requested once the seat
-        # shows `starting` must never be erased (`kankan stop <seat>` during startup).
+        # shows `starting` must never be erased (`kankan seat stop <seat>` during startup).
         update_state(self.project.paths, self.lease.seat, lambda s: setattr(s, "stop_requested", False))
         self.set_state('starting')
         if main_wts:
@@ -174,7 +175,7 @@ class Launcher:
 
     def acquire(self, pids: dict) -> Lease:
         """Occupy the seat (hook: the Q&A launcher occupies its ``<type>-qa`` seat)."""
-        return seats.acquire(self.project, self.type, self.wanted_seat, pids=pids)
+        return seats.acquire(self.project, self.type, self.wanted_seat, pids=pids, create=not seats.existing_only())
 
     def _resume_block_journal(self) -> None:
         state = load_state(self.project.paths, self.lease.seat)
@@ -213,7 +214,7 @@ class Launcher:
             for sig in (signal.SIGINT, signal.SIGTSTP, signal.SIGQUIT):
                 signal.signal(sig, signal.SIG_DFL)
 
-        command = start_command(self.adapter, pair)
+        command = self.agent_command(pair)
         if self.pane and os.isatty(1):
             # The old agent has exited; discard its visible ready prompt before watching the replacement.
             os.write(1, b"\x1b[2J\x1b[H")
@@ -225,6 +226,10 @@ class Launcher:
         self.inactivity_reported = False
         seats.write_proc(self.project, self.lease.seat, agent=self.agent.pid)
         self.log("agent_started", pid=self.agent.pid, command=command)
+
+    def agent_command(self, pair: ModelEffort) -> list:
+        """The agent's command line (hook: Q&A seats add the cache reporter's settings)."""
+        return start_command(self.adapter, pair)
 
     def own_children(self):
         objects = [self.agent, *(p.process for p in self.versions.values()), *(p.process for p in self.catalogs.values()),
@@ -373,7 +378,7 @@ class Launcher:
         # a planned restart without a card (the Q&A seat between conversations) has no card to label
         if prepared and pair and prepared.get('card') and prepared.get('ref_oid'):
             try:
-                card = self.project.trello.card(prepared['card'])
+                card = self.project.board.card(prepared['card'], LIVE)
                 if card:
                     text = messages.MODEL_START_FAILED.format(type=self.type, model=pair.model, effort=pair.effort, reason=reason)
                     if self.cfg.label_error not in card.label_ids:
@@ -499,8 +504,37 @@ class Launcher:
                 update_state(self.project.paths, self.lease.seat, lambda state: setattr(state, 'running_selection', None))
             except Exception:  # noqa: BLE001 - shutdown must release the seat flock
                 pass
-            seats.release(self.project, self.lease, retain=self.unsafe)
+            seat, retained = self.lease.seat, self.unsafe
+            seats.release(self.project, self.lease, retain=retained)
             self.lease = None
+            if not retained:
+                self.complete_removal(seat)
+
+    def complete_removal(self, seat: str) -> None:
+        """seat T§5: after releasing the seat, complete its graceful removal when no work is left. An immediate
+        removal is completed by the command that killed this launcher; a failure is saved as ``remove_error``."""
+        from kankan import seatremove
+        try:
+            seat_cfg = self.project.reload_config().seats.get(seat)
+            if seat_cfg is None or seat_cfg.removing != "graceful" or seatremove.has_work(self.project, seat):
+                return
+            seatremove.complete(self.project, seat)
+            self.log("seat_removed_by_launcher")
+        except Exception as err:  # noqa: BLE001 - shutdown must finish; the next `up` or `seat remove` retries
+            self.log("seat_remove_failed", error=str(err))
+
+    def removing_mode(self) -> Optional[str]:
+        """The seat's removal mode, read again from ``config.json`` (another process writes it)."""
+        try:
+            seat_cfg = self.project.reload_config().seats.get(self.lease.seat)
+        except KankanError:
+            return None
+        return seat_cfg.removing if seat_cfg is not None else None
+
+    def drained(self) -> bool:
+        """seat T§5: a seat being removed gracefully exits once it holds no card."""
+        from kankan import seatremove
+        return self.removing_mode() == "graceful" and not seatremove.has_work(self.project, self.lease.seat)
 
 
     def step(self) -> bool:
@@ -527,7 +561,7 @@ class Launcher:
             return False
         self.track_limit(cls)
         if self.state == "limited":
-            return self.stop_requested() and not self.task
+            return (self.stop_requested() or self.drained()) and not self.task
         if self.state == "idle":
             return self.idle(cls)
         self.periodic_board_check()
@@ -591,7 +625,8 @@ class Launcher:
                 self.activate(cls)
             return self.exit_now
         now = clock.monotonic()
-        if self.cfg.idle_exit_minutes and now - self.idle_since >= self.cfg.idle_exit_minutes * 60:
+        if self.cfg.idle_exit_minutes and now - self.idle_since >= self.cfg.idle_exit_minutes * 60 \
+                and not self.removing_mode():  # seat T§5: a seat being removed stays until it has finished
             self.log("idle_exit")
             return True
         if now < self.next_tick:
@@ -601,7 +636,10 @@ class Launcher:
             if self.type in self.versions or self.type in self.catalogs:
                 self.next_tick = now  # Check again after the nonblocking preparation completes.
                 return False
-            task = workflow.tick(self.project, self.lease, defer_assignment=True)
+            try:
+                task = workflow.tick(self.project, self.lease, defer_assignment=True)
+            finally:
+                poll_done(self, "board")
         except KankanError as err:
             self.log("tick_failed", status=err.status.value, error=err.message)
             if err.status == Status.CONFIG_ERROR:
@@ -613,6 +651,9 @@ class Launcher:
         if self.gc_due():
             self.gc_resume_labels()
         if task is None:
+            if self.drained():
+                self.log("seat_drained")
+                return True
             return False
         pair = ModelEffort(task['model'], task['effort'])
         self.prepared = task
@@ -807,7 +848,7 @@ class Launcher:
             return
         self.next_board_check = now + self.cfg.poll_seconds
         try:
-            snap = self.project.trello.snapshot(self.cfg.board_id)
+            snap = self.project.board.snapshot(max_age(self.cfg.poll_seconds))
             check_registry(self.cfg, snap.desc)
             boardsettings.apply_read(self.project, boardsettings.from_snapshot(self.project, snap), self.adapters or boardsettings.adapters_for(self.project.paths))
             boardsettings.drain_actions(self.project)
@@ -817,6 +858,8 @@ class Launcher:
             else:
                 self.log("board_check_failed", error=err.message)
             return
+        finally:
+            poll_done(self, "board")
         card = snap.cards.get(self.task["card"])
         if card is not None and self.cfg.label_hold in card.label_ids:
             self.request_suspend("hold")
@@ -839,7 +882,7 @@ class Launcher:
         if card is not None and card.list_id in (meta.get("target_list"), meta.get("from_list")):
             return
         if card is None:
-            card = self.project.trello.card(self.task["card"])
+            card = self.project.board.card(self.task["card"], max_age(self.cfg.poll_seconds))
             if card is not None and not card.closed and card.list_id in (meta.get("target_list"), meta.get("from_list")):
                 return
         self.request_suspend("user_moved")
@@ -917,13 +960,21 @@ class Launcher:
             self.set_state("idle")
 
 
+def poll_done(launcher, kind: str) -> None:
+    """Test hook (``KANKAN_TEST_READS=1``): an audit entry when one of the launcher's polls completed, so tests wait
+    for polls instead of counting Trello requests, which another process's shared read may answer (board reader
+    technical §10)."""
+    if os.environ.get("KANKAN_TEST_READS") == "1":
+        launcher.log("poll_done", kind=kind)  # ``log`` adds the seat
+
+
 def main(agent_type: str, seat: Optional[str]) -> int:
     for sig in (signal.SIGINT, signal.SIGTSTP, signal.SIGQUIT):
         signal.signal(sig, signal.SIG_IGN)
     project = Project.open(os.getcwd())
     adapter = load_adapter(project.paths, agent_type)
     kind = Launcher
-    if seat and seat.endswith("-qa"):
+    if seat and seats.is_qa(seat):  # the Q&A router and the pool's members (qapool T§2)
         from kankan.qa_launcher import QaLauncher
         kind = QaLauncher
     launcher = kind(project, adapter, Tmux(), agent_type, seat)
@@ -932,4 +983,6 @@ def main(agent_type: str, seat: Optional[str]) -> int:
     except KankanError as err:
         project.log("launcher_error", status=err.status.value, error=err.message)
         print(f"kankan launcher: {err.status.value}: {err.message}", flush=True)
+        if (err.data or {}).get("qa_pool_refused"):
+            return 0  # an expected refusal of the Q&A pool (stopping, a closed member): the supervisor ends too
         return FATAL_EXIT if err.status in (Status.CONFIG_ERROR, Status.USAGE_ERROR) else 2

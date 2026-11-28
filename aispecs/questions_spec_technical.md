@@ -1,6 +1,6 @@
 # kankan questions (Q&A) — technical specification
 
-**Status:** implemented locally; the live agents run with the Q&A dialogue ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) remains outstanding.
+**Status:** implemented locally; the live agents run with the Q&A dialogue ([developer manual §3.5](../docs/developer-manual.md#35-live-run-with-real-agents)) remains outstanding. The single Q&A seat, its queue and its seat replacement are changed by the Q&A pool ([`qapool_spec_technical.md`](qapool_spec_technical.md)), implemented locally.
 **Date:** 2026-11-15
 **Base:** [`initial_spec_technical.md`](initial_spec_technical.md) and [`boardsettings_spec_technical.md`](boardsettings_spec_technical.md); this feature changes them as listed in [§10](#10-changes-to-the-initial-technical-specification) and [§11](#11-changes-to-the-board-settings-technical-specification).
 **Companion:** [`questions_spec_functional.md`](questions_spec_functional.md) — what users and agents observe.
@@ -41,7 +41,7 @@ Transitions, under the project lock with the Git transaction first ([initial §1
 
 The claim from `parked` keeps any `branch` field out of the new blob; the card branch stays as it was, and a later implementation claim finds it through `??kankan-<shortLink>` ([initial §11](initial_spec_functional.md#11-branches-and-worktrees)). Convergence ([initial §10.4](initial_spec_technical.md#104-convergence)) never moves a card in phase `qa`: when the card is not in `qa_list`, closed or gone, the Q&A launcher ends the conversation instead; other launchers ignore `qa` refs. `parked` with `pos: bottom` is converged with `pos=bottom`, except that a handoff whose move is still outstanding (`from_list` is `qa_list`) is cancelled when the card, still in `Q&A`, has `HOLD`: convergence drops `from_list` and `pos` without moving, with `target_list` set to `qa_list`, so the card stays in `Q&A` and is taken again as a new conversation once `HOLD` is removed; a parked ref in `Backlog` is already eligible for implementation ([initial §9.2](initial_spec_functional.md#92-eligibility)).
 
-Every end deletes the ref with a transaction that verifies the seat's ref, so a command of a turn still running afterwards gets `not_owner`. The attachment directory of the card and the conversation directory are deleted at the end unless the transition was `handoff`, with the per-card attachment lock rules of [initial §13.3](initial_spec_functional.md#133-card-attachments); after a handoff the conversation directory is deleted when the card's ref is deleted in `Done`.
+Every end deletes the ref with a transaction that verifies the seat's ref, so a command of a turn still running afterwards gets `not_owner`. The attachment directory of the card and the conversation directory are deleted at the end unless the transition was `handoff`, with the per-card attachment lock rules of [initial §13.3](initial_spec_functional.md#133-card-attachments); after a handoff the conversation directory is deleted when the card's ref is deleted in `Done`. The end only tries the conversation lock, so it cannot delete the directory while a command of the conversation holds that lock; every command releasing the lock deletes the directory when no ref names the conversation any more (`qa.card_conversation_lock`).
 
 ## 4. Launcher
 

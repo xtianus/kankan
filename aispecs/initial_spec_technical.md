@@ -109,6 +109,8 @@ Cards belong to the seat, so the new session inherits the work. A seat that is a
 
 ## 8. Processes and launcher
 
+kankan starts its own processes (the supervisor from `kankan agent`/`up`, the launcher from the supervisor, the agents' `kankan` wrapper and the autostart unit's `kankan up`) with its own interpreter and `build.command()`: `python -c` with a bootstrap that removes the current directory from `sys.path` before importing kankan, the effect of `-P` (Python 3.11+). `python -m kankan` would import a `kankan/` package of the working directory, and these processes run in the repository or a seat worktree: in kankan's own repository the launchers would run the checkout and the agent commands their worktree's copy. The launcher writes into `kankan-agent.json` the hash of its package files (`build.code_id()`), its version and its package directory; an agent command with another hash refuses with `config_error`, naming both versions and directories, and both hashes when the versions are equal. Autostart units written before 0.1.7 run `-m kankan up`: `stop`/`start` and `doctor` read both forms, and `doctor` rewrites such a generated unit keeping its `PATH`.
+
 ### 8.2 Supervisor
 
 Starts the launcher as a child. If the launcher terminates abnormally, it writes a message in the pane, waits with increasing delays and starts a new one in the same pane, up to a maximum number of restarts; beyond that, it stops leaving the error visible. If the launcher terminates normally (agent exited, `stop`), the supervisor terminates too and the tmux session closes. The new launcher recovers the seat and resumes work with convergence.
@@ -227,6 +229,7 @@ On every cycle, under the project lock, the launcher compares the phase of each 
 - for phases without a holder (`implemented`, `integrated`, `parked`) any launcher;
 - a card already in the right list counts as moved;
 - in phase `integrated` with the card verified in `Done`, it deletes the ref.
+- in phase `parked` with its move done (no `from_list`) and the card moved by the user to another open list, it removes `target_list` from the blob (conditional on the ref's value, no move), as `release --force` leaves it: the user's move is accepted and the ref no longer counts as lagging. Not when the new list is a seat list, `Blocked` or `Done`, where a parked card is not where kankan's workflow puts it: there the mismatch stays for `reconcile` to report. `reconcile --fix` applies the same rule ([15.3](initial_spec_functional.md#153-kankan-reconcile---fix)).
 
 This way crashes between the Git transition and the Trello move (claim, `done`, `yield`, `block`, `integrate`) resolve themselves. Intermediate states are never eligible for other agents, because eligibility requires agreement between phase and list.
 

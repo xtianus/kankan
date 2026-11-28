@@ -149,7 +149,9 @@ def test_no_fix_never_mutates(bound, fake_trello, fakebin):
     labels_before = dict(fake_trello.state["labels"])
     def files():
         return {str(path): path.read_bytes() for root in (bound.paths.kankan_dir, Path.home()/'.config', Path.home()/'.cache')
-                if root.exists() for path in root.rglob('*') if path.is_file() and not path.is_symlink()}
+                if root.exists() for path in root.rglob('*') if path.is_file() and not path.is_symlink()
+                and 'board-cache' not in path.parts and not (path.name.startswith('board-') and path.suffix == '.lock')}
+    # reads fill the shared board cache and create its lock files (board reader F§6)
     files_before = files()
     checks = by_name(doctor.run(bound.paths.repo, fix=False, online=True))
     assert checks["hook"].status == checks["exclude"].status == checks["labels"].status == doctor.MANUAL
@@ -277,6 +279,26 @@ def test_preflight_skipped_when_running(kproject, monkeypatch, tmux_server):
     assert agents_cmd.up(kproject, {"claude": 1, "codex": 1}, tmux=tmux_server) == []
 
 
+def test_autostart_legacy_unit_rewritten(bound, fakebin, monkeypatch):
+    """A unit generated before 0.1.7 (`-m kankan up`) is rewritten without -m and keeps its PATH."""
+    fakebin("systemctl", "true")
+    fakebin("claude")
+    unit = agents_cmd.unit_path(bound)
+    unit.parent.mkdir(parents=True)
+    path = f"Environment=PATH={os.environ['PATH']}"
+    legacy = agents_cmd.unit_content(bound, {"claude": 1})  # current PATH: nothing missing
+    legacy = legacy.replace(f"{agents_cmd.unit_exec()} up", f"{sys.executable} -m kankan up")
+    unit.write_text(legacy)
+    check = by_name(doctor.run(bound.paths.repo, fix=False, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.MANUAL and "-m kankan" in check.detail
+    check = by_name(doctor.run(bound.paths.repo, fix=True, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.FIXED and not agents_cmd.unit_legacy(unit.read_text()) and path in unit.read_text()
+    assert by_name(doctor.run(bound.paths.repo, fix=False, online=False, types=("claude",)))["autostart"].status == doctor.OK
+    unit.write_text(legacy + "# mine\n")
+    check = by_name(doctor.run(bound.paths.repo, fix=True, online=False, types=("claude",)))["autostart"]
+    assert check.status == doctor.MANUAL and "-m kankan" in check.action and unit.read_text().endswith("# mine\n")
+
+
 def test_preflight_custom_adapter(kproject, fakebin):
     fakebin("my-codex")
     (kproject.paths.kankan_dir / "agents.json").write_text(json.dumps({"codex": {"command": ["my-codex"]}}))
@@ -356,15 +378,15 @@ def test_label_fix_keeps_concurrent_seat(bound, fake_trello, fakebin, monkeypatc
     from kankan import seats
     del fake_trello.state["labels"][bound.cfg.label_question]
     from kankan.trello import TrelloClient
-    real_snapshot = TrelloClient.snapshot
+    real_read = TrelloClient.read_board  # every board view goes through it (board reader)
     added = []
 
     def snapshot_and_add_seat(self, board_id):
         if not added:  # a launcher registers a seat after doctor read the configuration
             added.append(True)
             seats.ensure_created(bound, "claude-1", "claude")
-        return real_snapshot(self, board_id)
-    monkeypatch.setattr(TrelloClient, "snapshot", snapshot_and_add_seat)
+        return real_read(self, board_id)
+    monkeypatch.setattr(TrelloClient, "read_board", snapshot_and_add_seat)
     doctor.run(bound.paths.repo, fix=True, online=True)
     assert "claude-1" in load_config(bound.paths).seats
 

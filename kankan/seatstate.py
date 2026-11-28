@@ -32,6 +32,8 @@ class SeatState:
     main_moved_count: int = 0
     suspend_requested: Optional[dict] = None
     notes: Dict[str, str] = field(default_factory=dict)
+    turn_ended_at: Optional[float] = None  # Q&A pool: wall time of the agent's last turn end (qapool T§3)
+    qa_offer: Optional[dict] = None  # Q&A pool: the card the router offers this seat (qapool T§4)
 
     @classmethod
     def from_dict(cls, data: dict) -> "SeatState":

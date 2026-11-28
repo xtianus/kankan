@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from typing import List, Set, Tuple
 
+from kankan.boardreader import LIVE, max_age
 from kankan.errors import KankanError
 
 
 def kankan_member_id(project) -> str:
     """The id of kankan's own Trello account (recorded by init; read from Trello for older configurations)."""
     if not project.cfg.kankan_member_id:
-        me = project.trello.me()
+        me = project.board.me(max_age(86400))  # the token's member, kept per credentials
         project.cfg.kankan_member_id, project.cfg.kankan_username = me["id"], me["username"]
     return project.cfg.kankan_member_id
 
@@ -23,10 +24,10 @@ def kankan_member_id(project) -> str:
 def recipients(project, card_id: str) -> List[Tuple[str, str]]:
     """(id, username) of the people to notify about a card."""
     me = kankan_member_id(project)
-    creator = project.trello.card_creator(card_id)
+    creator = project.board.card_creator(card_id)
     if creator and creator[0] != me:
         return [creator]
-    return [a for a in project.trello.board_admins(project.cfg.board_id) if a[0] != me]
+    return [a for a in project.board.admins(max_age(project.cfg.poll_seconds)) if a[0] != me]
 
 
 def mention(project, card_id: str) -> str:
@@ -39,14 +40,14 @@ def mention(project, card_id: str) -> str:
     return " ".join(f"@{username}" for _, username in people if username)
 
 
-def input_members(project) -> Set[str]:
+def input_members(project, fresh=None) -> Set[str]:
     """Ids of the board members whose comments and card attachments reach the agent: every member but kankan's
     own account (spec §13.3, §14.3)."""
-    members = {member_id for member_id, _, _ in project.trello.board_members(project.cfg.board_id)}
+    members = {member_id for member_id, _, _ in project.board.members(fresh or LIVE)}  # pollers pass their interval
     return members - {kankan_member_id(project)}
 
 
-def answers(project, comments) -> list:
+def answers(project, comments, fresh=None) -> list:
     """Comments the agent should receive: written by a board member other than kankan's account, without kankan's
     marker. Comments by people outside the board are never forwarded (open commenting would let anyone type into
     the agent's terminal)."""
@@ -54,5 +55,5 @@ def answers(project, comments) -> list:
     candidates = [c for c in comments if c.member_id != kankan_member_id(project) and f"`{MARKER_PREFIX}" not in c.text]
     if not candidates:
         return []
-    members = input_members(project)
+    members = input_members(project, fresh)
     return [c for c in candidates if c.member_id in members]

@@ -6,10 +6,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
+from kankan.boardreader import LIVE, max_age
 from kankan import (boardconfig, boardsettings, cardsections, cardsections_feedback, gitutil, labels, messages, modelcheck,
                     qa, worktrees)
 from kankan.adapters import adapter_types
-from kankan.cards import CardMeta, Phase, converge, parse_refs, target_list_for, transition
+from kankan.cards import CardMeta, Phase, converge, implemented_destination, parse_refs, target_list_for, transition
 from kankan.config import check_lists, check_registry, project_lock
 from kankan.errors import KankanError, Status
 from kankan.refstore import CARD_PREFIX, RefValue
@@ -60,7 +61,7 @@ def _own_choices(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue
             card = snap.cards.get(card_id)
             if card is None or card.list_id not in (meta.get("target_list"), meta.get("from_list")):
                 # §14.6: moved out of the seat's lists, archived or deleted by the user
-                fetched = card or project.trello.card(card_id) or _gone_card(card_id, meta)
+                fetched = card or project.board.card(card_id, LIVE) or _gone_card(card_id, meta)
                 dirty = worktrees.dirty_files(project.paths.seat_worktree(lease.seat))
                 result.append(Choice("moved_wip" if dirty else "moved_yield", fetched, value))
                 continue
@@ -114,14 +115,22 @@ def backlog_candidates(project, snap: Snapshot, refs: Dict[str, RefValue]) -> Li
 
 def choose(project, lease: Lease, snap: Snapshot, refs: Dict[str, RefValue], skip: Optional[Set[str]] = None
            ) -> Optional[Choice]:
-    """Priority (§9.1): own work, then review, then Backlog from the top."""
+    """Priority (§9.1): own work, then review, then Backlog from the top; a seat being removed takes only its own
+    work (seat T§5)."""
     skip = skip or set()
-    for group in (_own_choices(project, lease, snap, refs), review_candidates(project, lease, snap, refs),
-                  backlog_candidates(project, snap, refs)):
-        for choice in group:
+    groups = [lambda: _own_choices(project, lease, snap, refs)]
+    if not _removing(project.cfg, lease.seat):
+        groups += [lambda: review_candidates(project, lease, snap, refs), lambda: backlog_candidates(project, snap, refs)]
+    for group in groups:
+        for choice in group():
             if choice.card.id not in skip:
                 return choice
     return None
+
+
+def _removing(cfg, seat: str) -> bool:
+    seat_cfg = cfg.seats.get(seat)
+    return seat_cfg is not None and bool(seat_cfg.removing)
 
 
 def _check_sections(project, card: Card) -> None:
@@ -168,7 +177,7 @@ def claim_impl(project, lease: Lease, choice: Choice, pair=None) -> Optional[Cla
             qa.record_remove(project.paths, card.id)  # questions T§2: right after the claim's transaction
         except OSError as err:  # the claim stands: a stale entry only makes reconcile report the card
             project.log("qa_record_remove_failed", card=card.id, error=str(err))
-    fresh = project.trello.card(card.id)
+    fresh = project.board.card(card.id, LIVE)
     if fresh is not None and has_hold(project, fresh):
         park = CardMeta.from_dict(result.ref.meta).evolve(phase=Phase.PARKED.value, owner=None, cause="yield",
                                                            target_list=project.cfg.backlog)
@@ -222,12 +231,14 @@ def claim_review(project, lease: Lease, choice: Choice, pair=None) -> Optional[C
         target_list=target_list_for(project.cfg, Phase.REVIEW.value, lease.seat, None))
     result = transition(project, lease, card, value, meta, messages.REVIEW_CLAIMED.format(
         seat=lease.seat, branch=meta.branch, implementer=meta.implementer) + _claim_selection(lease, pair, "review"))
-    fresh = project.trello.card(card.id)
+    fresh = project.board.card(card.id, LIVE)
     if fresh is not None and has_hold(project, fresh):
-        back = CardMeta.from_dict(result.ref.meta).evolve(
-            phase=Phase.IMPLEMENTED.value, owner=None, session=None,
-            target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None, meta.implementer))
-        transition(project, lease, card, result.ref, back, messages.HOLD_AFTER_CLAIM_REVIEW)
+        with project_lock(project.paths):  # seat T§3: the destination of this moment
+            phase, target, cause = implemented_destination(project.reload_config(), meta.implementer)
+            back = CardMeta.from_dict(result.ref.meta).evolve(phase=phase, owner=None, session=None, cause=cause,
+                                                               target_list=target)
+            transition(project, lease, card, result.ref, back, messages.HOLD_AFTER_CLAIM_REVIEW
+                       if phase == Phase.IMPLEMENTED.value else messages.HOLD_AFTER_CLAIM_REVIEW_BACKLOG)
         return None
     worktrees.checkout(worktree, meta.branch)
     return Claimed(CardMeta.from_dict(result.ref.meta), result.moved)
@@ -258,11 +269,11 @@ def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[d
     Returns the task dict stored in seat state, or None when nothing was assigned.
     """
     cfg = project.reload_config()
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(max_age(cfg.poll_seconds))  # before the lock (board reader T§8)
     check_registry(cfg, snap.desc)
     check_lists(cfg, snap.lists)
     if converge(project, lease, snap):
-        snap = project.trello.snapshot(cfg.board_id)
+        snap = project.board.snapshot(max_age(cfg.poll_seconds))  # the steps marked their cards
     adapters = boardsettings.adapters_for(project.paths)
     boardsettings.apply_read(project, boardsettings.from_snapshot(project, snap), adapters)
     boardsettings.drain_actions(project)
@@ -291,11 +302,14 @@ def tick(project, lease: Lease, *, defer_assignment: bool = False) -> Optional[d
                 seats.verify_owner(project, lease.seat, lease.session)
                 if load_state(project.paths, lease.seat).stop_requested:
                     return None
-                fresh = project.trello.snapshot(cfg.board_id)
+                fresh = project.board.snapshot(LIVE)
                 check_registry(cfg, fresh.desc)
                 current_refs = card_refs(project)
-                # Recheck eligibility after any outside-lock model check.
-                candidates = _own_choices(project, lease, fresh, current_refs) + review_candidates(project, lease, fresh, current_refs) + backlog_candidates(project, fresh, current_refs)
+                # Recheck eligibility after any outside-lock model check; the flag of a removal is written by
+                # another process, so the configuration is read again here (seat T§5).
+                candidates = _own_choices(project, lease, fresh, current_refs)
+                if not _removing(project.reload_config(), lease.seat):
+                    candidates += review_candidates(project, lease, fresh, current_refs) + backlog_candidates(project, fresh, current_refs)
                 updated = next((candidate for candidate in candidates if candidate.card.id == choice.card.id and candidate.kind == choice.kind), None)
                 if updated is None:
                     continue
@@ -329,6 +343,7 @@ def _prepare(project, lease: Lease, choice: Choice, pair=None) -> Optional[dict]
     if kind == "hold_yield":
         from kankan import agentcmds
         agentcmds.kankan_yield(project, lease, choice.card, choice.ref)
+        _forget_task(project, lease, choice.card.id)
         project.log("hold_yield", card=choice.card.id)
         return None
     if kind == "impl":
@@ -348,6 +363,7 @@ def _prepare(project, lease: Lease, choice: Choice, pair=None) -> Optional[dict]
         if kind == "moved_yield":
             from kankan import agentcmds
             agentcmds.kankan_yield(project, lease, None if cause == "user_deleted" else choice.card, choice.ref, cause)
+            _forget_task(project, lease, choice.card.id)
             project.log("user_move_yield", card=choice.card.id, cause=cause)
             return None
         task = store(project, lease, "hold_wip", choice.card, choice.ref.meta.get("branch"), resumed=True)
@@ -366,7 +382,7 @@ def _validate_prepared(project, lease: Lease, prepared: dict):
     seats.verify_owner(project, lease.seat, lease.session)
     if prepared.get('session') != lease.session or load_state(project.paths, lease.seat).stop_requested:
         return None
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     check_registry(cfg, snap.desc)
     check_lists(cfg, snap.lists)
     value = project.refs.read(card_ref(prepared['card']))
@@ -375,7 +391,7 @@ def _validate_prepared(project, lease: Lease, prepared: dict):
     role = 'review' if value.meta.get('phase') == 'review' else 'implementation'
     if value.meta.get('phase') not in ('impl', 'review') or prepared.get('role', role) != role:
         return None
-    card = snap.cards.get(prepared['card']) or project.trello.card(prepared['card'])
+    card = snap.cards.get(prepared['card']) or project.board.card(prepared['card'], LIVE)
     gone = card is None or card.closed or card.list_id != value.meta.get('target_list')
     held = card is not None and has_hold(project, card)
     task = dict(prepared)
@@ -432,7 +448,7 @@ def release_unsent(project, lease: Lease, prepared: dict) -> bool:
             return False
         if worktrees.dirty_files(project.paths.seat_worktree(lease.seat)):
             return False
-        card = project.trello.card(prepared['card'])
+        card = project.board.card(prepared['card'], LIVE)
         if card is None or card.closed or card.list_id != value.meta.get('target_list'):
             return False
         agentcmds.kankan_yield(project, lease, card, value)
@@ -443,6 +459,16 @@ def release_unsent(project, lease: Lease, prepared: dict) -> bool:
         update_state(project.paths, lease.seat, clear)
     project.log("stop_yield", seat=lease.seat, card=prepared['card'])
     return True
+
+
+def _forget_task(project, lease: Lease, card_id: str) -> None:
+    """The seat yielded the card without its agent: drop the task a previous launcher run left in the seat state,
+    so `status` and the agent commands no longer see it (the cleanup runs only while the launcher has no task)."""
+    def clear(state):
+        if state.task and state.task.get('card') == card_id:
+            state.task = None
+            state.signal = None
+    update_state(project.paths, lease.seat, clear)
 
 
 def _user_cause(project, card: Card) -> str:

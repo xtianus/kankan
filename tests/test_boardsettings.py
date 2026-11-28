@@ -55,20 +55,20 @@ def test_shared_poll_and_no_fix_are_read_only(kproject, fake_trello, monkeypatch
     from kankan import boardsettings
     card, adapters = prepare(kproject, fake_trello)
     statefile = kproject.paths.kankan_dir / 'board-settings.json'
-    before = set(kproject.paths.kankan_dir.iterdir())
+    before = set(kproject.paths.kankan_dir.iterdir()) | {kproject.paths.kankan_dir / 'board-cache'}  # reads fill the cache
     boardsettings.apply_read(kproject, boardsettings.from_snapshot(kproject, kproject.trello.snapshot(kproject.cfg.board_id)), adapters, write=False)
-    assert not statefile.exists() and set(kproject.paths.kankan_dir.iterdir()) == before
+    assert not statefile.exists() and set(kproject.paths.kankan_dir.iterdir()) <= before
     now = [0.0]
     monkeypatch.setattr(boardsettings.time, 'time', lambda: now[0])
     boardsettings.poll(kproject, adapters)
-    count = sum(path.endswith('/cards') and method == 'GET' for method, path in fake_trello.requests)
+    count = sum(path == f'/1/boards/{kproject.cfg.board_id}' and method == 'GET' for method, path in fake_trello.requests)
     boardsettings.poll(kproject, adapters)
     now[0] = 29
     boardsettings.poll(kproject, adapters)
-    assert sum(path.endswith('/cards') and method == 'GET' for method, path in fake_trello.requests) == count
+    assert sum(path == f'/1/boards/{kproject.cfg.board_id}' and method == 'GET' for method, path in fake_trello.requests) == count
     now[0] = 30
     boardsettings.poll(kproject, adapters)
-    assert sum(path.endswith('/cards') and method == 'GET' for method, path in fake_trello.requests) == count+1
+    assert sum(path == f'/1/boards/{kproject.cfg.board_id}' and method == 'GET' for method, path in fake_trello.requests) == count+1
 
 
 def test_late_model_result_does_not_replace_new_selection(kproject, fake_trello):

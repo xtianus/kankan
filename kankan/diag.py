@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, seats, workflow
+from kankan.boardreader import LIVE
+from kankan import boardconfig, boardsettings, cardsections, cardsections_feedback, clock, messages, modelcheck, qapool, seats, workflow
 from kankan.adapters import ModelEffort, adapter_types
 from kankan.config import qa_list_open
 from kankan.seatstate import load_state
@@ -21,9 +23,9 @@ def _age(created: str) -> int:
 
 
 def _seat_order(name: str) -> tuple:
-    """Seats by type, work seats by number, the Q&A seat after them."""
+    """Seats by type, work seats by number, the Q&A pool after them (the router, then the members by number)."""
     agent_type, suffix = name.rsplit("-", 1)
-    return (agent_type, 1, 0) if suffix == "qa" else (agent_type, 0, int(suffix))
+    return (agent_type, 1, qapool.member_number(name)) if suffix.startswith("qa") else (agent_type, 0, int(suffix))
 
 
 def status(project) -> dict:
@@ -33,16 +35,18 @@ def status(project) -> dict:
         state = load_state(project.paths, name)
         seat_rows.append({"seat": name, "type": cfg.seats[name].type, "liveness": seats.liveness(project, name),
                           "launcher_state": state.launcher_state, "task": state.task,
-                          "stop_requested": state.stop_requested, "running_selection": None})
+                          "stop_requested": state.stop_requested, "running_selection": None,
+                          "removing": cfg.seats[name].removing, "remove_error": cfg.seats[name].remove_error})
         # A launcher killed without its shutdown leaves the field behind: only a live seat runs an agent.
         if seat_rows[-1]["liveness"] == "alive":
             seat_rows[-1]["running_selection"] = state.running_selection
     # the Q&A seat implements and reviews nothing: only work seats make a type active
     types = {row["type"] for row in seat_rows if row["liveness"] == "alive" and cfg.seats[row["seat"]].role != "qa"}
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     refs = workflow.card_refs(project)
     reasons = workflow.waiting_reasons(project, snap, refs, types=types)
-    waiting = [{"card": card_id, "short": snap.cards[card_id].short, "title": snap.cards[card_id].name,
+    waiting = [{"card": card_id, "short": snap.cards[card_id].short,
+                "title": qapool.plain_title(project.paths, snap.cards[card_id]),
                 "reason": reason} for card_id, reason in sorted(reasons.items(), key=lambda i: snap.cards[i[0]].pos)]
     for row in waiting:
         if row["reason"] == "invalid_headings":  # card instructions T§3
@@ -98,9 +102,47 @@ def _qa_status(project, seat_rows: List[dict], snap, refs, reasons: Dict[str, st
         warning = messages.QA_CARDS_WAIT
     else:
         warning = None
+    rows = {r["seat"]: r for r in seat_rows}
+    pool = [_pool_row(project, name, rows.get(name) or {}, snap, refs) for name in qapool.pool_seats(cfg)]
     return {"seat": seat, "liveness": row["liveness"] if row else None,
             "launcher_state": row["launcher_state"] if row else None, "card": card,
-            "short": active.meta.get("short") if active else None, "turn": turn, "queue": queue, "warning": warning}
+            "short": active.meta.get("short") if active else None, "turn": turn, "queue": queue, "warning": warning,
+            "pool": pool, "waiting_cards": _qa_waiting_cards(project, snap, refs, rows)}
+
+
+def _pool_row(project, seat: str, row: dict, snap, refs) -> dict:
+    """A seat of the Q&A pool: its card (``qa`` ref), launcher state and prompt cache (qapool T§11)."""
+    value = next((v for v in refs.values() if v.meta.get("phase") == "qa" and v.meta.get("owner") == seat), None)
+    card_id = value.meta.get("card") if value else None
+    card = snap.cards.get(card_id) if card_id else None
+    when, exact = qapool.expiry(project, seat)
+    warm = when is not None and when > time.time()
+    return {"seat": seat, "liveness": row.get("liveness"), "launcher_state": row.get("launcher_state"),
+            "card": card_id, "short": value.meta.get("short") if value else None,
+            "title": qapool.plain_title(project.paths, card) if card else None,
+            "cache": "warm" if warm else "cold", "expires_at": when,
+            "until": time.strftime("%H:%M", time.localtime(when)) if warm else None, "exact": exact}
+
+
+def _qa_waiting_cards(project, snap, refs, rows: Dict[str, dict]) -> List[dict]:
+    """The open cards of ``Q&A`` without ``HOLD`` needing an agent, in wait-key order (qapool T§5 step 3)."""
+    cfg = project.cfg
+    if not cfg.qa_list:
+        return []
+    pool = set(qapool.pool_seats(cfg))
+    record = qapool.load_record(project.paths)
+    result = []
+    for card in snap.cards.values():
+        if card.list_id != cfg.qa_list or card.closed or cfg.label_hold in card.label_ids:
+            continue
+        value = refs.get(card.id)
+        owner = value.meta.get("owner") if value is not None and value.meta.get("phase") == "qa" else None
+        holder_alive = owner in pool and (rows.get(owner) or {}).get("liveness") == "alive"
+        entry = record.get(card.id) or qapool.blank_entry()
+        if qapool.needs_agent(entry, value, holder_alive):
+            result.append({"card": card.id, "short": card.short, "title": qapool.plain_title(project.paths, card),
+                           "wait_key": qapool.wait_key(card.id, entry)})
+    return sorted(result, key=lambda item: (qa._when(item["wait_key"]), item["card"]))
 
 
 def branch_divergence(project) -> dict:
@@ -131,7 +173,11 @@ def status_text(data: dict) -> str:
         if running:
             task_text += messages.STATUS_RUNNING.format(**running)
         stop = " (stop requested)" if row["stop_requested"] else ""
+        if row.get("removing"):
+            stop += f" removing ({row['removing']})"
         lines.append(f"  {row['seat']:<10} {row['liveness']:<11} {row['launcher_state']:<13} {task_text}{stop}")
+        if row.get("remove_error"):
+            lines.append(f"    {messages.STATUS_REMOVE_ERROR.format(error=row['remove_error'], seat=row['seat'])}")
     branches = data.get("branches") or {}
     if branches.get("user"):
         lines.append(f"Branches: {branches['integration']} is {branches['ahead']} commits ahead / "
@@ -163,6 +209,19 @@ def status_text(data: dict) -> str:
             lines.append(messages.STATUS_QA_NONE.format(queue=qa_row["queue"]))
         if qa_row["warning"]:
             lines.append(qa_row["warning"])
+        if qa_row.get("pool"):
+            lines.append(messages.STATUS_QA_POOL)
+        for seat in qa_row.get("pool") or []:
+            card = f"{seat['short']} {seat['title']}" if seat["short"] and seat["title"] else seat["short"] or "-"
+            cache = messages.STATUS_QA_WARM.format(time=seat["until"], kind="exact" if seat["exact"] else "estimated") \
+                if seat["cache"] == "warm" else messages.STATUS_QA_COLD
+            lines.append(messages.STATUS_QA_POOL_SEAT.format(seat=seat["seat"], liveness=seat["liveness"] or "-",
+                                                             state=seat["launcher_state"] or "-", card=card,
+                                                             cache=cache))
+        if qa_row.get("waiting_cards"):
+            lines.append(messages.STATUS_QA_WAITING)
+        for card in qa_row.get("waiting_cards") or []:
+            lines.append(messages.STATUS_QA_WAITING_CARD.format(**card))
     return "\n".join(lines)
 
 
@@ -252,7 +311,7 @@ def _fix_stranded(project) -> List[Issue]:
     # called under the project lock: fresh refs (malformed ones count as present) and lock-free liveness probes
     refs = {ref[len(CARD_PREFIX):]: True for ref in project.refs.list_raw(CARD_PREFIX)}
     liveness = {name: seats._liveness(project, name) for name in project.reload_config().seats}
-    snap = project.trello.snapshot(project.cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     for card, list_name, _ in stranded_cards(project, snap, refs, liveness):
         try:
             project.trello.move_card(card.id, project.cfg.backlog, "top")
@@ -266,6 +325,29 @@ def _fix_stranded(project) -> List[Issue]:
     return fixed
 
 
+def _fix_parked(project) -> List[Issue]:
+    """Under the project lock: accept where the user put the ``parked`` cards whose move is done (§10.4), from
+    fresh refs and a live snapshot."""
+    fixed: List[Issue] = []
+    snap = project.board.snapshot(LIVE)
+    for ref, value in cards.parse_refs(project).items():
+        if isinstance(value, KankanError):
+            continue
+        card_id = ref[len(CARD_PREFIX):]
+        card = snap.cards.get(card_id)
+        target = value.meta.get("target_list")
+        if cards.settle_parked(project, ref, value, card):
+            fixed.append(Issue("parked_target_cleared", card_id,
+                               f"{card.short} stays in {_list_name(snap, card.list_id)} (expected {_list_name(snap, target)})",
+                               True))
+    return fixed
+
+
+def _list_name(snap, list_id: Optional[str]) -> str:
+    lst = snap.lists.get(list_id) if list_id else None
+    return lst.name if lst is not None else str(list_id)
+
+
 def _mismatch_memory(project) -> dict:
     return read_json(project.paths.kankan_dir / "reconcile.json", {}) or {}
 
@@ -274,7 +356,7 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
     """Report inconsistencies (§15.3); with ``fix`` repair only the certain cases."""
     cfg = project.reload_config()
     issues: List[Issue] = []
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     try:
         check_registry(cfg, snap.desc)
     except KankanError as err:
@@ -297,7 +379,7 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
         meta = value.meta
         card = snap.cards.get(card_id)
         if card is None:
-            card = fetched.setdefault(card_id, project.trello.card(card_id))
+            card = fetched.setdefault(card_id, project.board.card(card_id, LIVE))
         if meta.get("phase") == cards.Phase.QA.value:
             if meta.get("owner") not in cfg.seats:  # an unfinished replacement whose new seat was removed (T§2)
                 issues.append(Issue("qa_owner_unregistered", card_id,
@@ -380,12 +462,17 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
     for name in qa.conversations(project.paths):
         if name not in ref_conversations:
             issues.append(Issue("qa_conversation_dir_without_ref", name, "no card ref names this conversation"))
-    # old Error/Question labels
+    # old Error/Question labels, only while the card still has them: the user may have removed them
     limit = LABEL_AGE_HOURS * 3600
     for name in cfg.seats:
         for card_id, causes in load_state(project.paths, name).label_causes.items():
             for label_id, entry in causes.items():
                 if label_id in (cfg.label_error, cfg.label_question) and _age(entry.get("at", "")) > limit:
+                    card = snap.cards.get(card_id)
+                    if card is None:
+                        card = fetched.setdefault(card_id, project.board.card(card_id, LIVE))
+                    if card is None or label_id not in card.label_ids:
+                        continue
                     issues.append(Issue("old_label", card_id, f"{entry.get('cause')} since {entry.get('at')}"))
     for card_id, record in cardsections_feedback.load(project.paths)["cards"].items():
         written = record.get("error_write_started") or record.get("error_confirmed")
@@ -400,9 +487,31 @@ def reconcile(project, fix: bool = False, *, record: bool = True) -> List[Issue]
                     issues.append(Issue("push_failed", event["merge"], "the merge is not on origin"))
     for path in worktrees.main_checked_out(project.paths.repo, cfg.integration_branch):
         issues.append(Issue("main_checked_out", str(path), f"{cfg.integration_branch} is checked out"))
+    # answer-record entries of archived or deleted cards (qapool T§5 step 3), read outside every lock
+    answer_gone = _answer_record_gone(project, snap, fetched)
+    for card_id, detail in answer_gone.items():
+        issues.append(Issue("qa_answer_record_stale", card_id, detail))
     if fix:
-        issues += _fix(project, snap, refs, liveness, qa_ended)
+        issues += _fix(project, snap, refs, liveness, qa_ended, answer_gone)
     return issues
+
+
+def _answer_record_gone(project, snap, fetched: dict) -> Dict[str, str]:
+    """The answer-record entries whose card is archived or deleted, one card read each for the cards missing from
+    the board snapshot, as ``{card_id: detail}``."""
+    gone = {}
+    for card_id in sorted(qapool.load_record(project.paths)):
+        card = snap.cards.get(card_id)
+        if card is None:
+            try:
+                card = fetched[card_id] if card_id in fetched else project.board.card(card_id, LIVE)
+            except KankanError as err:
+                project.log("qa_answer_record_read_failed", card=card_id, error=err.message)
+                continue
+            fetched[card_id] = card
+        if card is None or card.closed:
+            gone[card_id] = "the card was deleted" if card is None else "the card is archived"
+    return gone
 
 
 def _all_merges(project):
@@ -410,7 +519,7 @@ def _all_merges(project):
     return merges_on_main(project.paths.repo, project.cfg.integration_branch, 100000)
 
 
-def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
+def _fix(project, snap, refs, liveness, qa_ended=frozenset(), answer_gone: Optional[Dict[str, str]] = None) -> List[Issue]:
     fixed: List[Issue] = []
     cfg = project.cfg
     gone = _qa_record_gone(project, snap)
@@ -428,13 +537,17 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset()) -> List[Issue]:
             if meta.get("phase") == "integrated" and card is not None and card.list_id == cfg.done:
                 if cards.delete_integrated_ref(project, f"{CARD_PREFIX}{card_id}", value):
                     fixed.append(Issue("integrated_ref_deleted", card_id, "card already in Done", True))
+        fixed += _fix_parked(project)
         fixed += _fix_stranded(project)
         fixed += _fix_attachment_dirs(project)
         fixed += _fix_qa_record(project, gone)
+        answer_gone = answer_gone or {}
+        for card_id in qapool.drop(project, answer_gone):  # the answer-record lock after the project lock (T§4)
+            fixed.append(Issue("qa_answer_record_entry_removed", card_id, answer_gone[card_id], True))
         fixed += _fix_conversation_dirs(project)
         for label_id in labels.gc_resume_labels(project):
             fixed.append(Issue("resume_label_deleted", label_id, "unused or expired", True))
-        snap = project.trello.snapshot(cfg.board_id)
+        snap = project.board.snapshot(LIVE)
         for card in snap.cards.values():
             if card.list_id != cfg.done:
                 continue
@@ -471,7 +584,7 @@ def _qa_record_gone(project, snap) -> Dict[str, tuple]:
     for card_id in sorted(qa.recorded(project.paths) - set(snap.cards)):
         try:
             before = project.refs.read(card_ref(card_id))
-            card = project.trello.card(card_id)
+            card = project.board.card(card_id, LIVE)
         except KankanError as err:
             project.log("qa_record_read_failed", card=card_id, error=err.message)
             continue
@@ -549,7 +662,7 @@ def release_force(project, card: str) -> dict:
     """Bring a card's ref to ``parked`` (cause admin_release); the card stays where it is."""
     with project_lock(project.paths):
         card_id, value = _find_ref(project, card)
-        trello_card = project.trello.card(card_id) or workflow._gone_card(card_id, value.meta)
+        trello_card = project.board.card(card_id, LIVE) or workflow._gone_card(card_id, value.meta)
         new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None,
                                                     cause="admin_release", target_list=None)
         transition(project, AdminActor("release --force"), trello_card, value, new, messages.ADMIN_RELEASED)
@@ -577,78 +690,6 @@ def seat_recover(project, seat: str, kill: bool, comment: Optional[str] = None) 
                 project.log("comment_failed", error=err.message)
         project.log("admin_seat_recover", seat=seat, kill=kill)
     return {"seat": seat, "killed": kill}
-
-
-def _remove_worktree(project, seat: str) -> bool:
-    return worktrees.remove_if_clean(project.paths.repo, project.paths.seat_worktree(seat))
-
-
-def _qa_seat_remove(project, seat: str) -> dict:
-    """``seat remove <type>-qa`` (questions F§6 §7.1): refused unless the seat is free; its conversation ends
-    (``qa.end_admin``, one project lock hold per conversation); no list is archived."""
-    def check(cfg) -> None:
-        if seat not in cfg.seats:
-            raise KankanError(Status.USAGE_ERROR, messages.UNKNOWN_SEAT.format(seat=seat))
-        state = seats.liveness(project, seat)
-        if state != "free":
-            template = {"dead": messages.QA_SEAT_REMOVE_DEAD,
-                        "unavailable": messages.QA_SEAT_REMOVE_UNAVAILABLE}.get(state, messages.QA_SEAT_REMOVE_RUNNING)
-            raise KankanError(Status.NEEDS_ACTION, template.format(seat=seat, state=state),
-                              {"blockers": [f"the seat is {state}"]})
-    with qa.lifecycle_lock(project.paths):  # never between the stages of a replacement
-        with project_lock(project.paths):
-            check(project.reload_config())
-        qa.end_admin(project, seat)
-        with project_lock(project.paths):
-            cfg = project.reload_config()
-            check(cfg)
-            held = [v.meta.get("short") for v in workflow.card_refs(project).values() if v.meta.get("owner") == seat]
-            if held:  # a conversation changed meanwhile: end_admin ends it at the next run
-                blocker = messages.SEAT_HOLDS_CARDS.format(cards=", ".join(held))
-                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_BLOCKED.format(seat=seat, blockers=blocker),
-                                  {"blockers": [blocker]})
-            del cfg.seats[seat]
-            from kankan.config import save_config
-            save_config(project.paths, cfg)
-            qa.drop_stale_record(project, None)  # a replacement towards this seat can no longer complete
-            removed = _remove_worktree(project, seat)
-            project.log("seat_removed", seat=seat, worktree_removed=removed)
-    return {"seat": seat, "worktree_removed": removed}
-
-
-def seat_remove(project, seat: str) -> dict:
-    validate_seat(seat)
-    if seats.is_qa(seat):
-        return _qa_seat_remove(project, seat)
-    with project_lock(project.paths):
-        cfg = project.reload_config()
-        if seat not in cfg.seats:
-            raise KankanError(Status.USAGE_ERROR, f"unknown seat {seat}")
-        blockers = []
-        state = seats.liveness(project, seat)
-        if state != "free":
-            blockers.append(f"the seat is {state}")
-        held = [v.meta.get("short") for v in workflow.card_refs(project).values()
-                if seat in (v.meta.get("owner"),) or (v.meta.get("implementer") == seat and v.meta.get("phase") == "implemented")]
-        if held:
-            blockers.append("it holds cards: " + ", ".join(held))
-        snap = project.trello.snapshot(cfg.board_id)
-        seat_cfg = cfg.seats[seat]
-        lists = (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review)
-        in_lists = [c.short for c in snap.cards.values() if c.list_id in lists]
-        if in_lists:
-            blockers.append("its lists are not empty: " + ", ".join(in_lists))
-        if blockers:
-            raise KankanError(Status.NEEDS_ACTION, f"cannot remove {seat}: " + "; ".join(blockers),
-                              {"blockers": blockers})
-        for list_id in lists:
-            project.trello.archive_list(list_id)
-        del cfg.seats[seat]
-        from kankan.config import save_config
-        save_config(project.paths, cfg)
-        removed = _remove_worktree(project, seat)
-        project.log("seat_removed", seat=seat, worktree_removed=removed)
-    return {"seat": seat, "worktree_removed": removed}
 
 
 def purge_remote(project, remote: str = "origin") -> dict:

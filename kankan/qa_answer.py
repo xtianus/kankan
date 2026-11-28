@@ -1,7 +1,8 @@
 """Q&A posting (questions T§6): chunking, the pending operation, ``answer``, ``handoff``, the checkout checks and
 the completion of a pending operation after a crash.
 
-Lock order: the conversation lock (``op.lock``), then the project lock, then the seat-state lock. The project
+Lock order: the conversation lock (``op.lock``), then the project lock, then the seat-state lock, then the
+answer-record lock (qapool T§4). The project
 lock is never held while posting chunks; each hold is one transaction (``answer``) or ``qa.handoff_transition``
 (one card read, one transaction, one verified move).
 """
@@ -12,7 +13,7 @@ import hashlib
 import os
 from typing import List, Optional, Tuple
 
-from kankan import faults, gitutil, labels, messages, notify, qa, worktrees
+from kankan import faults, gitutil, labels, messages, notify, qa, qapool, worktrees
 from kankan.agentcmds import write_signal
 from kankan.cards import CardMeta
 from kankan.config import atomic_write_json, project_lock, read_json
@@ -61,15 +62,16 @@ def _cut(rest: str, limit: int) -> Tuple[int, int]:
     return limit, 0
 
 
-def chunks(text: str, *, mention: str, op_ids: List[str]) -> List[str]:
+def chunks(text: str, *, mention: str, op_ids: List[str], note: str = "") -> List[str]:
     """The comment texts of ``text`` (questions T§6): each ``trello.comment_text(chunk, op_ids[i])`` is at most
     ``COMMENT_MAX`` characters as Trello counts them (UTF-16 code units). A text that fits is one comment without a
-    prefix; a longer one gets ``i/m`` prefixes. Only the last chunk carries ``mention`` (after a blank line). Raises
+    prefix; a longer one gets ``i/m`` prefixes. Only the last chunk carries ``mention`` and then ``note`` (each after a
+    blank line: the cache expiry note of qapool T§7, counted in the budget). Raises
     ``USAGE_ERROR`` for an empty text and ``_TooFewOpIds`` when ``op_ids`` has fewer entries than the chunks."""
     text = text.rstrip()
     if not text.strip():
         raise KankanError(Status.USAGE_ERROR, messages.QA_EMPTY)
-    tail = f"\n\n{mention}" if mention else ""
+    tail = (f"\n\n{mention}" if mention else "") + (f"\n\n{note}" if note else "")
     if _units(comment_text(text + tail, op_ids[0])) <= COMMENT_MAX:
         return [text + tail]
     digits = len(str(len(op_ids)))
@@ -100,13 +102,14 @@ def op_id(kind: str, conversation: str, turn: str, index: int) -> str:
     return f"{KINDS[kind]}-{conversation}-{turn}-{index}"
 
 
-def _plan(text: str, mention: str, kind: str, conversation: str, turn: str) -> Tuple[List[str], List[str]]:
+def _plan(text: str, mention: str, kind: str, conversation: str, turn: str,
+          note: str = "") -> Tuple[List[str], List[str]]:
     """The chunk texts and their op-ids."""
     count = len(text) // 8000 + 2
     while True:
         ops = [op_id(kind, conversation, turn, index) for index in range(1, count + 1)]
         try:
-            pieces = chunks(text, mention=mention, op_ids=ops)
+            pieces = chunks(text, mention=mention, op_ids=ops, note=note)
         except _TooFewOpIds:
             count *= 2
             continue
@@ -125,7 +128,8 @@ def _pending_path(paths, conversation: str):
 
 def read_pending(paths, conversation: str) -> Optional[dict]:
     """``pending.json``: ``kind``, ``turn``, ``hash``, the turn's ``inputs`` and ``context``, the ``chunks``,
-    their ``ops`` and the comment IDs already ``posted``; None when no operation is pending."""
+    their ``ops``, the comment IDs already ``posted`` and their ``dates`` (by ID; absent in files of earlier
+    versions); None when no operation is pending."""
     return read_json(_pending_path(paths, conversation), None)
 
 
@@ -212,6 +216,8 @@ def _post_chunks(project, lease, task: dict, pending: dict, ref_oid: str) -> Lis
         qa.check_seat(project, lease)
         comment = project.trello.comment_once(task["card"], piece, op)
         pending["posted"].append(comment.id)
+        if comment.date:  # the answer record's ``answered`` date, known without a read under the project lock
+            pending.setdefault("dates", {})[comment.id] = comment.date
         _save_pending(project.paths, pending)
         faults.point("qa_after_chunk")
     return list(pending["posted"])
@@ -242,7 +248,8 @@ def _post(ctx, task: dict, text: str, turn: str, kind: str) -> Tuple[List[str], 
     if pending is None:
         if not text.strip():
             raise KankanError(Status.USAGE_ERROR, messages.QA_EMPTY)
-        pieces, ops = _plan(text, notify.mention(project, task["card"]), kind, conversation, turn)
+        note = qapool.note_text(project, ctx.seat) if kind == "answer" else ""  # qapool T§7: planned once
+        pieces, ops = _plan(text, notify.mention(project, task["card"]), kind, conversation, turn, note)
         pending = {"kind": kind, "turn": turn, "hash": digest, "conversation": conversation,
                    "inputs": turn_data.get("inputs") or {"comments": [], "attachments": []},
                    "context": turn_data.get("context"), "chunks": pieces, "ops": ops, "posted": []}
@@ -254,7 +261,7 @@ def post(ctx, text: str, turn: str, kind: str) -> List[str]:
     """Steps 1–3 of ``answer`` (``kind="answer"``) or ``handoff``: validate, record the pending operation, post
     the chunks not yet posted. Returns the comment IDs of every chunk."""
     task = qa_task(ctx, kind)
-    with qa.conversation_lock(ctx.project.paths, task["conversation"], LOCK_TIMEOUT):
+    with qa.card_conversation_lock(ctx.project, task["card"], task["conversation"], LOCK_TIMEOUT):
         return _post(ctx, task, text, turn, kind)[0]
 
 
@@ -273,11 +280,32 @@ def _record_completed(project, pending: dict) -> None:
     _drop_pending(project.paths, conversation)
 
 
-def _finish(project, lease, task: dict, pending: dict) -> None:
+def _record_delivered(project, task: dict, pending: dict) -> None:
+    """The answer record (qapool T§5 step 3), under the answer-record lock taken last: the turn's inputs and context
+    are delivered and the last posted chunk is the newest answer. The dates come from ``pending.json``: those of the
+    inputs saved with the turn and those of the chunks as they were posted. A ``pending.json`` of an earlier version
+    has none: its comments then count as delivered up to the answer's date when known (the accepted limitation of
+    ``qa.first_turn``: a comment posted while an answer was written counts as seen), else ``delivered.comment``
+    stays."""
+    inputs = qa.Inputs.from_dict(pending.get("inputs"))
+    context = qa.Inputs.from_dict(pending.get("context"))
+    posted = list(pending.get("posted") or [])
+    last = posted[-1] if posted else None
+    answer_date = (pending.get("dates") or {}).get(last) if last else None
+    dates = {**context.dates, **inputs.dates}
+    comments = list(inputs.comments) + [c for c in context.comments if c not in inputs.comments]
+    if answer_date:
+        dates.update({c: answer_date for c in comments if not dates.get(c)})
+    given = qa.Inputs(comments, sorted(set(inputs.attachments) | set(context.attachments)), dates)
+    qapool.turn_ended(project, task["card"], given, answered={"id": last, "date": answer_date} if last else None)
+
+
+def _finish(project, lease, task: dict, pending: dict, admin: bool = False) -> None:
     """Step 4 under the project lock (the caller holds the conversation lock, so the turn token is stable):
     ``answer``: the ``covered`` transaction (skipped when already done); ``handoff``: ``qa.handoff_transition``
     (skipped when already done). Then the signal (with ``turn``), the completion record, and, outside the
-    project lock, the commit check."""
+    project lock, the commit check. An administrative completion (``admin``: the seat is being removed, its agent
+    is gone) writes no signal and runs no commit check."""
     ref = card_ref(task["card"])
     with project_lock(project.paths):
         value = project.refs.read(ref)
@@ -302,13 +330,16 @@ def _finish(project, lease, task: dict, pending: dict) -> None:
             qa.handoff_transition(project, lease, task, pending["posted"])
         else:
             qa.check_seat(project, lease)  # the transition happened earlier: nothing verified the seat ref now
-        if (qa.read_turn(project.paths, pending["conversation"]) or {}).get("token") == pending["turn"]:
+        if not admin and (qa.read_turn(project.paths, pending["conversation"]) or {}).get("token") == pending["turn"]:
             # only the current turn is signalled: an older turn is over, its signal would replace a newer one
             write_signal(project, lease.seat, task["id"], pending["kind"],
                          {"turn": pending["turn"], "comments": list(pending["posted"])})
             faults.point("qa_after_signal")
+        _record_delivered(project, task, pending)  # before turn.json records the completion (a retry skips it)
+        faults.point("after_delivered_recorded")
         _record_completed(project, pending)
-    _commit_check(project, lease, task, pending["kind"])
+    if not admin:
+        _commit_check(project, lease, task, pending["kind"])
 
 
 def _commit_check(project, lease, task: dict, kind: str = "answer") -> None:
@@ -347,7 +378,7 @@ def _commit_check(project, lease, task: dict, kind: str = "answer") -> None:
 def _run(ctx, text: str, turn: str, kind: str) -> dict:
     task = qa_task(ctx, kind)
     project = ctx.project
-    with qa.conversation_lock(project.paths, task["conversation"], LOCK_TIMEOUT):
+    with qa.card_conversation_lock(project, task["card"], task["conversation"], LOCK_TIMEOUT):
         ids, done = _post(ctx, task, text, turn, kind)
         if not done:
             if kind == "handoff":
@@ -371,31 +402,35 @@ def handoff(ctx, text: str, turn: str) -> dict:
     return _run(ctx, text, turn, "handoff")
 
 
-def complete_pending(project, lease, task: dict, lock_timeout: float = LOCK_TIMEOUT) -> Optional[str]:
+def complete_pending(project, lease, task: dict, lock_timeout: float = LOCK_TIMEOUT,
+                     admin: bool = False) -> Optional[str]:
     """Complete the pending operation of ``task``'s conversation: after a crash (launcher restart), or when a turn
     ended without a signal or before a new turn starts while the launcher stays alive (questions T§4). Posts the
     chunks not yet posted, then step 4. A handoff whose transition already happened (ref ``parked`` or ``impl`` with
     the same ``handoff`` IDs) only signals and removes ``pending.json``. An operation of an older turn is completed
     without a signal. Returns the completed kind when it concerns the current turn, ``"handoff"`` for any completed
     handoff (the conversation is over), else None. Raises ``NOT_OWNER`` when the conversation ended and
-    ``qa.LockBusy`` when the conversation lock is not taken within ``lock_timeout`` (a command is still posting)."""
+    ``qa.LockBusy`` when the conversation lock is not taken within ``lock_timeout`` (a command is still posting).
+    ``admin``: the administrative completion of a seat being removed (qapool T§14, seat §6), with the removal's
+    temporary lease: no signal, no commit check; the answer record and ``turn.json`` are updated as always."""
     conversation = task.get("conversation")
     if task.get("kind") != "qa" or not qa.valid_conversation(conversation):
         return None
     if not _pending_path(project.paths, conversation).exists():
         return None
-    with qa.conversation_lock(project.paths, conversation, lock_timeout):
+    with qa.card_conversation_lock(project, task["card"], conversation, lock_timeout):
         pending = read_pending(project.paths, conversation)
         if pending is None:
             qa.drop_orphan(project, task["card"], conversation)  # an end in between: the lock re-created it
             return None
         turn_data = qa.read_turn(project.paths, conversation) or {}
-        kind = _complete_locked(project, lease, task, pending, turn_data)
+        kind = _complete_locked(project, lease, task, pending, turn_data, admin)
         current = turn_data.get("token") == pending.get("turn")
         return kind if kind is not None and (current or kind == "handoff") else None
 
 
-def _complete_locked(project, lease, task: dict, pending: dict, turn_data: dict) -> Optional[str]:
+def _complete_locked(project, lease, task: dict, pending: dict, turn_data: dict,
+                     admin: bool = False) -> Optional[str]:
     """Under the conversation lock: complete ``pending`` (the remaining chunks, then step 4); None when it had
     already completed (``turn.json`` records it) and is only removed."""
     conversation = pending["conversation"]
@@ -410,7 +445,7 @@ def _complete_locked(project, lease, task: dict, pending: dict, turn_data: dict)
             qa.drop_orphan(project, task["card"], conversation)
             raise _ended(task)
         _post_chunks(project, lease, task, pending, value.oid)
-    _finish(project, lease, task, pending)
+    _finish(project, lease, task, pending, admin)
     project.log("qa_pending_completed", seat=lease.seat, card=task["card"], conversation=conversation,
-                kind=pending["kind"], turn=pending["turn"])
+                kind=pending["kind"], turn=pending["turn"], admin=admin)
     return pending["kind"]

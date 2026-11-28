@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from kankan.boardreader import LIVE
 from kankan.errors import KankanError
 from kankan.trello import Card, Snapshot
 
@@ -37,7 +38,7 @@ def dep_status(project, snap: Snapshot, card: Card, fetch: Optional[Callable[[st
                ) -> DepStatus:
     """Satisfied only if every attached card is in this board's Done; missing, other-board,
     archived-outside-Done, unreadable or cyclic dependencies make the card ineligible."""
-    fetch = fetch or project.trello.card
+    fetch = fetch or (lambda ident: project.board.card(ident, LIVE))  # an archived or foreign dependency
     done = project.cfg.done
     by_short: Dict[str, Optional[Card]] = {c.short: c for c in snap.cards.values()}
 

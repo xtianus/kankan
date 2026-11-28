@@ -132,3 +132,97 @@ def test_card_desc_update_round_trip(live_board, run_prefix):
     text = "spec\n\n```\n## agent: claude review\nInstructions for claude review go here.\n```\n"
     assert client.set_card_desc(card.id, text).desc == text
     assert client.card(card.id).desc == text
+
+
+def _actions(client, board_id, **params):
+    """M7: the board's comment actions, newest first (board reader technical §9)."""
+    query = {"filter": "commentCard", "limit": "1000", **{k: str(v) for k, v in params.items()}}
+    return client._ok("GET", f"/1/boards/{board_id}/actions", query)
+
+
+def test_live_board_comment_actions(live_board, run_prefix):
+    """Board reader Task 0: M7 pages and `since` exclusive; `since`/`before` naming a deleted comment; the same
+    action IDs, ordered by creation, in the board-wide and the per-card read; edits and deletions not reported."""
+    client, board, created = live_board
+    lst = client.create_list(board["id"], f"{run_prefix} m7")
+    created["lists"].append(lst.id)
+    card = client.create_card(lst.id, f"{run_prefix} m7")
+    created["cards"].append(card.id)
+    ids = [client.add_comment(card.id, f"m7 {i}", f"{run_prefix}-m7-{i}").id for i in range(4)]
+    # Action IDs of one second are NOT ordered by creation (only their first 8 hex digits, the second, are):
+    # M7 orders by and filters `since`/`before` on each action's date (milliseconds), which follows creation.
+    listed = _actions(client, board["id"], since=ids[0])
+    dates = {a["id"]: a["date"] for a in listed}
+    assert [a["id"] for a in listed][:3] == [ids[3], ids[2], ids[1]]
+    assert dates[ids[1]] < dates[ids[2]] < dates[ids[3]]
+    newest = _actions(client, board["id"], limit=1)
+    assert [a["id"] for a in newest] == [ids[-1]]
+    after_first = [a["id"] for a in _actions(client, board["id"], since=ids[0])]
+    assert after_first[:3] == [ids[3], ids[2], ids[1]] and ids[0] not in after_first  # newest first, exclusive
+    page = [a["id"] for a in _actions(client, board["id"], since=ids[0], limit=2)]
+    assert page == [ids[3], ids[2]]
+    rest = [a["id"] for a in _actions(client, board["id"], since=ids[0], before=page[-1], limit=2)]
+    assert rest == [ids[1]]
+    per_card = [c.id for c in client.comments(card.id)]
+    assert sorted(per_card) == sorted(ids)
+    assert all(a["data"]["card"]["id"] == card.id for a in _actions(client, board["id"], since=ids[0]))
+    client.delete_comment(card.id, ids[1])
+    after_delete = [a["id"] for a in _actions(client, board["id"], since=ids[1])]
+    # A deleted cursor falls back to the second in its ID: nothing later is lost, but earlier comments of that
+    # second come back too, so a cursor keeps its date and the reader filters on it.
+    assert ids[1] not in after_delete and {ids[2], ids[3]} <= set(after_delete)
+    before_deleted = [a["id"] for a in _actions(client, board["id"], before=ids[1], since=ids[0])]
+    assert ids[2] not in before_deleted and ids[3] not in before_deleted
+    client._ok("PUT", f"/1/actions/{ids[2]}/text", body={"value": "m7 edited"})
+    again = {a["id"]: a for a in _actions(client, board["id"], since=ids[0])}
+    assert set(again) == {ids[2], ids[3]} and again[ids[2]]["data"]["text"] == "m7 edited"  # no new action
+    assert again[ids[2]]["date"] == dates[ids[2]]  # an edit keeps the date
+    by_date = [a["id"] for a in _actions(client, board["id"], since=dates[ids[2]])]
+    assert by_date == [ids[3]]  # since=<ISO date> is accepted and exclusive
+    per_card = [a["id"] for a in client._ok("GET", f"/1/cards/{card.id}/actions",
+                                            {"filter": "commentCard", "since": dates[ids[2]]})]
+    assert per_card == [ids[3]]
+
+
+def test_live_attachment_pos_in_board_and_card_reads(live_board, run_prefix):
+    """Board reader Task 0: `pos`, `date` and `idMember` of attachments in the nested board read and the card read."""
+    client, board, created = live_board
+    lst = client.create_list(board["id"], f"{run_prefix} pos")
+    created["lists"].append(lst.id)
+    card = client.create_card(lst.id, f"{run_prefix} pos")
+    created["cards"].append(card.id)
+    client.attach_link(card.id, "https://example.com/a", "a")
+    client.attach_link(card.id, "https://example.com/b", "b")
+    fields = "id,name,fileName,url,bytes,mimeType,idMember,isUpload,pos,date"
+    data = client._ok("GET", f"/1/boards/{board['id']}", {"cards": "open", "card_fields": "name",
+                                                         "card_attachments": "true", "card_attachment_fields": fields,
+                                                         "checklists": "all"})
+    nested = next(c for c in data["cards"] if c["id"] == card.id)["attachments"]
+    assert len(nested) == 2 and all("pos" in a and "date" in a and "idMember" in a for a in nested)
+    single = client._ok("GET", f"/1/cards/{card.id}", {"attachments": "true", "attachment_fields": fields})
+    assert [a["id"] for a in sorted(single["attachments"], key=lambda a: a["pos"])] == \
+        [a["id"] for a in sorted(nested, key=lambda a: a["pos"])]
+    assert "checklists" in data
+
+
+def test_live_board_reader_comments_and_attachment_order(live_board, run_prefix, tmp_path, monkeypatch):
+    """Board reader Task 12: the comment log and the attachment order through `BoardReader` on real Trello."""
+    from kankan.boardreader import LIVE, BoardReader, max_age
+    monkeypatch.delenv("KANKAN_TEST_NO_CACHE", raising=False)
+    client, board, created = live_board
+    reader = BoardReader(tmp_path / "kankan", client, board["id"])
+    client.on_write = reader.on_write
+    lst = client.create_list(board["id"], f"{run_prefix} reader")
+    created["lists"].append(lst.id)
+    card = client.create_card(lst.id, f"{run_prefix} reader")
+    created["cards"].append(card.id)
+    first = client.add_comment(card.id, "r0", f"{run_prefix}-r0")
+    _, point = reader.new_comments(card.id, first.date, LIVE)
+    made = [client.add_comment(card.id, f"r{i}", f"{run_prefix}-r{i}") for i in range(1, 4)]
+    comments, point = reader.new_comments(card.id, point, max_age(60))  # kankan's comments marked the log
+    assert [c.id for c in comments] == [m.id for m in made] and point == made[-1].date
+    assert reader.new_comments(card.id, point, LIVE)[0] == []
+    a = client.attach_link(card.id, "https://example.com/a", "a")
+    b = client.attach_link(card.id, "https://example.com/b", "b")
+    order = [x.id for x in reader.card(card.id, LIVE).attachment_items]
+    assert order == [a.id, b.id] == [x.id for x in reader.snapshot(LIVE).cards[card.id].attachment_items]

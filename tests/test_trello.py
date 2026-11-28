@@ -411,7 +411,7 @@ def test_card_read_returns_attachment_fields(fake, board, virtual_time):
     assert got.url == upload["url"] and got.bytes == 5 and got.mime_type == "text/plain"
     assert got.member_id == fake.owner["id"] and got.is_upload is True and got.date == upload["date"] != ""
     assert not link.is_upload and link.url == "https://trello.com/c/Zz12Zz12/9-dep"
-    assert trello.snapshot(board[0]["id"]).cards[card["id"]].attachment_items == []
+    assert trello.snapshot(board[0]["id"]).cards[card["id"]].attachment_items == read.attachment_items  # board reader T§3
 
 
 def test_attachments_include_date(fake, board, virtual_time):
@@ -466,3 +466,167 @@ def test_fake_rejects_long_comment(fake, board, virtual_time):
     with pytest.raises(KankanError) as exc:
         trello.add_comment(card["id"], fits + "x", "op-long2")
     assert exc.value.status == Status.TRELLO_ERROR
+
+
+# ---------------------------------------------------------------- board reader support (board reader Task 2)
+
+def test_read_board_returns_raw_payload_and_send_time(fake, board):
+    import time
+    b, _, card = board
+    c = client(fake)
+    before = time.time()
+    read = c.read_board(b["id"])
+    after = time.time()
+    assert before <= read.sent_at <= after and read.response_date is not None
+    assert any(raw["id"] == card["id"] for raw in read.payload["cards"])
+
+
+def test_send_time_is_taken_before_the_request(fake, board):
+    import time
+    b, _, _ = board
+    fake.response_delay = 0.3
+    fake.inject("GET", r"/1/boards/", "delay")
+    started = time.time()
+    read = client(fake, timeout=2).read_board(b["id"])
+    assert read.sent_at - started < 0.2 and time.time() - read.sent_at >= 0.3
+
+
+def test_decoders_same_result_for_raw_and_live(fake, board):
+    b, _, card = board
+    c = client(fake)
+    read = c.read_board(b["id"])
+    assert trello_mod.decode_snapshot(read.payload, read.response_date, b["id"]) == c.snapshot(b["id"])
+    raw_card = c.read_card(card["id"])
+    assert trello_mod.decode_card(raw_card.payload) == c.card(card["id"])
+
+
+def test_board_nested_card_decodes_like_card_read(fake, board):
+    b, _, card = board
+    fake.add_attachment(card["id"], "https://example.com/second", "second")
+    checklist = fake.add_checklist(card["id"], "Settings") if hasattr(fake, "add_checklist") else None
+    c = client(fake)
+    nested = c.snapshot(b["id"]).cards[card["id"]]
+    single = c.card(card["id"])
+    assert nested.attachment_items == single.attachment_items and len(single.attachment_items) == 2
+    assert [a.url for a in nested.attachment_items] == nested.attachments
+    if checklist is not None:
+        assert [x.id for x in nested.checklists] == [x.id for x in single.checklists]
+
+
+def test_attachment_items_ordered_by_pos(fake, board):
+    b, _, card = board
+    second = fake.add_attachment(card["id"], "https://example.com/second", "second")
+    second["pos"] = 1.0  # moved first in the card
+    c = client(fake)
+    assert c.card(card["id"]).attachment_items[0].id == second["id"]
+    assert c.snapshot(b["id"]).cards[card["id"]].attachment_items[0].id == second["id"]
+
+
+def test_read_card_none_when_deleted(fake, board):
+    _, _, card = board
+    fake.user_delete(card["id"])
+    assert client(fake).read_card(card["id"]).payload is None
+
+
+def test_board_comment_actions_pages_and_card_ids(fake, board):
+    b, _, card = board
+    fake.shuffled_comment_ids = True
+    made = [fake.user_comment(card["id"], f"m{i}") for i in range(3)]
+    c = client(fake)
+    page = c.read_board_comments(b["id"], since=made[0]["date"], limit=1)
+    assert [raw["id"] for raw in page.payload] == [made[2]["id"]]
+    comments = [trello_mod.decode_comment(raw) for raw in c.read_board_comments(b["id"]).payload]
+    assert [x.id for x in comments] == [m["id"] for m in reversed(made)]
+    assert {x.card_id for x in comments} == {card["id"]}
+
+
+def test_newest_comment_action_empty_board(fake, board):
+    b, _, _ = board
+    assert client(fake).read_board_comments(b["id"], limit=1).payload == []
+
+
+def test_comments_ordered_and_paged_by_date(fake, board):
+    _, _, card = board
+    fake.shuffled_comment_ids = True
+    made = [fake.user_comment(card["id"], f"m{i}") for i in range(120)]  # three pages of 50
+    got = client(fake).comments(card["id"])
+    assert [x.id for x in got] == [m["id"] for m in made]
+    since = client(fake).comments(card["id"], since=made[59]["date"])
+    assert [x.id for x in since] == [m["id"] for m in made[60:]]
+    raw = client(fake).read_comments(card["id"]).payload
+    assert [r["id"] for r in raw] == [m["id"] for m in made]
+
+
+def test_set_card_name(fake, board):
+    """C11 (qapool T§10): a title written with set_card_name reads back unchanged, non-ASCII prefix included."""
+    _, _, card = board
+    c = client(fake)
+    name = "\U0001F7E2\U0001F525 What is it?"
+    assert c.set_card_name(card["id"], name).name == name
+    assert c.card(card["id"]).name == name
+    assert ("PUT", f"/1/cards/{card['id']}") in fake.requests
+
+
+WRITE_EFFECTS = [
+    ("move_card", lambda c, ids: c.move_card(ids["card"], ids["list"]), ("card", "card")),
+    ("add_label", lambda c, ids: c.add_label(ids["card"], ids["label"]), ("card", "card")),
+    ("remove_label", lambda c, ids: c.remove_label(ids["card"], ids["label"]), ("card", "card")),
+    ("set_card_desc", lambda c, ids: c.set_card_desc(ids["card"], "d"), ("card", "card")),
+    ("set_card_name", lambda c, ids: c.set_card_name(ids["card"], "n"), ("card", "card")),
+    ("attach_link", lambda c, ids: c.attach_link(ids["card"], "https://example.com/x", "x"), ("card", "card")),
+    ("add_comment", lambda c, ids: c.add_comment(ids["card"], "t", "op-1"), ("comment", "card")),
+    ("create_card", lambda c, ids: c.create_card(ids["list"], "n"), ("card_set", "list")),
+    ("delete_card", lambda c, ids: c.delete_card(ids["card"]), ("card_set", "card")),
+    ("create_list", lambda c, ids: c.create_list(ids["board"], "L"), ("board", None)),
+    ("archive_list", lambda c, ids: c.archive_list(ids["list"]), ("board", None)),
+    ("set_board_desc", lambda c, ids: c.set_board_desc(ids["board"], "x"), ("board", None)),
+    ("create_label", lambda c, ids: c.create_label(ids["board"], "L", "red"), ("board", None)),
+]
+
+
+@pytest.mark.parametrize("name,write,expected", WRITE_EFFECTS, ids=[w[0] for w in WRITE_EFFECTS])
+def test_on_write_called_for_each_write_kind(fake, board, name, write, expected):
+    b, backlog, card = board
+    label = next(iter(l for l in fake.state["labels"].values() if l["idBoard"] == b["id"]))
+    if name == "remove_label":
+        fake.state["cards"][card["id"]]["idLabels"].append(label["id"])
+    c = client(fake)
+    effects = []
+    c.on_write = effects.append
+    write(c, {"card": card["id"], "list": backlog["id"], "board": b["id"], "label": label["id"]})
+    kind, target = expected
+    assert effects and effects[-1].kind == kind
+    if target == "card":
+        assert effects[-1].card_id == card["id"]
+
+
+def test_on_write_check_items_mark_their_card(fake, board):
+    _, _, card = board
+    c = client(fake)
+    checklist = c.create_checklist(card["id"], "Settings")
+    effects = []
+    c.on_write = effects.append
+    item = c.create_check_item(checklist.id, "x", False, 1, card_id=card["id"])
+    c.delete_check_item(checklist.id, item.id, card_id=card["id"])
+    assert [(e.kind, e.card_id) for e in effects] == [("card", card["id"])] * 2
+
+
+def test_on_write_check_item_without_card_marks_board(fake, board):
+    _, _, card = board
+    c = client(fake)
+    checklist = c.create_checklist(card["id"], "Settings")
+    effects = []
+    c.on_write = effects.append
+    c.create_check_item(checklist.id, "x", False, 1)
+    assert effects[-1].kind == "board"
+
+
+def test_on_write_called_after_timeout(fake, board):
+    _, backlog, card = board
+    c = client(fake, timeout=0.25)
+    effects = []
+    c.on_write = effects.append
+    fake.inject("PUT", r"/1/cards/", "timeout", times=10)
+    with pytest.raises(KankanError):
+        c.move_card(card["id"], backlog["id"])
+    assert effects and effects[-1].card_id == card["id"]

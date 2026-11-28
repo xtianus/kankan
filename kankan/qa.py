@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
+from kankan.boardreader import LIVE
 from kankan import attachments, auditlog, clock, deps, faults, gitutil, messages, notify, worktrees
 from kankan.cards import CardMeta, Phase, parse_refs
 from kankan.config import Paths, atomic_write_json, project_lock, read_json
@@ -203,46 +204,89 @@ def new_conversation() -> str:
 
 @dataclass
 class Inputs:
-    """IDs of comments and attachments: what a turn delivers, or the context of a first turn."""
+    """IDs of comments and attachments: what a turn delivers, or the context of a first turn. ``dates`` gives the
+    Trello date of comments by ID (those named here and the covered comment they are compared with), so comments are
+    ordered by date, never by ID (Trello IDs within one second are not in creation order); it is saved with the
+    turn, so ``coverage`` needs no Trello read. Files of earlier versions have no dates: the ID order is used then."""
     comments: List[str] = field(default_factory=list)
     attachments: List[str] = field(default_factory=list)
+    dates: Dict[str, str] = field(default_factory=dict, compare=False)
 
     def to_dict(self) -> dict:
-        return {"comments": list(self.comments), "attachments": list(self.attachments)}
+        data = {"comments": list(self.comments), "attachments": list(self.attachments)}
+        if self.dates:
+            data["dates"] = dict(self.dates)
+        return data
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "Inputs":
         data = data or {}
-        return cls(list(data.get("comments") or []), list(data.get("attachments") or []))
+        dates = data.get("dates")
+        return cls(list(data.get("comments") or []), list(data.get("attachments") or []),
+                   dict(dates) if isinstance(dates, dict) else {})
 
 
 # the marker of an answer or handoff chunk: ``kankan:qa-<conversation>-<turn>-<i>`` or ``kankan:qh-…``;
 # groups: kind (``qa``/``qh``), conversation, turn, chunk index
+CHUNK_PREFIX = re.compile(r"^([0-9]+)/([0-9]+)\n\n")  # "k/n" before each part of a split answer (T§6)
 QA_MARKER = re.compile("`" + re.escape(MARKER_PREFIX) + r"(q[ah])-([0-9a-f]{8,64})-([0-9a-f]+)-([0-9]+)`")
 
 
-def candidates(project, card: Card, comments: List[Comment]) -> Inputs:
+def by_date(comment: Comment):
+    """Sort key of comments by Trello date (an unreadable date first), then ID."""
+    return (_when(comment.date) or _FLOOR, len(comment.id), comment.id)
+
+
+def input_comments(comments: List[Comment], members: Set[str]) -> List[Comment]:
+    """The comments that can reach the agent, by date: by ``members`` (``notify.input_members``), without any kankan
+    marker."""
+    marker = f"`{MARKER_PREFIX}"
+    return [c for c in sorted(comments, key=by_date) if c.member_id in members and marker not in c.text]
+
+
+def input_attachments(items: list, members: Set[str]) -> list:
+    """The card attachments that can reach the agent: by ``members``, without dependency attachments."""
+    return [a for a in items if a.member_id in members and not deps.attachment_short(a.url)]
+
+
+def candidates(project, card: Card, comments: List[Comment], fresh=None) -> Inputs:
     """The items that can reach the agent: comments and attachments by board members other than kankan's
     account (``notify.input_members``), without comments carrying any kankan marker and without dependency
-    attachments (``task`` does not list them). ``card`` comes from ``trello.card`` (``attachment_items``)."""
-    members = notify.input_members(project)
-    marker = f"`{MARKER_PREFIX}"
-    return Inputs([c.id for c in sorted(comments, key=lambda c: c.id)
-                   if c.member_id in members and marker not in c.text],
-                  [a.id for a in card.attachment_items
-                   if a.member_id in members and not deps.attachment_short(a.url)])
+    attachments (``task`` does not list them). ``card`` comes from ``board.card`` (``attachment_items``). Comments
+    come by date, with the dates of every comment given (a covered comment may be no candidate any more)."""
+    members = notify.input_members(project, fresh)
+    return Inputs([c.id for c in input_comments(comments, members)],
+                  [a.id for a in input_attachments(card.attachment_items, members)],
+                  {c.id: c.date for c in comments if c.date})
 
 
-def _comment_covered(comment_id: str, covered_comment: Optional[str]) -> bool:
-    # Trello action IDs grow with time: everything up to the newest covered comment is covered
-    return covered_comment is not None and (len(comment_id), comment_id) <= (len(covered_comment), covered_comment)
+def _dated(comment_ids: List[str], dates: Optional[Dict[str, str]]) -> bool:
+    """Every one of ``comment_ids`` has a readable date: they are compared by date, otherwise by ID."""
+    return bool(dates) and all(_when(dates.get(c) or "") is not None for c in comment_ids)
+
+
+def _order(comment_id: str, dates: Optional[Dict[str, str]], dated: bool):
+    if dated:
+        return (_when(dates[comment_id]), len(comment_id), comment_id)
+    return (len(comment_id), comment_id)  # files of earlier versions: Trello action IDs grow with time
+
+
+def _comment_covered(comment_id: str, covered_comment: Optional[str], dates: Optional[Dict[str, str]] = None) -> bool:
+    # everything up to the newest covered comment, by date, is covered
+    if covered_comment is None:
+        return False
+    dated = _dated([comment_id, covered_comment], dates)
+    return _order(comment_id, dates, dated) <= _order(covered_comment, dates, dated)
 
 
 def uncovered(cands: Inputs, covered: Optional[dict]) -> Inputs:
+    """The candidates not covered, with the dates of those and of the covered comment."""
     covered = covered or {}
     seen = set(covered.get("attachments") or [])
-    return Inputs([c for c in cands.comments if not _comment_covered(c, covered.get("comment"))],
-                  [a for a in cands.attachments if a not in seen])
+    comments = [c for c in cands.comments if not _comment_covered(c, covered.get("comment"), cands.dates)]
+    named = comments + ([covered["comment"]] if covered.get("comment") else [])
+    return Inputs(comments, [a for a in cands.attachments if a not in seen],
+                  {c: cands.dates[c] for c in named if c in cands.dates})
 
 
 def to_deliver(cands: Inputs, covered: Optional[dict], delivered: Inputs) -> Optional[Inputs]:
@@ -255,21 +299,25 @@ def to_deliver(cands: Inputs, covered: Optional[dict], delivered: Inputs) -> Opt
     return None
 
 
-def newest(comment_ids: List[str]) -> Optional[str]:
-    """The newest of ``comment_ids`` (Trello action IDs grow with time), None when empty."""
-    return max(comment_ids, key=lambda c: (len(c), c)) if comment_ids else None
+def newest(comment_ids: List[str], dates: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The newest of ``comment_ids`` by the Trello dates in ``dates`` (by ID when a date is missing), None when
+    empty."""
+    if not comment_ids:
+        return None
+    dated = _dated(comment_ids, dates)
+    return max(comment_ids, key=lambda c: _order(c, dates, dated))
 
 
 def coverage(previous: Optional[dict], inputs: Inputs, context: Optional[Inputs] = None) -> dict:
-    """The ``covered`` value after an answer: the newest comment among the turn's inputs, its context and the
-    previous ``covered``, and the union of the attachments."""
+    """The ``covered`` value after an answer: the newest comment (by the dates the inputs carry) among the turn's
+    inputs, its context and the previous ``covered``, and the union of the attachments."""
     previous = previous or {}
     context = context or Inputs()
     comments = list(inputs.comments) + list(context.comments)
     if previous.get("comment"):
         comments.append(previous["comment"])
     seen = set(previous.get("attachments") or []) | set(inputs.attachments) | set(context.attachments)
-    return {"comment": newest(comments), "attachments": sorted(seen)}
+    return {"comment": newest(comments, {**context.dates, **inputs.dates}), "attachments": sorted(seen)}
 
 
 def effective_covered(ref_covered: Optional[dict], turn: Optional[dict]) -> Optional[dict]:
@@ -282,6 +330,9 @@ def effective_covered(ref_covered: Optional[dict], turn: Optional[dict]) -> Opti
     return None
 
 
+_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _when(value: str) -> Optional[datetime]:
     """A Trello date (``2026-11-17T10:00:00.000Z``) as an aware datetime, None when unreadable."""
     try:
@@ -291,22 +342,28 @@ def _when(value: str) -> Optional[datetime]:
     return result if result.tzinfo is not None else result.replace(tzinfo=timezone.utc)
 
 
-def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, Inputs]:
-    """``(inputs, context)`` of a new conversation's first turn. When an earlier conversation answered the card
-    (a comment by kankan's account carrying an answer or handoff marker), the inputs are the candidates dated
-    after the latest such comment by Trello's dates, never the local clock (an unreadable date counts as
+def _complete(comment: Comment) -> bool:
+    """An answer or handoff comment that is not a part ``k/n`` with ``k < n`` of an answer cut short."""
+    match = CHUNK_PREFIX.match(comment.text)
+    return match is None or match.group(1) == match.group(2)
+
+
+def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, Inputs, bool]:
+    """``(inputs, context, answered)`` of a new conversation's first turn. When an earlier conversation answered
+    the card (a comment by kankan's account carrying an answer or handoff marker), the inputs are the candidates
+    dated after the latest such comment by Trello's dates, never the local clock (an unreadable date counts as
     after), and the others are context: the newest such comment (it covers the older ones) and every such
-    attachment; otherwise every candidate is an input."""
+    attachment; otherwise every candidate is an input. ``answered``: the latest such comment completes its
+    answer (seat F§4: with nothing new, the agent is not prompted)."""
     cands = candidates(project, card, comments)
     me = notify.kankan_member_id(project)
     answers = [c for c in comments if c.member_id == me and QA_MARKER.search(c.text)]
     if not answers:
-        return cands, Inputs()
-    floor = datetime.min.replace(tzinfo=timezone.utc)
-    latest = max(answers, key=lambda c: (_when(c.date) or floor, c.id))
+        return cands, Inputs(), False
+    latest = max(answers, key=lambda c: (_when(c.date) or _FLOOR, c.id))
     latest_when = _when(latest.date)
     if latest_when is None:
-        return cands, Inputs()
+        return cands, Inputs(), False
     by_id = {c.id: c for c in comments}
     attachments_by_id = {a.id: a for a in card.attachment_items}
 
@@ -318,15 +375,37 @@ def first_turn(project, card: Card, comments: List[Comment]) -> Tuple[Inputs, In
         when = _when(attachments_by_id[attachment_id].date)
         return when is None or when > latest_when
 
-    inputs = Inputs([c for c in cands.comments if comment_new(c)], [a for a in cands.attachments if attachment_new(a)])
-    newest_old = newest([c for c in cands.comments if c not in inputs.comments])
-    context = Inputs([newest_old] if newest_old else [], [a for a in cands.attachments if a not in inputs.attachments])
-    return inputs, context
+    new_comments = [c for c in cands.comments if comment_new(c)]
+    inputs = Inputs(new_comments, [a for a in cands.attachments if attachment_new(a)],
+                    {c: cands.dates[c] for c in new_comments if c in cands.dates})
+    newest_old = newest([c for c in cands.comments if c not in inputs.comments], cands.dates)
+    context = Inputs([newest_old] if newest_old else [], [a for a in cands.attachments if a not in inputs.attachments],
+                     {newest_old: cands.dates[newest_old]} if newest_old in cands.dates else {})
+    return inputs, context, _complete(latest)
+
+
+def record_covered(project, lease, task: dict, context: Inputs) -> None:
+    """seat T§8: a conversation started without a prompt records its old thread as covered, as an answer would,
+    so later follow-ups are the only new inputs. ``NOT_OWNER`` when the conversation is no longer the seat's."""
+    conversation = task["conversation"]
+    ended = KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
+    with card_conversation_lock(project, task["card"], conversation, CONVERSATION_LOCK_TIMEOUT):
+        with project_lock(project.paths):
+            ref = card_ref(task["card"])
+            value = project.refs.read(ref)
+            if not ours(value, lease.seat, conversation):
+                raise ended
+            covered = coverage(None, Inputs(), context)
+            oid = project.refs.write_blob(CardMeta.from_dict(value.meta).evolve(covered=covered).to_dict())
+            if not project.refs.transaction([Verify(seat_ref(lease.seat), lease.seat_oid), Update(ref, oid, value.oid)]):
+                check_seat(project, lease)
+                raise ended
+            project.log("qa_covered_without_answer", card=task["card"], conversation=conversation, covered=covered)
 
 
 # ---------------------------------------------------------------------- eligibility, claim, take-over (T§2–T§3)
 
-def _claimable(value: Optional[RefValue]) -> bool:
+def claimable(value: Optional[RefValue]) -> bool:
     """No ref, or a ``parked`` one whose move is done (an unfinished handoff still has ``from_list``)."""
     if value is None:
         return True
@@ -346,14 +425,14 @@ def eligible(project, snap: Snapshot, refs: Dict[str, RefValue]) -> Optional[Car
     for card in sorted(snap.cards.values(), key=lambda c: c.pos):
         value = refs.get(card.id)
         if card.list_id == cfg.qa_list and not card.closed and cfg.label_hold not in card.label_ids \
-                and card.id not in malformed and not isinstance(value, KankanError) and _claimable(value):
+                and card.id not in malformed and not isinstance(value, KankanError) and claimable(value):
             return card
     return None
 
 
-def card_state(project, card_id: str) -> Optional[Card]:
-    """One card read (C1, with the attachment fields); None when the card was deleted."""
-    return project.trello.card(card_id)
+def card_state(project, card_id: str, fresh=None) -> Optional[Card]:
+    """One card (C1, with the attachment fields), live unless ``fresh`` allows older data; None when deleted."""
+    return project.board.card(card_id, fresh or LIVE)
 
 
 def active_ended(cfg, card: Optional[Card]) -> bool:
@@ -418,7 +497,11 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
     ref = card_ref(card.id)
     conversation = new_conversation()
     with project_lock(project.paths):
-        fresh = project.trello.card(card.id)
+        seat_cfg = project.reload_config().seats.get(lease.seat)
+        if seat_cfg is not None and seat_cfg.removing:  # seat T§5: a seat being removed takes no new card
+            project.log("qa_claim_skipped", card=card.id, reason="the seat is being removed")
+            return None
+        fresh = project.board.card(card.id, LIVE)
         if active_ended(cfg, fresh):
             project.log("qa_claim_skipped", card=card.id, reason="card left Q&A, closed or on HOLD")
             return None
@@ -427,7 +510,7 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
         except KankanError as err:  # a malformed ref: reconcile reports it
             project.log("qa_claim_skipped", card=card.id, reason=err.message)
             return None
-        if not _claimable(current):
+        if not claimable(current):
             project.log("qa_claim_skipped", card=card.id, reason=f"ref in phase {current.meta.get('phase')}")
             return None
         meta = CardMeta(phase=Phase.QA.value, card=card.id, short=fresh.short or card.short, owner=lease.seat,
@@ -445,7 +528,7 @@ def claim(project, lease, card: Card, pair) -> Optional[dict]:
             discard_conversation(project.paths, older)
         project.log("qa_claimed", seat=lease.seat, card=card.id, conversation=conversation,
                     old=current.oid if current else None, new=oid)
-    with conversation_lock(project.paths, conversation, CONVERSATION_LOCK_TIMEOUT):
+    with card_conversation_lock(project, card.id, conversation, CONVERSATION_LOCK_TIMEOUT):
         pass  # creates the conversation directory, now that the ref names it
     base, reflog = worktrees.reset_detached(project.paths.seat_worktree(lease.seat), _integration_tip(project))
     return _store(project, lease, card.id, meta.short, conversation, pair, base, reflog)
@@ -480,6 +563,21 @@ def drop_orphan(project, card_id: str, conversation: str) -> None:
         discard_conversation(project.paths, conversation)
 
 
+@contextlib.contextmanager
+def card_conversation_lock(project, card_id: str, conversation: str, timeout: float) -> Iterator[None]:
+    """``conversation_lock`` for an operation on the conversation of ``card_id``. On release it deletes the
+    directory when no ref names the conversation any more: an end while the lock was held could not delete it
+    (``discard_conversation`` only tries the lock), and the operation may have re-created files in it."""
+    with conversation_lock(project.paths, conversation, timeout):
+        try:
+            yield
+        finally:
+            try:
+                drop_orphan(project, card_id, conversation)
+            except KankanError as err:  # never hides the operation's own outcome; reconcile reports a leftover
+                project.log("qa_drop_orphan_failed", card=card_id, conversation=conversation, error=err.message)
+
+
 def start_turn(project, lease, task: dict, inputs: Inputs, context: Optional[Inputs] = None) -> str:
     """Start a turn: under the conversation lock, re-validate the ref and the seat, write ``turn.json`` (token,
     inputs, the first turn's context, the launcher run), then the seat task's ``turn``. The caller writes the
@@ -489,7 +587,7 @@ def start_turn(project, lease, task: dict, inputs: Inputs, context: Optional[Inp
     if not ours(project.refs.read(card_ref(task["card"])), lease.seat, conversation):
         raise ended  # checked before the lock too, so an ended conversation's directory is not re-created
     token = uuid.uuid4().hex[:16]
-    with conversation_lock(project.paths, conversation, CONVERSATION_LOCK_TIMEOUT):
+    with card_conversation_lock(project, task["card"], conversation, CONVERSATION_LOCK_TIMEOUT):
         value = project.refs.read(card_ref(task["card"]))
         if not ours(value, lease.seat, conversation):
             drop_orphan(project, task["card"], conversation)
@@ -532,7 +630,7 @@ def handoff_transition(project, lease, task: dict, comment_ids: List[str]) -> No
     conversation = task.get("conversation")
     ended = KankanError(Status.NOT_OWNER, messages.QA_ENDED.format(short=task.get("short") or task["card"]))
     with project_lock(project.paths):
-        card = project.trello.card(task["card"])
+        card = project.board.card(task["card"], LIVE)
         if active_ended(cfg, card):
             raise ended
         value = project.refs.read(ref)
@@ -636,183 +734,13 @@ def end_admin(project, seat: str) -> bool:
     return ended
 
 
-# ---------------------------------------------------------------------- seat replacement (T§2)
-
-def _check_replaceable(project, old: str, new: str, recover: bool = False) -> None:
-    """Under the project lock: ``old`` neither runs nor leaves surviving processes (``NEEDS_ACTION`` otherwise);
-    with ``recover``, the leftovers of a dead seat are terminated first."""
-    from kankan import seats
-    state = seats.liveness(project, old)  # the project lock is reentrant
-    if state == "dead" and recover and seats.recover_dead(project, old):
-        state = "unavailable"
-    if state in ("alive", "unavailable"):
-        raise KankanError(Status.NEEDS_ACTION, messages.QA_REPLACE_RUNNING.format(old=old, new=new, state=state),
-                          {"seat": old, "liveness": state})
-
+# ---------------------------------------------------------------------- Q&A lifecycle lock
 
 def lifecycle_lock(paths: Paths):
-    """Serializes the Q&A seat replacements and ``seat remove <type>-qa`` (``qa-lifecycle.lock``). Lock order:
-    ``up.lock`` → lifecycle lock → conversation lock → project lock → seat-state lock. ``kankan up`` holds ``up.lock``
-    while it registers the Q&A seat (it cannot take the lifecycle lock first: the launcher it starts takes the
-    lifecycle lock in ``replace_seat`` while ``up`` waits for it); nothing takes ``up.lock`` while holding the
-    lifecycle lock or a lock after it."""
+    """The Q&A lifecycle lock (``qa-lifecycle.lock``): the routing choice, the stopping mark, the router's start and
+    ``seat remove <type>-qa``. Lock order (qapool T§4): seat-removal lock → ``up.lock`` → lifecycle lock → pool lock
+    → conversation lock → project lock → seat-state lock → answer-record lock; nothing takes ``up.lock`` while
+    holding the lifecycle lock or a lock after it, and ``seatremove.complete`` is never called with it held."""
     from kankan.config import file_lock
     return file_lock(paths.kankan_dir / "qa-lifecycle.lock", timeout=CONVERSATION_LOCK_TIMEOUT,
                      what="Q&A lifecycle lock")
-
-
-def _replacing_path(paths: Paths) -> Path:
-    return paths.kankan_dir / "qa-replacing.json"
-
-
-def _replacing(paths: Paths, old: str, new: str) -> bool:
-    """The replacement record names ``old`` replaced by ``new``."""
-    data = read_json(_replacing_path(paths), None) or {}
-    return data.get("old") == old and data.get("new") == new
-
-
-def drop_stale_record(project, registered: Optional[str], starting: Optional[str] = None) -> None:
-    """Under the project lock: remove the replacement record when the replacement it names can no longer complete:
-    its new seat is neither the registered Q&A seat nor, with none registered, the seat ``starting`` now (e.g. a
-    crash after stage 2, then ``seat remove <new>-qa``, then a start of the old type)."""
-    data = read_json(_replacing_path(project.paths), None)
-    if data is None:
-        return
-    expected = registered if registered is not None else starting
-    if data.get("new") != expected:
-        _replacing_path(project.paths).unlink(missing_ok=True)
-        project.log("qa_replacement_record_dropped", old=data.get("old"), new=data.get("new"), registered=registered)
-
-
-def _leftovers(project, old: str, new: str) -> bool:
-    """Something of the replaced seat ``old`` is left: a conversation or its seat ref, or, while the replacement
-    record names ``old`` replaced by ``new``, its worktree or seat files (a plain ``seat remove`` leaves seat files
-    too, and is no replacement)."""
-    if _owned(project, old) or project.refs.read(seat_ref(old)) is not None:
-        return True
-    if not _replacing(project.paths, old, new):
-        return False
-    seats_dir = project.paths.seats_dir
-    return (project.paths.seat_worktree(old) / ".git").exists() \
-        or (seats_dir.exists() and any(seats_dir.glob(f"{old}.*")))
-
-
-def _race(old: str) -> KankanError:
-    return KankanError(Status.INELIGIBLE, messages.QA_REPLACE_RACE.format(old=old))
-
-
-def _check_destination(project, old: str, new: str) -> None:
-    """Under the project lock: ``new`` is still the registered Q&A seat (a stage never acts for another one)."""
-    if project.reload_config().qa_seat() != new:
-        raise _race(old)
-
-
-def _carry_label_causes(project, old: str, new: str) -> None:
-    """The label causes ``old`` recorded for the cards whose conversations ``new`` now holds go to ``new``, so a
-    follow-up still clears an ``Error`` of ``old``'s ``fail`` (questions F§3.4)."""
-    causes = load_state(project.paths, old).label_causes
-    moved = {value.meta["card"] for value in _owned(project, new)}
-    carried = {card_id: entries for card_id, entries in causes.items() if card_id in moved}
-    if not carried:
-        return
-
-    def carry(state):
-        for card_id, entries in carried.items():
-            for label_id, entry in entries.items():
-                state.label_causes.setdefault(card_id, {}).setdefault(label_id, entry)
-    update_state(project.paths, new, carry)
-
-
-def _complete_replacement(project, old: str, new: str) -> None:
-    """Stages 3–5 of a replacement, each idempotent and in its own project lock hold, each checking that ``new`` is
-    still the registered Q&A seat: every ``qa`` ref of ``old`` gets ``new`` as owner (one transaction per hold,
-    verifying the ref and ``old``'s seat ref as read), ``old``'s seat ref is deleted, then ``old``'s label causes for
-    the moved cards go to ``new`` and its worktree (if clean), its seat files and the replacement record are
-    removed. The conversation directories are keyed by conversation and stay as they are."""
-    for listed in _owned(project, old):
-        card_id = listed.meta["card"]
-        with project_lock(project.paths):
-            _check_destination(project, old, new)
-            _check_replaceable(project, old, new)
-            value = _read_owned(project, card_id, old)
-            if value is None:
-                continue
-            old_seat = project.refs.read(seat_ref(old))
-            meta = CardMeta.from_dict(value.meta).evolve(owner=new, session=None)
-            oid = project.refs.write_blob(meta.to_dict())
-            if not project.refs.transaction([Verify(seat_ref(old), old_seat.oid if old_seat else None),
-                                             Update(card_ref(card_id), oid, value.oid)]):
-                raise _race(old)
-            project.log("qa_replaced_owner", card=card_id, conversation=value.meta.get("conversation"), old=old,
-                        new=new, old_oid=value.oid, new_oid=oid)
-        faults.point("qa_replace_ref")
-    with project_lock(project.paths):
-        _check_destination(project, old, new)
-        _check_replaceable(project, old, new)
-        old_seat = project.refs.read(seat_ref(old))
-        if old_seat is not None:
-            if _owned(project, old) or not project.refs.delete(seat_ref(old), old_seat.oid):
-                raise _race(old)
-            project.log("qa_replaced_seat_ref", seat=old, old=old_seat.oid)
-            faults.point("qa_replace_seatref")
-    with project_lock(project.paths):
-        _check_destination(project, old, new)
-        _check_replaceable(project, old, new)
-        _carry_label_causes(project, old, new)
-        worktree = project.paths.seat_worktree(old)
-        removed = worktrees.remove_if_clean(project.paths.repo, worktree)
-        if not removed and (worktree / ".git").exists():
-            project.log("qa_replaced_worktree_kept", seat=old, worktree=str(worktree))
-        if project.paths.seats_dir.exists():
-            for path in project.paths.seats_dir.glob(f"{old}.*"):
-                path.unlink(missing_ok=True)
-        if _replacing(project.paths, old, new):
-            _replacing_path(project.paths).unlink(missing_ok=True)
-        project.log("qa_seat_replaced", seat=old, by=new, worktree_removed=removed)
-
-
-def replace_seat(project, agent_type: str, *, initiate: bool = True) -> Optional[str]:
-    """Make ``<agent_type>-qa`` the Q&A seat when another type's Q&A seat is registered or left something behind
-    (questions T§2). Serialized by the lifecycle lock.
-
-    Stages, each idempotent: (1) the registered seat must be ``free`` or ``dead`` with no surviving process
-    (``NEEDS_ACTION`` otherwise); (2) the replacement record is written and the configuration entry is swapped for
-    the new seat's in one write, so at most one Q&A seat is ever registered and the old seat can no longer start
-    (``seats.acquire_qa`` refuses it, which an old supervisor treats as fatal); (3)–(5) ``_complete_replacement``.
-    When no Q&A seat is registered (the new seat of an unfinished replacement was removed), the new seat registers
-    itself in stage 2 if another seat left a conversation or a seat ref behind, so its stages still complete.
-    ``agent --qa`` and ``up qa=<type>`` run every stage; the new seat's launcher runs it with ``initiate=False``
-    before occupying its seat, completing only a replacement already registered (so a relaunched old seat never
-    replaces the new one back). Returns the replaced seat's name, or None when there was nothing to replace or
-    complete.
-    """
-    from kankan import seats
-    from kankan.config import SeatConfig, save_config
-    new = seats.qa_seat_name(agent_type)
-    olds = [seats.qa_seat_name(other) for other in seats.AGENT_TYPES if seats.qa_seat_name(other) != new]
-    replaced = None
-    with lifecycle_lock(project.paths):
-        with project_lock(project.paths):
-            cfg = project.reload_config()
-            registered = cfg.qa_seat()
-            drop_stale_record(project, registered, new)
-            if registered is not None and registered != new and not initiate:
-                return None
-            if registered is None and not any(_leftovers(project, old, new) for old in olds):
-                return None
-            if registered != new:
-                if registered is not None:
-                    _check_replaceable(project, registered, new, recover=True)
-                    atomic_write_json(_replacing_path(project.paths), {"old": registered, "new": new})
-                    del cfg.seats[registered]
-                cfg.seats[new] = SeatConfig(type=agent_type, role="qa")
-                save_config(project.paths, cfg)
-                project.log("qa_seat_registered", seat=new, replaces=registered)
-                replaced = registered
-        if replaced:
-            faults.point("qa_replace_registered")
-        for old in olds:
-            if _leftovers(project, old, new):
-                _complete_replacement(project, old, new)
-                replaced = old
-    return replaced

@@ -5,8 +5,10 @@ Configuration, outside the repository: ``KANKAN_TEST_BOARD_URL`` + ``KANKAN_TEST
 ``~/.config/kankan/test.properties`` with ``kankan.test.board.url`` and the same keys.
 """
 
+import fcntl
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 
@@ -73,14 +75,30 @@ def live_client(isolated_home, monkeypatch):
     return TrelloClient(key, token)
 
 
+# Captured at import, before a test can change TMPDIR: every xdist worker and every pytest run on this machine
+# must find the same lock file.
+_LOCK_DIR = tempfile.gettempdir()
+
+
 @pytest.fixture
 def live_board(run_prefix):
+    """The shared test board, held exclusively for the whole test and its cleanup. The tests read the board as a
+    whole (board-wide comment pages, the newest action, completeness points), so another test writing to it at the
+    same time breaks their assertions, and many writers together exceed Trello's rate limit. The lock serializes
+    them across xdist workers and concurrent runs; the kernel releases it when a worker dies."""
     if _CONFIG is None:
         pytest.skip("no test board configured (KANKAN_TEST_BOARD_URL/KANKAN_TEST_CREDENTIALS or "
                     "~/.config/kankan/test.properties)")
     url, key, token = _CONFIG
+    board_ref = parse_board_url(url)
+    with open(Path(_LOCK_DIR) / f"kankan-live-board-{board_ref}.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield from _live_board(board_ref, key, token)
+
+
+def _live_board(board_ref, key, token):
     client = TrelloClient(key, token)
-    board = client.board(parse_board_url(url))
+    board = client.board(board_ref)
     if MARKER not in (board.get("desc") or ""):
         pytest.exit(f"the test board description lacks the marker {MARKER!r}: refusing to write", returncode=3)
     created = {"cards": [], "labels": [], "lists": []}

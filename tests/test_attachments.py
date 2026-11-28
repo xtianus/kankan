@@ -230,10 +230,15 @@ def test_surrogate_file_name_served(env, monkeypatch):
     project, fake = env
     card, _, ctx = claim(project, fake, monkeypatch)
     upload = fake.upload(card["id"], "x.txt", CONTENT)
-    real = TrelloClient.attachments
+    real = TrelloClient.read_card  # the listing is the card's live read (board reader)
     # JSON can carry a lone surrogate; the fake's download URL check cannot, so it is added after the listing
-    monkeypatch.setattr(TrelloClient, "attachments", lambda self, card_id: [
-        dataclasses.replace(att, file_name="\ud800.txt") for att in real(self, card_id)])
+
+    def surrogate(self, card_id):
+        read = real(self, card_id)
+        for att in (read.payload or {}).get("attachments", []):
+            att["fileName"] = "\ud800.txt"
+        return read
+    monkeypatch.setattr(TrelloClient, "read_card", surrogate)
     entry = entries(ctx)[0]
     assert entry["status"] == "ok", entry["message"]
     assert entry["path"].endswith(f"{upload['id']}/_.txt")
@@ -374,7 +379,7 @@ def test_uploader_left_board_loses_copy(env, monkeypatch):
 def test_task_network_error_when_listing_fails(env, monkeypatch, virtual_time):
     project, fake = env
     card, _, ctx = claim(project, fake, monkeypatch)
-    fake.inject("GET", "/attachments$", "500", times=20)
+    fake.inject("GET", f"^/1/cards/{card['id']}$", "500", times=20)  # the listing is the card's read
     with pytest.raises(KankanError) as err:
         agentcmds.task(ctx)
     assert err.value.status == Status.NETWORK_ERROR
@@ -657,16 +662,16 @@ def test_stale_listing_does_not_prune_newer_copy(env, monkeypatch):
     card, _, ctx = claim(project, fake, monkeypatch)
     first = fake.upload(card["id"], "x.txt", CONTENT)
     trello_card = ctx.project.trello.card(card["id"])
-    real = TrelloClient.attachments
+    real = TrelloClient.read_card  # the listing is the card's live read (board reader)
     newer = {}
 
     def stale_listing(self, card_id):
         listed = real(self, card_id)  # B's listing: [X]
-        monkeypatch.setattr(TrelloClient, "attachments", real)
+        monkeypatch.setattr(TrelloClient, "read_card", real)
         newer["upload"] = fake.upload(card["id"], "y.txt", b"newer\n")
         newer["result"] = attachments.for_task(ctx.project, trello_card, still_held=held)  # call A
         return listed
-    monkeypatch.setattr(TrelloClient, "attachments", stale_listing)
+    monkeypatch.setattr(TrelloClient, "read_card", stale_listing)
     stale = attachments.for_task(ctx.project, trello_card, still_held=held)  # call B
     assert [e["id"] for e in stale] == [first["id"]]
     y_entry = next(e for e in newer["result"] if e["id"] == newer["upload"]["id"])

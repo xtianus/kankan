@@ -13,7 +13,7 @@ from kankan.refstore import card_ref, seat_ref
 from kankan.seatstate import load_state, update_state
 from kankan.trello import Comment
 from tests.conftest import git
-from tests.helpers import add_qa_list, put_card_ref
+from tests.helpers import remove_seat, add_qa_list, put_card_ref
 
 PAIR = ModelEffort("sonnet", "high")
 OLD = "fedcba9876543210"
@@ -104,11 +104,11 @@ def test_first_turn_marks_items_after_the_latest_answer_by_trello_dates(qa_env):
     first, second = fresh.attachment_items
     fresh.attachment_items = [replace(first, date="2026-11-17T10:01:00.000Z"),
                               replace(second, date="2026-11-17T10:07:00.000Z")]
-    inputs, context = qa.first_turn(project, fresh, comments)
+    inputs, context, _ = qa.first_turn(project, fresh, comments)
     assert inputs == qa.Inputs([ident(4)], [second.id])
     assert context == qa.Inputs([ident(3)], [first.id])  # the newest context comment covers the older ones
     # never answered: everything is new
-    inputs, context = qa.first_turn(project, fresh, [c for c in comments if c.id != ident(2)])
+    inputs, context, _ = qa.first_turn(project, fresh, [c for c in comments if c.id != ident(2)])
     assert inputs == qa.Inputs([ident(1), ident(3), ident(4)], [first.id, second.id])
     assert context == qa.Inputs([], [])
 
@@ -385,7 +385,7 @@ def _retaken(project, fake, qa_list, lease, follow_up=True):
     new = [fake.user_comment(card["id"], "new question")["id"]] if follow_up else []
     fresh = project.trello.card(card["id"])
     task = qa.claim(project, lease, fresh, PAIR)
-    inputs, context = qa.first_turn(project, fresh, project.trello.comments(card["id"]))
+    inputs, context, _ = qa.first_turn(project, fresh, project.trello.comments(card["id"]))
     assert inputs == qa.Inputs(new, []) and context == qa.Inputs([old], [])
     qa.start_turn(project, lease, task, inputs, context)
     return task, old, new, fresh
@@ -407,7 +407,9 @@ def test_failed_first_turn_of_a_retaken_card_never_resends_the_old_thread(qa_env
     delivery = _deliverable(project, task, qa.Inputs(new, []))
     assert delivery == qa.Inputs(new + [follow], [])
     qa.start_turn(project, lease, task, delivery)
-    assert qa.read_turn(project.paths, task["conversation"])["context"] == {"comments": [old], "attachments": []}
+    context = qa.read_turn(project.paths, task["conversation"])["context"]
+    assert (context["comments"], context["attachments"]) == ([old], [])
+    assert set(context["dates"]) == {old}  # saved with the turn: coverage orders comments by date
     assert _deliverable(project, task, qa.Inputs(new + [follow], [])) is None
 
 
@@ -618,172 +620,7 @@ def test_conversation_lock_gives_up_when_its_directory_keeps_disappearing(kproje
     assert len(calls) < 50  # it waits between attempts instead of spinning
 
 
-# ---------------------------------------------------------------------- seat replacement (T§2, F§8.13)
-
-@pytest.fixture
-def old_seat(kproject, fake_trello):
-    """``codex-qa`` holds a conversation on card A; card B is on top of ``Q&A``; the seat is still running."""
-    project, fake = kproject, fake_trello
-    qa_list = add_qa_list(project, fake)
-    lease = seats.acquire_qa(project, "codex", None)
-    first = _top(project, fake, qa_list, "A")
-    task = qa.claim(project, lease, first, PAIR)
-    top = fake.add_card(qa_list, "B", pos=0)
-    return project, fake, lease, first, task, top
-
-
-def _dead(project, lease):
-    """The launcher died: its flock is gone, its seat ref stays."""
-    seats._release_fd(lease.fd)
-
-
-def _assert_replaced(project, card, task, top, new="claude-qa", old="codex-qa"):
-    value = project.refs.read(card_ref(card.id))
-    assert value.meta["phase"] == "qa" and value.meta["owner"] == new
-    assert value.meta["conversation"] == task["conversation"]
-    assert project.refs.read(card_ref(top["id"])) is None
-    cfg = project.reload_config()
-    assert cfg.qa_seat() == new and old not in cfg.seats
-    assert project.refs.read(seat_ref(old)) is None
-    assert not project.paths.seat_worktree(old).exists()
-    assert not list(project.paths.seats_dir.glob(f"{old}.*"))
-    assert qa.conversation_dir(project.paths, task["conversation"]).exists()
-
-
-@pytest.mark.parametrize("stopped", [True, False], ids=["stopped", "dead"])
-def test_replace_seat_takes_over_the_conversation_of_a_stopped_or_dead_seat(old_seat, stopped):
-    project, fake, lease, card, task, top = old_seat
-    if stopped:
-        seats.release(project, lease)
-        assert project.refs.read(seat_ref("codex-qa")) is None
-    else:
-        _dead(project, lease)
-        assert seats.liveness(project, "codex-qa") == "dead"
-    assert qa.replace_seat(project, "claude") == "codex-qa"
-    _assert_replaced(project, card, task, top)
-    assert qa.replace_seat(project, "claude") is None  # idempotent
-
-
-@pytest.mark.parametrize("state", ["alive", "unavailable"])
-def test_replace_seat_refuses_a_running_or_unavailable_seat(old_seat, state):
-    import os
-    from kankan import procutil
-    from kankan.config import atomic_write_json
-    project, fake, lease, card, task, top = old_seat
-    if state == "unavailable":
-        proc = seats.read_proc(project, "codex-qa") or {}
-        proc["unavailable"] = [{"pid": os.getpid(), "start": procutil.start_time(os.getpid())}]
-        atomic_write_json(project.paths.seats_dir / "codex-qa.proc.json", proc)
-        _dead(project, lease)
-    assert seats.liveness(project, "codex-qa") == state
-    with pytest.raises(KankanError) as err:
-        qa.replace_seat(project, "claude")
-    assert err.value.status == Status.NEEDS_ACTION and "codex-qa" in err.value.message
-    assert project.reload_config().qa_seat() == "codex-qa"
-    assert project.refs.read(card_ref(card.id)).meta["owner"] == "codex-qa"
-
-
-def test_replace_seat_without_a_registered_qa_seat_does_nothing(kproject, fake_trello):
-    add_qa_list(kproject, fake_trello)
-    assert qa.replace_seat(kproject, "claude") is None
-    assert kproject.reload_config().qa_seat() is None
-
-
-def _launcher_completes(project):
-    from kankan.adapters import load_adapter
-    from kankan.qa_launcher import QaLauncher
-    launcher = QaLauncher(project, load_adapter(project.paths, "claude"), None, "claude", "claude-qa")
-    lease = launcher.acquire({})
-    seats.release(project, lease)
-
-
-@pytest.mark.parametrize("fault", ["qa_replace_registered", "qa_replace_ref", "qa_replace_seatref"])
-@pytest.mark.parametrize("completion", ["rerun", "launcher"])
-def test_a_crash_after_each_replacement_stage_is_completed(old_seat, monkeypatch, fault, completion):
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    monkeypatch.setenv("KANKAN_FAULT", fault)
-    with pytest.raises(faults.SimulatedCrash):
-        qa.replace_seat(project, "claude")
-    monkeypatch.delenv("KANKAN_FAULT")
-    assert project.reload_config().qa_seat() == "claude-qa"  # stage 2 is done in every case
-    if completion == "rerun":
-        assert qa.replace_seat(project, "claude") == "codex-qa"
-    else:
-        _launcher_completes(project)
-    _assert_replaced(project, card, task, top)
-
-
-def test_the_new_launcher_takes_up_the_replaced_conversation_whatever_is_on_top(old_seat):
-    from kankan.adapters import load_adapter
-    from kankan.qa_launcher import QaLauncher
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    qa.replace_seat(project, "claude")
-    launcher = QaLauncher(project, load_adapter(project.paths, "claude"), None, "claude", "claude-qa")
-    launcher.lease = launcher.acquire({})
-    try:
-        held = launcher.held_conversation()
-        assert held is not None and held.meta["card"] == card.id
-        taken = qa.take_over(project, launcher.lease, held, PAIR)
-        assert taken["card"] == card.id and taken["conversation"] == task["conversation"]
-    finally:
-        seats.release(project, launcher.lease)
-
-
-def test_a_launcher_of_the_replaced_seat_never_completes_a_replacement_back(old_seat):
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    qa.replace_seat(project, "claude")
-    assert qa.replace_seat(project, "codex", initiate=False) is None
-    assert project.reload_config().qa_seat() == "claude-qa"
-    with pytest.raises(KankanError) as err:
-        seats.acquire_qa(project, "codex", None)
-    assert err.value.status == Status.CONFIG_ERROR
-
-
-def test_an_old_supervisor_relaunching_the_replaced_seat_exits_fatally(old_seat, monkeypatch):
-    import os
-    import subprocess
-    import sys
-    from kankan.launcher import FATAL_EXIT
-    from tests.conftest import ROOT
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    qa.replace_seat(project, "claude")
-    env = dict(os.environ, PYTHONPATH=str(ROOT))
-    proc = subprocess.run([sys.executable, "-m", "kankan", "launcher", "--type=codex", "--seat=codex-qa"],
-                          cwd=project.paths.repo, env=env, capture_output=True, text=True, timeout=60)
-    assert proc.returncode == FATAL_EXIT, proc.stdout + proc.stderr
-    assert project.reload_config().qa_seat() == "claude-qa" and "codex-qa" not in project.cfg.seats
-    assert project.refs.read(card_ref(card.id)).meta["owner"] == "claude-qa"
-    assert project.refs.read(seat_ref("codex-qa")) is None
-
-
-def test_an_old_answer_paused_mid_answer_gets_not_owner_after_the_replacement(old_seat, monkeypatch):
-    from tests.flow import agent_ctx
-    from tests.test_qa_answer import long_text
-    project, fake, lease, card, task, top = old_seat
-    token = qa.start_turn(project, lease, task, qa.Inputs([], []))
-    ctx = agent_ctx(project, lease, monkeypatch)
-    _dead(project, lease)
-    real = faults.point
-    calls = []
-
-    def point(name):
-        if name == "qa_after_chunk" and not calls:
-            calls.append(name)
-            assert qa.replace_seat(project, "claude") == "codex-qa"
-        real(name)
-    monkeypatch.setattr(faults, "point", point)
-    from kankan import qa_answer
-    with pytest.raises(KankanError) as err:
-        qa_answer.answer(ctx, long_text(), token)
-    assert err.value.status == Status.NOT_OWNER
-    posted = [text for text in fake.card_comments(card.id) if "`kankan:qa-" in text]
-    assert len(posted) == 1
-    assert project.refs.read(card_ref(card.id)).meta["owner"] == "claude-qa"
-
+# ---------------------------------------------------------------------- end_admin (seat remove)
 
 def test_end_admin_holds_the_project_lock_once_per_conversation(qa_env, monkeypatch):
     from kankan import config
@@ -822,119 +659,3 @@ def test_end_admin_ends_nothing_while_the_seat_ref_exists(qa_env):
     assert project.refs.read(card_ref(task["card"])).meta["phase"] == "qa"
 
 
-def test_opposite_concurrent_replacements_never_leave_the_conversation_to_an_unregistered_seat(old_seat, monkeypatch):
-    """A swaps codex-qa for claude-qa and pauses; B swaps back. The lifecycle lock serializes them, so the
-    conversation always ends with the registered seat and the registered seat's worktree is never removed by A."""
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    paused, resume = threading.Event(), threading.Event()
-    real = faults.point
-    outcome = {}
-
-    def point(name):
-        if name == "qa_replace_registered" and threading.current_thread().name == "A":
-            paused.set()
-            resume.wait(10)
-        real(name)
-    monkeypatch.setattr(faults, "point", point)
-
-    def run(name, agent_type):
-        try:
-            outcome[name] = qa.replace_seat(project, agent_type)
-        except KankanError as err:
-            outcome[name] = err
-    first = threading.Thread(target=run, args=("A", "claude"), name="A", daemon=True)
-    first.start()
-    assert paused.wait(10)
-    second = threading.Thread(target=run, args=("B", "codex"), name="B", daemon=True)
-    second.start()
-    second.join(1.0)  # B runs now unless the lifecycle lock keeps it waiting
-    resume.set()
-    first.join(30)
-    second.join(30)
-    registered = project.reload_config().qa_seat()
-    assert project.refs.read(card_ref(card.id)).meta["owner"] == registered
-    assert registered == "codex-qa" and outcome == {"A": "codex-qa", "B": "claude-qa"}
-
-
-def test_replace_seat_checks_its_destination_is_still_registered_in_every_stage(old_seat, monkeypatch):
-    from kankan.config import SeatConfig, save_config
-    project, fake, lease, card, task, top = old_seat
-    _dead(project, lease)
-    real = faults.point
-
-    def point(name):
-        if name == "qa_replace_registered":  # another writer registers codex-qa again behind the replacement's back
-            cfg = project.reload_config()
-            del cfg.seats["claude-qa"]
-            cfg.seats["codex-qa"] = SeatConfig(type="codex", role="qa")
-            save_config(project.paths, cfg)
-        real(name)
-    monkeypatch.setattr(faults, "point", point)
-    with pytest.raises(KankanError) as err:
-        qa.replace_seat(project, "claude")
-    assert err.value.status == Status.INELIGIBLE
-    assert project.refs.read(card_ref(card.id)).meta["owner"] == "codex-qa"
-    assert project.paths.seat_worktree("codex-qa").exists()
-
-
-def test_a_crash_after_registration_then_seat_remove_of_the_new_seat_is_completed_later(old_seat, monkeypatch):
-    from kankan import diag
-    project, fake, lease, card, task, top = old_seat
-    seats.release(project, lease)
-    monkeypatch.setenv("KANKAN_FAULT", "qa_replace_registered")
-    with pytest.raises(faults.SimulatedCrash):
-        qa.replace_seat(project, "claude")
-    monkeypatch.delenv("KANKAN_FAULT")
-    diag.seat_remove(project, "claude-qa")
-    assert project.reload_config().qa_seat() is None
-    issues = diag.reconcile(project)
-    assert any(i.kind == "qa_owner_unregistered" and i.subject == card.id for i in issues)
-    assert qa.replace_seat(project, "claude") == "codex-qa"
-    _assert_replaced(project, card, task, top)
-    assert not any(i.kind == "qa_owner_unregistered" for i in diag.reconcile(project))
-
-
-def test_a_plain_seat_remove_is_not_taken_for_a_replacement(kproject, fake_trello):
-    from kankan import auditlog, diag
-    project, fake = kproject, fake_trello
-    add_qa_list(project, fake)
-    lease = seats.acquire_qa(project, "codex", None)
-    seats.release(project, lease)
-    diag.seat_remove(project, "codex-qa")
-    assert list(project.paths.seats_dir.glob("codex-qa.*"))  # the seat files of a removed seat stay
-    seats.release(project, seats.acquire_qa(project, "claude", None))  # `agent --qa claude` registers claude-qa
-    assert qa.replace_seat(project, "claude", initiate=False) is None  # what its launcher runs before occupying
-    assert not any(e["event"] == "qa_seat_replaced" for e in auditlog.read(project.paths))
-
-
-def test_replacement_carries_the_old_seats_label_causes_for_the_moved_card(old_seat, monkeypatch):
-    from kankan import labels
-    project, fake, lease, card, task, top = old_seat
-    labels.set_label(project, card.id, project.cfg.label_error, "fail", "codex-qa", comment="needs help", op_id="f1")
-    _dead(project, lease)
-    qa.replace_seat(project, "claude")
-    causes = load_state(project.paths, "claude-qa").label_causes
-    assert causes[card.id][project.cfg.label_error]["cause"] == "fail"
-    labels.clear_label(project, card.id, project.cfg.label_error, "fail", "claude-qa")
-    assert project.cfg.label_error not in fake.state["cards"][card.id]["idLabels"]
-
-
-def test_a_replacement_record_that_can_no_longer_complete_is_removed(old_seat, monkeypatch):
-    """Crash after stage 2 (codex → claude), `seat remove claude-qa`, then codex starts again: the record naming
-    codex → claude goes, so a later plain `seat remove codex-qa` is never taken for a replacement."""
-    from kankan import auditlog, diag
-    project, fake, lease, card, task, top = old_seat
-    seats.release(project, lease)
-    monkeypatch.setenv("KANKAN_FAULT", "qa_replace_registered")
-    with pytest.raises(faults.SimulatedCrash):
-        qa.replace_seat(project, "claude")
-    monkeypatch.delenv("KANKAN_FAULT")
-    diag.seat_remove(project, "claude-qa")
-    assert qa.replace_seat(project, "codex", initiate=False) is None  # the codex launcher starts again
-    seats.release(project, seats.acquire_qa(project, "codex", None))
-    assert not qa._replacing_path(project.paths).exists()
-    diag.seat_remove(project, "codex-qa")
-    assert qa.replace_seat(project, "claude", initiate=False) is None
-    seats.release(project, seats.acquire_qa(project, "claude", None))
-    assert not any(e["event"] == "qa_seat_replaced" for e in auditlog.read(project.paths))

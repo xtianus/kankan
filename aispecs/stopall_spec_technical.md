@@ -1,7 +1,7 @@
 # kankan stop all and start — technical specification
 
 **Status:** implemented locally ([plan](../aiplans/2026-11-20-stopall.md)).
-**Date:** 2026-11-20
+**Date:** 2026-11-20; revised 2026-11-22 (code check of the graceful stop and of `kankan stop <seat>`, [§4](#4-stop-sequence) step 2 and [§6](#6-changes-to-existing-code)).
 **Base:** [`initial_spec_technical.md`](initial_spec_technical.md) v1.3; this feature changes it as listed in [§7](#7-changes-to-the-initial-technical-specification).
 **Companion:** [`stopall_spec_functional.md`](stopall_spec_functional.md) — the behaviour this file implements; read it first.
 
@@ -24,13 +24,14 @@ Module `kankan/stopall.py`, called by `kankan stop` when no seat is given and by
 ## 4. Stop sequence
 
 1. Inventory; nothing to do → return `nothing_to_stop` (with the restart commands of an existing record) without prompting.
-2. Confirmation through an injectable `confirm(text) -> bool`; the CLI uses `input()` with the prompt on stderr, and refuses with `usage_error` when stdin is not a terminal and `--yes` is absent.
-3. Stop record ([§3](#3-stop-record)).
-4. `agents_cmd.autostart_disable` inside `try`: a `KankanError` is kept as the autostart outcome, never raised.
-5. `stop_requested = True` (via `update_state`) for every alive seat; logged as `stop_all`.
-6. Immediate (default): for each alive seat `diag.seat_recover(project, seat, kill=True, comment=messages.STOP_FORCED)`; a `KankanError` (survivors, ref changed) is recorded for that seat and the next ones continue. After waiting up to 5 s for the sessions to close (they close when their supervisor exits), `Tmux.kill_session` for every remaining session of the project.
-7. Graceful: wait loop, every `poll` seconds (default 1, through `clock`): re-read liveness; for every seat still alive set `stop_requested` again, because `Launcher.start` clears it (initial T§8.3) and a launcher restarted by its supervisor would otherwise forget the stop; print a line per seat when its `(launcher_state, card)` changes. The loop ends when no seat is alive and no `-starting-` session of the project exists; a `-starting-` session is waited for at most `agents_cmd.UP_WAIT_SECONDS` (it becomes an alive seat, or shows an error and is reported). `KeyboardInterrupt` ends the loop and turns into `needs_action`.
-8. Final check: seats `alive`/`unavailable`, sessions of the project, unit file present. Each leftover becomes a `remaining` entry with its remedy; any entry (or an autostart error, or an interrupted wait) raises `KankanError(NEEDS_ACTION, …, data)` carrying the full report.
+2. Graceful only: code check. For every alive seat, the seat file `kankan-agent.json` read with `seats.read_agent_file(paths.seat_worktree(seat))` counts when its `session` equals the seat ref's `meta["session"]` (the launcher's current session; an older file belongs to an earlier launcher) and it records a `code`; when that `code` differs from `build.identity()["code"]` the seat runs another kankan. No verdict (no worktree, no file, unreadable JSON, another session, no ref) never refuses. Any such seat raises `KankanError(USAGE_ERROR, messages.GRACEFUL_OTHER_CODE, {"seats": [{"seat", "code", "version", "package"}…], "command": identity})` before the confirmation, so nothing is written. Sides are worded with `messages.CODE_SIDE`, with `(code <id>)` added when the versions are equal, as in the agent commands' check.
+3. Confirmation through an injectable `confirm(text) -> bool`; the CLI uses `input()` with the prompt on stderr, and refuses with `usage_error` when stdin is not a terminal and `--yes` is absent.
+4. Stop record ([§3](#3-stop-record)).
+5. `agents_cmd.autostart_disable` inside `try`: a `KankanError` is kept as the autostart outcome, never raised.
+6. `stop_requested = True` (via `update_state`) for every alive seat; logged as `stop_all`.
+7. Immediate (default): for each alive seat `diag.seat_recover(project, seat, kill=True, comment=messages.STOP_FORCED)`; a `KankanError` (survivors, ref changed) is recorded for that seat and the next ones continue. After waiting up to 5 s for the sessions to close (they close when their supervisor exits), `Tmux.kill_session` for every remaining session of the project.
+8. Graceful: wait loop, every `poll` seconds (default 1, through `clock`): re-read liveness; for every seat still alive set `stop_requested` again, because `Launcher.start` clears it (initial T§8.3) and a launcher restarted by its supervisor would otherwise forget the stop; print a line per seat when its `(launcher_state, card)` changes. The loop ends when no seat is alive and no `-starting-` session of the project exists; a `-starting-` session is waited for at most `agents_cmd.UP_WAIT_SECONDS` (it becomes an alive seat, or shows an error and is reported). `KeyboardInterrupt` ends the loop and turns into `needs_action`.
+9. Final check: seats `alive`/`unavailable`, sessions of the project, unit file present. Each leftover becomes a `remaining` entry with its remedy; any entry (or an autostart error, or an interrupted wait) raises `KankanError(NEEDS_ACTION, …, data)` carrying the full report.
 
 Report data: `{"stopped": [seat…], "already_stopped": [seat…], "graceful": bool, "sessions_closed": [name…], "autostart": "disabled" | "already disabled" | "error: <message>", "restart": ["kankan up …", "kankan autostart enable …"], "remaining": [{"what", "remedy"}…], "interrupted": bool}`, plus `nothing_to_stop` or `cancelled` when they apply.
 
@@ -41,8 +42,8 @@ Report data: `{"stopped": [seat…], "already_stopped": [seat…], "graceful": b
 ## 6. Changes to existing code
 
 - `diag.seat_recover(project, seat, kill, comment=None)`: an optional comment template replaces `ADMIN_SEAT_RECOVERED`; the idempotency key changes with it (`stop-force-…`), so the two comments never deduplicate each other.
-- `cli`: `stop` takes an optional `seat` and the flags `--graceful` and `--yes` (refused with a seat); new command `start`.
-- `Launcher.start` clears a stale `stop_requested` **before** publishing `starting`, no longer after it: a stop requested once the seat shows `starting` (for example `kankan stop <seat>` during startup) was erased. A launcher restarted by its supervisor still clears the request, hence the re-assertion of [§4](#4-stop-sequence) step 7.
+- `cli`: `stop` takes an optional `seat` and the flags `--graceful` and `--yes` (refused with a seat); new command `start`. `stop <seat>` opens the project and, when `seats.liveness` is `alive`, runs the code check of [§4](#4-stop-sequence) step 2 on that seat alone with `messages.STOP_SEAT_OTHER_CODE` (`usage_error`, data `{"seats": […], "command": identity}`) before setting `stop_requested`.
+- `Launcher.start` clears a stale `stop_requested` **before** publishing `starting`, no longer after it: a stop requested once the seat shows `starting` (for example `kankan stop <seat>` during startup) was erased. A launcher restarted by its supervisor still clears the request, hence the re-assertion of [§4](#4-stop-sequence) step 8.
 
 ## 7. Changes to the initial technical specification
 

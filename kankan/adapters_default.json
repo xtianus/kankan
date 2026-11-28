@@ -14,6 +14,11 @@
       "status"
     ],
     "new_conversation": "/clear",
+    "prompt_cache": {
+      "expiry": "exact",
+      "lifetime_minutes": 60,
+      "reporter": "claude_status_line"
+    },
     "submit_key": "Enter",
     "queue_while_working": true,
     "ready": [
@@ -139,6 +144,11 @@
       "status"
     ],
     "new_conversation": "/new",
+    "prompt_cache": {
+      "expiry": "estimated",
+      "lifetime_minutes": 30,
+      "reporter": null
+    },
     "submit_key": "Enter",
     "queue_while_working": false,
     "ready": [

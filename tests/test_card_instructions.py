@@ -184,14 +184,14 @@ def test_edit_between_reads_clears_in_claim(kproject, fake_trello, monkeypatch):
     lease = seats.acquire(project, "claude")
     assert workflow.tick(project, lease) is None
     assert _has_error(project, fake, card["id"])
-    original = type(project.trello).snapshot
+    original = type(project.trello).read_board
     calls = []
-    def snapshot(self, board_id):
+    def read_board(self, board_id):  # every board view goes through it (board reader)
         calls.append(1)
         if len(calls) == 2:  # the claim's in-lock read sees the fix
             fake.state["cards"][card["id"]]["desc"] = "fixed\n"
         return original(self, board_id)
-    monkeypatch.setattr(type(project.trello), "snapshot", snapshot)
+    monkeypatch.setattr(type(project.trello), "read_board", read_board)
     task = workflow.tick(project, lease)
     assert task["card"] == card["id"]
     assert not _has_error(project, fake, card["id"])

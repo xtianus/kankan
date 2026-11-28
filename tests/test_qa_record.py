@@ -97,10 +97,11 @@ def test_q_and_a_code_keeps_its_user_facing_texts_in_messages():
     the functions the feature added elsewhere, is raised with an inline text."""
     import ast
     import inspect
-    from kankan import agents_cmd, diag, qa_answer, qa_launcher, seats
+    from kankan import agents_cmd, qa_answer, qa_launcher, seatremove, seats
     sources = [inspect.getsource(module) for module in (qa, qa_answer, qa_launcher)]
     sources += [inspect.getsource(function) for function in (
-        agents_cmd.parse_wanted, agents_cmd._wait_started, seats.acquire_qa, diag._qa_seat_remove)]
+        agents_cmd.parse_wanted, agents_cmd._wait_started, seats.acquire_qa, seatremove.remove, seatremove.complete,
+        seatremove.stop_seat)]
     inline = []
     for source in sources:
         for node in ast.walk(ast.parse(inspect.cleandoc(source) if source.startswith(" ") else source)):

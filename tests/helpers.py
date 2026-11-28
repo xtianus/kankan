@@ -38,7 +38,7 @@ def bind_project(repo, fake, monkeypatch=None, board=None, **cfg_overrides) -> P
     paths = Paths.discover(repo)
     save_config(paths, cfg)
     project = Project.open(repo)
-    project.board = board
+    project.fake_board = board  # the fake board dict; ``project.board`` is the board reader
     return project
 
 
@@ -112,3 +112,9 @@ def hold(project, seat, mode="obey"):
                             start_new_session=True, stdout=subprocess.PIPE, text=True)
     assert proc.stdout.readline().strip() == "held"
     return proc
+
+
+def remove_seat(project, seat):
+    """`kankan seat remove <seat> --yes` (seat F§3.2): an immediate removal, confirmed."""
+    from kankan import seatremove
+    return seatremove.remove(project, seat, graceful=False, confirm=lambda text: True, say=lambda text: None)

@@ -105,12 +105,32 @@ def test_stale_blocked_worktree(board):
     assert find(diag.reconcile(project), "stale_blocked_worktree")
 
 
-def test_old_label(board):
-    project, fake, lease = board
+def _old_error_cause(project, card_id):
     old = clock.iso(clock.now() - timedelta(hours=30))
     update_state(project.paths, "claude-1", lambda s: s.label_causes.update(
-        {"b" * 24: {project.cfg.label_error: {"cause": "fail", "at": old}}}))
-    assert find(diag.reconcile(project), "old_label")
+        {card_id: {project.cfg.label_error: {"cause": "fail", "at": old}}}))
+
+
+def test_old_label(board):
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "c")
+    fake.state["cards"][card["id"]]["idLabels"] = [project.cfg.label_error]
+    _old_error_cause(project, card["id"])
+    assert find(diag.reconcile(project), "old_label")[0].subject == card["id"]
+
+
+def test_old_label_removed_by_the_user_not_reported(board):
+    """The seat state still records why kankan set the label, but the card no longer has it."""
+    project, fake, lease = board
+    card = fake.add_card(project.cfg.backlog, "c")
+    _old_error_cause(project, card["id"])
+    assert not find(diag.reconcile(project), "old_label")
+
+
+def test_old_label_of_deleted_card_not_reported(board):
+    project, fake, lease = board
+    _old_error_cause(project, "b" * 24)
+    assert not find(diag.reconcile(project), "old_label")
 
 
 def test_push_failed(board):
@@ -216,7 +236,7 @@ def test_seat_remove_of_qa_seat_archives_no_list(board):
     add_qa_list(project, fake)
     seats.release(project, seats.acquire_qa(project, "claude", None))
     open_before = {i for i, l in fake.state["lists"].items() if not l["closed"]}
-    diag.seat_remove(project, "claude-qa")
+    remove_seat(project, "claude-qa")
     assert "claude-qa" not in project.reload_config().seats
     assert {i for i, l in fake.state["lists"].items() if not l["closed"]} == open_before
     assert not project.paths.seat_worktree("claude-qa").exists()
@@ -225,7 +245,7 @@ def test_seat_remove_of_qa_seat_archives_no_list(board):
 # ---------------------------------------------------------------------- Q&A (questions T§2, T§3)
 from kankan import qa  # noqa: E402
 from kankan.config import project_lock  # noqa: E402
-from tests.helpers import add_qa_list, put_card_ref  # noqa: E402
+from tests.helpers import add_qa_list, put_card_ref, remove_seat  # noqa: E402
 
 CONV = "0123456789abcdef"
 
@@ -318,7 +338,7 @@ def test_fix_reads_archived_recorded_cards_outside_the_project_lock_and_prunes_t
     _record(project, *archived)
     lock = str(project.paths.kankan_dir / "project.lock")
     reads = []
-    real = TrelloClient.card
+    real = TrelloClient.read_card  # every card read goes through it (board reader)
 
     def card(self, card_id, *args, **kwargs):
         if card_id in archived:
@@ -326,7 +346,7 @@ def test_fix_reads_archived_recorded_cards_outside_the_project_lock_and_prunes_t
             reads.append(entry is not None and entry[1] == threading.get_ident())
             time.sleep(0.2)  # a slow Trello
         return real(self, card_id, *args, **kwargs)
-    monkeypatch.setattr(TrelloClient, "card", card)
+    monkeypatch.setattr(TrelloClient, "read_card", card)
     fixed = diag.reconcile(project, fix=True)
     assert reads == [False, False, False]  # read without the project lock
     assert qa.recorded(project.paths) == set()
@@ -343,14 +363,14 @@ def test_fix_keeps_a_recorded_card_whose_ref_changed_during_the_reads(board, mon
     card_id = fake.add_card(qa_list, "old")["id"]
     fake.user_archive(card_id)
     _record(project, card_id)
-    real = TrelloClient.card
+    real = TrelloClient.read_card  # every card read goes through it (board reader)
 
     def card(self, ident, *args, **kwargs):
         result = real(self, ident, *args, **kwargs)
         if ident == card_id and project.refs.read(card_ref(card_id)) is None:
             put_card_ref(project, card_id, "abcdefgh", phase="parked", owner=None, target_list=qa_list)
         return result
-    monkeypatch.setattr(TrelloClient, "card", card)
+    monkeypatch.setattr(TrelloClient, "read_card", card)
     diag.reconcile(project, fix=True)
     assert qa.recorded(project.paths) == {card_id}
 
@@ -389,3 +409,74 @@ def test_old_sections_error_not_written_not_reported(board):
                                                        "error_confirmed": False, "pending": []}}})
     issues = [i for i in diag.reconcile(project) if i.kind == "old_label"]
     assert not any(i.subject == "c" * 24 for i in issues), issues
+
+
+def test_reconcile_fix_prunes_answer_record(board):
+    from kankan import qapool
+    from kankan.config import atomic_write_json
+    project, fake, lease = board
+    qa_list = add_qa_list(project, fake)
+    live = fake.add_card(qa_list, "still asking")["id"]
+    moved = fake.add_card(project.cfg.backlog, "moved out of Q&A")["id"]  # open: its entry stays
+    archived = fake.add_card(qa_list, "archived")["id"]
+    deleted = fake.add_card(qa_list, "deleted")["id"]
+    fake.user_archive(archived)
+    fake.user_delete(deleted)
+    atomic_write_json(project.paths.kankan_dir / "qa-answered.json",
+                      {"cards": {card_id: qapool.blank_entry() for card_id in (live, moved, archived, deleted)}})
+    reported = find(diag.reconcile(project), "qa_answer_record_stale")
+    assert {i.subject for i in reported} == {archived, deleted} and not any(i.fixed for i in reported)
+    assert set(qapool.load_record(project.paths)) == {live, moved, archived, deleted}  # reporting changes nothing
+    fixed = find(diag.reconcile(project, fix=True), "qa_answer_record_entry_removed")
+    assert {i.subject for i in fixed} == {archived, deleted} and all(i.fixed for i in fixed)
+    assert set(qapool.load_record(project.paths)) == {live, moved}
+    assert not find(diag.reconcile(project), "qa_answer_record_stale")
+
+
+def _parked_elsewhere(project, fake, list_id, **extra):
+    """A card given back to Backlog (``parked``, move done) that the user then moved to ``list_id``."""
+    card = fake.add_card(project.cfg.backlog, "given back")
+    put_card_ref(project, card["id"], card["shortLink"], phase="parked", cause="yield", branch="b",
+                 target_list=project.cfg.backlog, **extra)
+    fake.user_move(card["id"], list_id)
+    return card
+
+
+def test_fix_accepts_user_move_of_parked_card(board):
+    project, fake, lease = board
+    ideas = fake.add_list(project.cfg.board_id, "Ideas")["id"]
+    card = _parked_elsewhere(project, fake, ideas)
+    diag.reconcile(project)
+    assert find(diag.reconcile(project), "phase_list_mismatch")[0].subject == card["id"]
+    issue = find(diag.reconcile(project, fix=True), "parked_target_cleared")[0]
+    assert issue.fixed and issue.subject == card["id"] and "Ideas" in issue.detail and "Backlog" in issue.detail
+    meta = project.refs.read(card_ref(card["id"])).meta
+    assert "target_list" not in meta and meta["phase"] == "parked" and meta["branch"] == "b"
+    assert fake.card_list(card["id"]) == ideas
+    for _ in range(2):
+        assert not find(diag.reconcile(project), "phase_list_mismatch")
+    fake.user_move(card["id"], project.cfg.backlog)  # moving it back is accepted too
+    for _ in range(2):
+        assert not find(diag.reconcile(project), "phase_list_mismatch")
+
+
+@pytest.mark.parametrize("where", ["done", "seat", "blocked"])
+def test_fix_keeps_parked_card_moved_into_workflow_lists(board, where):
+    project, fake, lease = board
+    list_id = {"done": project.cfg.done, "blocked": project.cfg.blocked,
+               "seat": project.cfg.seats["claude-1"].in_progress}[where]
+    card = _parked_elsewhere(project, fake, list_id)
+    value = project.refs.read(card_ref(card["id"]))
+    diag.reconcile(project)
+    assert not find(diag.reconcile(project, fix=True), "parked_target_cleared")
+    assert project.refs.read(card_ref(card["id"])).oid == value.oid
+    assert find(diag.reconcile(project), "phase_list_mismatch")
+
+
+def test_fix_leaves_parked_ref_with_pending_move(board):
+    project, fake, lease = board
+    ideas = fake.add_list(project.cfg.board_id, "Ideas")["id"]
+    card = _parked_elsewhere(project, fake, ideas, from_list=project.cfg.seats["claude-1"].in_progress)
+    value = project.refs.read(card_ref(card["id"]))
+    assert not find(diag.reconcile(project, fix=True), "parked_target_cleared")
+    assert project.refs.read(card_ref(card["id"])).oid == value.oid

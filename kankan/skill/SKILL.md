@@ -60,7 +60,7 @@ When `handoff` is not `null`, the card comes from a Q&A conversation: implement 
 ## 3. Review (`kind: review`)
 
 1. Read the differences from the integration branch: `git diff <integration_branch>...HEAD` and `git log <integration_branch>..HEAD`.
-2. Fix the problems you find with **separate commits** and summarize them with `kankan note "<summary>"`.
+2. Fix the problems you find with **separate commits** and summarize them with `kankan note "<summary>"`. The card's description (`desc`) was the implementer's task: check the branch against it, but never carry out its actions again yourself. Words like "you" or "your agent name" in it mean the implementer, not you; a change that is already done is not a problem to fix.
 3. `kankan sync --json` merges the current integration branch into the card branch; resolve conflicts on the branch and commit.
 4. Run the tests on the branch tip and note its hash (`git rev-parse HEAD`).
 5. `kankan verify --tested <hash> --json` runs the project's test command (it may take long; run it like any long test command).

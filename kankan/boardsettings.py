@@ -5,6 +5,7 @@ import dataclasses
 import re
 import time
 
+from kankan.boardreader import LIVE, max_age
 from kankan import boardconfig, messages, notify
 from kankan.adapters import adapter_types, load_adapter
 from kankan.config import atomic_write_json, file_lock, project_lock
@@ -46,7 +47,7 @@ def apply_read(project, read: SettingsRead, adapters: dict, *, write: bool = Tru
 
 
 def _prune(project, card_id):
-    comments = project.trello.comments(card_id)
+    comments = project.board.thread(card_id, LIVE)
     me = notify.kankan_member_id(project)
     eligible = [c for c in comments if c.member_id == me and re.search(r'`kankan:(?!help`)[^`]+`\s*$', c.text)]
     for comment in eligible[:-10]:
@@ -67,7 +68,7 @@ def drain_actions(project) -> None:
                         continue
                     card_id, kind = action['card_id'], action['kind']
                     record = state.cards.get(card_id, {})
-                    card = project.trello.card(card_id)
+                    card = project.board.card(card_id, LIVE)
                     if card:
                         if kind == 'add_error' and record.get('invalid'):
                             if project.cfg.label_error in card.label_ids and not (record.get('error_confirmed') or record.get('error_write_started')):
@@ -88,7 +89,7 @@ def drain_actions(project) -> None:
                             record['error_write_started'] = False
                         elif kind == 'comment':
                             me = notify.kankan_member_id(project)
-                            existing = next((c for c in project.trello.comments(card_id)
+                            existing = next((c for c in project.board.thread(card_id, LIVE)
                                              if c.member_id == me and c.text.rstrip().endswith(marker(ident))), None)
                             if not existing:
                                 mention = notify.mention(project, card_id) if record.get('invalid') else ''
@@ -134,7 +135,8 @@ def poll(project, adapters: dict) -> list:
         state.last_fast_read = now
         _save(project, state)
     try:
-        result = apply_read(project, project.trello.settings_cards(cfg.settings_list), adapters)
+        result = apply_read(project, project.board.settings_cards(cfg.settings_list, max_age(cfg.settings_poll_seconds)),
+                            adapters)
         drain_actions(project)
         return result.checks
     except KankanError as err:

@@ -147,7 +147,7 @@ def test_stop_after_current_task(chain, capsys, monkeypatch):
     _, log = start_agent(tmux, project, scenario={"steps": [{"sleep": 5, "shell": COMMIT_AND_DONE}]})
     assert wait_for(lambda: launcher_state(project, "claude-1") == "working", timeout=30)
     monkeypatch.chdir(project.paths.repo)
-    assert cli.main(["stop", "claude-1"]) == 0
+    assert cli.main(["seat", "stop", "claude-1"]) == 0
     assert wait_for(lambda: not tmux.has_session(seat_session(project, "claude-1")), timeout=40)
     assert fake.card_list(card["id"]) == project.reload_config().seats["claude-1"].implemented
 

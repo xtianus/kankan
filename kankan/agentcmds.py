@@ -9,9 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from kankan import attachments, cards, cardsections, messages, notify, qa, worktrees
+from kankan.boardreader import LIVE
+from kankan import attachments, cards, cardsections, messages, notify, qa, qapool, worktrees
 from kankan.adapters import adapter_types
-from kankan.cards import CardMeta, Phase, target_list_for, transition
+from kankan.cards import CardMeta, Phase, implemented_destination, target_list_for, transition
+from kankan.config import project_lock
 from kankan.errors import KankanError, Status
 from kankan.project import Project
 from kankan.refstore import RefValue, card_ref
@@ -21,7 +23,7 @@ from kankan.trello import Comment
 
 QA_PHASES = (Phase.QA.value,)
 _MENTIONS = re.compile(r"\n\n@\S+(?: @\S+)*$")
-_CHUNK_PREFIX = re.compile(r"^[0-9]+/[0-9]+\n\n")
+_CHUNK_PREFIX = qa.CHUNK_PREFIX
 
 
 @dataclass
@@ -53,17 +55,22 @@ def context(cwd=None) -> AgentContext:
 
 
 def _check_code(cwd, seat: str, session: str) -> None:
-    """Refuse when this command runs different kankan code than the seat's launcher (an edit or upgrade since)."""
-    from kankan.build import code_id
+    """Refuse when this command runs different kankan code than the seat's launcher (an upgrade or an edit since,
+    or another copy of kankan): the hash compares, the versions and package directories explain."""
+    from kankan.build import identity
     from kankan.seats import read_agent_file
     data = read_agent_file(cwd or os.getcwd()) or {}
-    recorded = data.get("code")
-    if recorded and data.get("session") == session and recorded != code_id():
-        raise KankanError(Status.CONFIG_ERROR,
-                          f"kankan changed since the launcher of {seat} started (launcher code {recorded}, this "
-                          f"command {code_id()}): restart the agents (kill their tmux sessions, then `kankan up`) "
-                          "so that launcher and agent commands run the same kankan", {"launcher": recorded,
-                                                                                     "command": code_id()})
+    recorded, mine = data.get("code"), identity()
+    if not recorded or data.get("session") != session or recorded == mine["code"]:
+        return
+    theirs = {"code": recorded, "version": data.get("version") or "?", "package": data.get("package") or "?"}
+
+    def side(info: dict) -> str:
+        text = messages.CODE_SIDE.format(**info)
+        return text + f" (code {info['code']})" if theirs["version"] == mine["version"] else text
+    raise KankanError(Status.CONFIG_ERROR, messages.CODE_MISMATCH.format(seat=seat, launcher=side(theirs),
+                                                                        command=side(mine)),
+                      {"launcher": theirs, "command": mine})
 
 
 def _card_ref(ctx: AgentContext) -> Optional[RefValue]:
@@ -181,7 +188,7 @@ def _handoff(project, meta: dict, comments: List[Comment]) -> Optional[str]:
 def _qa_card(ctx: AgentContext):
     """One card read (C1) for a Q&A command: ``not_owner`` when the conversation is over (the card left ``Q&A``,
     was archived or deleted, or got ``HOLD``), even before the launcher's poll has deleted the ref."""
-    card = ctx.project.trello.card(ctx.task["card"])
+    card = ctx.project.board.card(ctx.task["card"], LIVE)
     if qa.active_ended(ctx.project.cfg, card):
         raise _qa_ended(ctx)
     return card
@@ -231,14 +238,15 @@ def _qa_task_data(ctx: AgentContext) -> dict:
         raise
     for entry in inputs:
         entry["new"] = entry["id"] in delivered.attachments
-    comments = _thread(project, project.trello.comments(card.id), set(delivered.comments))
-    latest = project.trello.card(current["card"])
+    comments = _thread(project, project.board.thread(card.id, LIVE), set(delivered.comments))
+    latest = project.board.card(current["card"], LIVE)
     if qa.active_ended(project.cfg, latest) or not _qa_still_ours(ctx):
         _discard_ended_files(ctx, card.short)
         raise _qa_ended(ctx)
     return {
         "task_id": current["id"], "kind": "qa",
-        "card": {"title": card.name, "desc": card.desc, "url": card.url, "shortLink": card.short},
+        "card": {"title": qapool.plain_title(project.paths, card), "desc": card.desc, "url": card.url,
+                 "shortLink": card.short},
         "turn": turn.get("token") or current.get("turn"), "attachments": inputs, "comments": comments,
         "worktree": str(ctx.worktree), "integration": current.get("base"), "instructions": messages.INSTRUCTIONS["qa"],
     }
@@ -250,13 +258,13 @@ def task(ctx: AgentContext) -> dict:
         return _qa_task_data(ctx)
     phases = {"impl": (Phase.IMPL.value,), "review": (Phase.REVIEW.value,)}.get(current["kind"], cards.OWNED_PHASES)
     value = _own_ref(ctx, phases)
-    card = ctx.project.trello.card(current["card"])
+    card = ctx.project.board.card(current["card"], LIVE)
     if card is None or card.closed:
         raise KankanError(Status.INELIGIBLE, "the card was deleted or archived")
     inputs = attachments.for_task(ctx.project, card, still_held=lambda: _hold(ctx, phases))
     extra = {}
     if current["kind"] == "impl":
-        thread = ctx.project.trello.comments(card.id)
+        thread = ctx.project.board.thread(card.id, LIVE)
         extra = {"comments": _thread(ctx.project, thread), "handoff": _handoff(ctx.project, value.meta, thread)}
     parsed = cardsections.parse(card.desc, adapter_types(ctx.project.paths))
     if current["kind"] in ("impl", "review"):
@@ -266,7 +274,8 @@ def task(ctx: AgentContext) -> dict:
         extra["card_instructions_error"] = None if parsed.valid else cardsections.problems_text(parsed.problems)
     return {
         "task_id": current["id"], "kind": current["kind"], "card_id": card.id, "short": card.short,
-        "title": card.name, "url": card.url, "desc": parsed.spec, "phase": value.meta.get("phase"),
+        "title": qapool.plain_title(ctx.project.paths, card), "url": card.url, "desc": parsed.spec,
+        "phase": value.meta.get("phase"),
         "branch": value.meta.get("branch"), "worktree": str(ctx.worktree), "main": ctx.project.cfg.integration_branch,
         "integration_branch": ctx.project.cfg.integration_branch,
         "dirty_files": worktrees.dirty_files(ctx.worktree), "resumed": bool(current.get("resumed")),
@@ -323,12 +332,13 @@ def done(ctx: AgentContext) -> dict:
         raise KankanError(Status.NEEDS_ACTION, "this task is not closed with `done`; follow the task instructions")
     value = _card_ref(ctx)
     meta = value.meta if value else {}
-    if meta.get("phase") == Phase.IMPLEMENTED.value and meta.get("implementer") == ctx.seat:
+    parked_by_removal = meta.get("phase") == Phase.PARKED.value and meta.get("cause") == "seat_removed"
+    if (meta.get("phase") == Phase.IMPLEMENTED.value or parked_by_removal) and meta.get("implementer") == ctx.seat:
         if worktrees.current_branch(ctx.worktree) == meta.get("branch"):
             worktrees.detach(ctx.worktree)
         _converge_quietly(ctx)
         signal(ctx, "done")
-        return {"card": current["card"], "phase": "implemented", "branch": meta.get("branch")}
+        return {"card": current["card"], "phase": meta["phase"], "branch": meta.get("branch")}
     value = _own_ref(ctx, (Phase.IMPL.value,))
     branch = value.meta["branch"]
     require_clean(ctx.worktree)
@@ -338,16 +348,18 @@ def done(ctx: AgentContext) -> dict:
     if worktrees.current_branch(ctx.worktree) == branch:
         worktrees.detach(ctx.worktree)
     card = _trello_card(ctx)
-    new = CardMeta.from_dict(value.meta).evolve(
-        phase=Phase.IMPLEMENTED.value, owner=None, session=None,
-        target_list=target_list_for(ctx.project.cfg, Phase.IMPLEMENTED.value, None, ctx.seat))
-    transition(ctx.project, ctx.lease, card, value, new, messages.IMPLEMENTED.format(seat=ctx.seat, branch=branch))
+    with project_lock(ctx.project.paths):  # seat T§3: the destination from the configuration of this moment
+        phase, target, cause = implemented_destination(ctx.project.reload_config(), ctx.seat)
+        new = CardMeta.from_dict(value.meta).evolve(phase=phase, owner=None, session=None, cause=cause,
+                                                    target_list=target)
+        text = messages.IMPLEMENTED if phase == Phase.IMPLEMENTED.value else messages.IMPLEMENTED_NO_REVIEWER
+        transition(ctx.project, ctx.lease, card, value, new, text.format(seat=ctx.seat, branch=branch))
     signal(ctx, "done")
-    return {"card": current["card"], "phase": "implemented", "branch": branch}
+    return {"card": current["card"], "phase": phase, "branch": branch}
 
 
 def _trello_card(ctx: AgentContext):
-    card = ctx.project.trello.card(ctx.task["card"])
+    card = ctx.project.board.card(ctx.task["card"], LIVE)
     if card is None:
         from kankan.trello import Card
         card = Card(id=ctx.task["card"], short=ctx.task.get("short", ""), board_id="", name="", desc="", url="",
@@ -365,13 +377,13 @@ def _yield_meta(project, value: RefValue, cause: str = "yield", current_list: Op
     if cause != "yield":
         return meta.evolve(phase=Phase.PARKED.value, owner=None, session=None, cause=cause, target_list=current_list)
     if value.meta.get("phase") == Phase.REVIEW.value:
-        return meta.evolve(phase=Phase.IMPLEMENTED.value, owner=None, session=None,
-                           target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None, meta.implementer))
+        phase, target, cause = implemented_destination(project.reload_config(), meta.implementer)
+        return meta.evolve(phase=phase, owner=None, session=None, cause=cause, target_list=target)
     return meta.evolve(phase=Phase.PARKED.value, owner=None, session=None, cause="yield",
                        target_list=project.cfg.backlog)
 
 
-def kankan_yield(project, lease: Lease, card, value: RefValue, cause: str = "yield") -> None:
+def kankan_yield(project, lease: Lease, card, value: RefValue, cause: str = "yield") -> str:
     """Give the card back (§10.3): impl → Backlog top, review → implementer's Implemented.
 
     With a user-move cause (§14.6) the ref is parked where the user put the card, without a move.
@@ -381,15 +393,20 @@ def kankan_yield(project, lease: Lease, card, value: RefValue, cause: str = "yie
     if worktrees.current_branch(worktree) is not None:
         worktrees.detach(worktree)
     current = card.list_id if (card is not None and not card.closed) else None
-    new = _yield_meta(project, value, cause, current)
     if card is None:
         from kankan.trello import Card
         card = Card(id=value.meta["card"], short=value.meta.get("short", ""), board_id="", name="", desc="", url="",
                     list_id="", pos=0, label_ids=[], attachments=[], closed=True, last_activity="")
-    text = (messages.REVIEW_YIELDED if value.meta.get("phase") == Phase.REVIEW.value else messages.YIELDED).format(
-        seat=lease.seat, branch=value.meta.get("branch"))
-    transition(project, lease, card, value, new, text if cause == "yield" else messages.USER_MOVED_YIELD.format(
-        seat=lease.seat, branch=value.meta.get("branch")))
+    with project_lock(project.paths):  # seat T§3: a review goes back to the destination of this moment
+        new = _yield_meta(project, value, cause, current)
+        if value.meta.get("phase") != Phase.REVIEW.value:
+            text = messages.YIELDED
+        else:
+            text = messages.REVIEW_YIELDED if new.phase == Phase.IMPLEMENTED.value else messages.REVIEW_YIELDED_BACKLOG
+        text = text.format(seat=lease.seat, branch=value.meta.get("branch"))
+        transition(project, lease, card, value, new, text if cause == "yield" else messages.USER_MOVED_YIELD.format(
+            seat=lease.seat, branch=value.meta.get("branch")))
+    return new.phase
 
 
 def _qa_yield(ctx: AgentContext) -> dict:
@@ -423,12 +440,12 @@ def yield_(ctx: AgentContext) -> dict:
     state = load_state(ctx.project.paths, ctx.seat)
     reason = (state.suspend_requested or {}).get("reason") or (state.task or {}).get("suspend_cause")
     cause = "yield"
-    card = ctx.project.trello.card(current["card"])
+    card = ctx.project.board.card(current["card"], LIVE)
     if reason == "user_moved" or reason in ("user_deleted", "user_archived"):
         cause = "user_deleted" if card is None else ("user_archived" if card.closed else "user_moved")
-    kankan_yield(ctx.project, ctx.lease, card, value, cause)
+    phase = kankan_yield(ctx.project, ctx.lease, card, value, cause)
     signal(ctx, "yield")
-    return {"card": current["card"], "phase": "parked" if cause != "yield" or meta.get("phase") == "impl" else "implemented"}
+    return {"card": current["card"], "phase": phase}
 
 
 def _qa_turn(ctx: AgentContext, turn: Optional[str]) -> str:
@@ -450,7 +467,7 @@ def _ask_or_fail(ctx: AgentContext, text: str, label_id: str, cause: str, templa
     current = ctx.task
     if current.get("kind") == "qa":
         _own_ref(ctx, QA_PHASES)  # before the conversation lock, so an ended conversation's directory stays gone
-        with qa.conversation_lock(project.paths, current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
+        with qa.card_conversation_lock(project, current["card"], current["conversation"], qa.CONVERSATION_LOCK_TIMEOUT):
             # under the lock no turn starts: the token checked here stays current until the signal is written
             if not _qa_still_ours(ctx):
                 qa.drop_orphan(project, current["card"], current["conversation"])
@@ -480,7 +497,7 @@ def _label_and_comment(ctx: AgentContext, text: str, label_id: str, cause: str, 
     def record(state):
         state.label_causes.setdefault(card_id, {})[label_id] = {"cause": cause, "at": clock.iso(clock.now())}
         if not in_qa:
-            state.comment_cursor[card_id] = comment.id
+            state.comment_cursor[card_id] = comment.date or comment.id  # a comment point: its date (board reader T§3)
     update_state(project.paths, ctx.seat, record)
     project.log(cause, seat=ctx.seat, card=card_id)
     signal(ctx, cause, {"turn": token} if in_qa else None)

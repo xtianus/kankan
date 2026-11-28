@@ -13,7 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional, Sequence
 
-from kankan import gitutil
+from kankan.boardreader import LIVE
+from kankan import build, gitutil
 from kankan.adapters import WORK_ROLES, adapter_types
 from kankan.errors import KankanError, Status
 
@@ -316,20 +317,28 @@ def _check_autostart(paths, fix: bool, types: Sequence[str]) -> Check:
     unit_path = match.group(1).split(os.pathsep) if match else []
     needed = {str(Path(p).parent) for p in [shutil.which("kankan")] + [shutil.which(t) for t in types] if p}
     missing = sorted(d for d in needed if d not in unit_path)
-    if not missing:
+    legacy = agents_cmd.unit_legacy(text)
+    if not missing and not legacy:
         return Check("autostart", OK, str(unit))
-    up = re.search(r" -m kankan up (.*)$", text, re.M)
+    problems = ([f"its PATH lacks {', '.join(missing)}"] if missing else []) + \
+        ([f"it runs `-m kankan`, which imports a kankan/ directory of {paths.repo} instead of the installed kankan"]
+         if legacy else [])
+    up = agents_cmd.UNIT_UP.search(text)
     wanted, qa = agents_cmd.parse_wanted(up.group(1).split()) if up else ({}, None)
+    modern = text.replace(f"ExecStart={sys.executable} -m kankan up ", f"ExecStart={agents_cmd.unit_exec()} up ")
     strip = lambda t: re.sub(r"^Environment=PATH=.*$", "", t, flags=re.M)  # noqa: E731
-    generated = up is not None and strip(text) == strip(agents_cmd.unit_content(holder, wanted, qa))
+    generated = up is not None and strip(modern) == strip(agents_cmd.unit_content(holder, wanted, qa))
     if not generated:
-        return Check("autostart", MANUAL, f"{unit} was edited and its PATH lacks {', '.join(missing)}",
-                     f"add {os.pathsep.join(missing)} to its Environment=PATH=")
+        steps = ([f"add {os.pathsep.join(missing)} to its Environment=PATH="] if missing else []) + \
+            ([f"replace `-m kankan` in its ExecStart= with `-c \"{build.BOOTSTRAP}\"`"] if legacy else [])
+        return Check("autostart", MANUAL, f"{unit} was edited and {' and '.join(problems)}", "; ".join(steps))
     if not fix:
-        return Check("autostart", MANUAL, f"the unit's PATH lacks {', '.join(missing)}", "kankan doctor (without --no-fix)")
-    unit.write_text(agents_cmd.unit_content(holder, wanted, qa))
+        return Check("autostart", MANUAL, f"the unit: {'; '.join(problems)}", "kankan doctor (without --no-fix)")
+    # Without a missing directory only the command changes: the unit keeps its PATH.
+    unit.write_text(agents_cmd.unit_content(holder, wanted, qa) if missing else modern)
     _run(["systemctl", "--user", "daemon-reload"])
-    return Check("autostart", FIXED, f"{unit}: PATH updated (enabled state unchanged)")
+    done = (["PATH updated"] if missing else []) + (["kankan started without -m kankan"] if legacy else [])
+    return Check("autostart", FIXED, f"{unit}: {', '.join(done)} (enabled state unchanged)")
 
 
 def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
@@ -340,23 +349,23 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
     rest = ("registry", "lists", "qa-list", "labels", "reconcile")
     try:
         project = Project.open(cwd)
-        project.trello.me()
+        project.board.me(LIVE)
     except KankanError as err:
         return [Check("credentials", MANUAL, err.message, "kankan init --reauth")] + \
             [Check(n, SKIPPED, "needs credentials") for n in rest]
     checks = [Check("credentials", OK, "valid")]
     from kankan.init import account_warnings
-    cfg.kankan_member_id = cfg.kankan_member_id or project.trello.me()["id"]
-    cfg.kankan_username = cfg.kankan_username or project.trello.me()["username"]
+    cfg.kankan_member_id = cfg.kankan_member_id or project.board.me(LIVE)["id"]
+    cfg.kankan_username = cfg.kankan_username or project.board.me(LIVE)["username"]
     problems = account_warnings(project.trello, cfg)
     if problems:
         checks.append(Check("notifications", MANUAL, problems[0],
-                            "give kankan its own Trello account (user manual §3.1), invite it to the board, then "
+                            "give kankan its own Trello account (user manual §1.3), invite it to the board, then "
                             "kankan init --reauth"))
     else:
         checks.append(Check("notifications", OK, f"kankan acts as @{cfg.kankan_username}; it mentions each card's "
                             "creator, or the board's admins"))
-    snap = project.trello.snapshot(cfg.board_id)
+    snap = project.board.snapshot(LIVE)
     block = registry_block(snap.desc) or {}
     if block.get("registry-id") != cfg.registry_id:
         checks.append(Check("registry", MANUAL, f"the board is bound to {block.get('host')}:{block.get('path')}",
@@ -383,7 +392,7 @@ def _online_checks(cwd: Path, paths, cfg, fix: bool) -> List[Check]:
         checks.append(Check("labels", FIXED, f"recreated {', '.join(missing)}"))
         checks.append(Check("labels-restart", WARN, "running launchers read label IDs at startup; a recreated HOLD "
                             "does not restore which cards were held",
-                            "restart the agents (kankan stop <seat>, then kankan up …)"))
+                            "restart the agents (kankan seat stop <seat>, then kankan seat start <seat>)"))
     checks += settings_checks(project, fix=fix, online=True)
     issues = diag.reconcile(project, record=fix)
     stranded = [i for i in issues if i.kind in ("card_without_ref", "blocked_without_ref")]
@@ -462,7 +471,7 @@ def settings_checks(project, *, fix: bool, online: bool) -> List[Check]:
                 report = settings_setup.ensure_instructions_card(project, adapter_types(project.paths), write=False)
                 if report:  # card instructions T§6
                     checks.append(Check("instructions-card", WARN, report, "kankan doctor (without --no-fix)"))
-            read = boardsettings.from_snapshot(project, project.trello.snapshot(project.cfg.board_id))
+            read = boardsettings.from_snapshot(project, project.board.snapshot(LIVE))
             result = boardsettings.apply_read(project, read, adapters, write=fix)
             if fix:
                 boardsettings.drain_actions(project)

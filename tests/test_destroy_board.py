@@ -237,7 +237,7 @@ def test_full_page_of_archived_cards_refuses(kproject, fake_trello, monkeypatch)
     for i in range(3):
         fake_trello.add_card(lst["id"], f"a{i}")["closed"] = True
     original = TrelloClient.closed_cards
-    monkeypatch.setattr(TrelloClient, "closed_cards", lambda self, board_id: original(self, board_id, limit=3))
+    monkeypatch.setattr(TrelloClient, "closed_cards", lambda self, board_id, limit=1000: original(self, board_id, limit=3))
     with pytest.raises(KankanError) as err:
         plan_of(kproject)
     assert err.value.status == Status.NEEDS_ACTION

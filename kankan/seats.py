@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from kankan.boardreader import LIVE
 from kankan import clock, faults, gitutil, procutil
 from kankan.config import SeatConfig, atomic_write_json, project_lock, read_json, save_config
 from kankan.errors import KankanError, Status
@@ -38,7 +39,8 @@ def seat_type(seat: str) -> str:
 
 
 def is_qa(seat: str) -> bool:
-    return validate_seat(seat).endswith("-qa")
+    """The Q&A pool's router ``<type>-qa`` or one of its members ``<type>-qaN`` (qapool T§2)."""
+    return validate_seat(seat).rsplit("-", 1)[1].startswith("qa")
 
 
 def qa_seat_name(agent_type: str) -> str:
@@ -117,24 +119,51 @@ def owned_cards(project, seat: str, phases=("impl", "review")) -> List[RefValue]
     return [value for value in refs.values() if value.meta.get("owner") == seat and value.meta.get("phase") in phases]
 
 
+# Set on an agent's tmux session by `kankan seat start` and by restarts of seats being removed: the launcher then
+# occupies only a registered seat and never re-creates one removed meanwhile (seat T§5).
+EXISTING_ONLY_ENV = "KANKAN_SEAT_EXISTING_ONLY"
+
+
+def existing_only() -> bool:
+    return os.environ.get(EXISTING_ONLY_ENV) == "1"
+
+
+def _refuse_unregistered(project, seat: str) -> None:
+    if seat not in project.cfg.seats:
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_NOT_REGISTERED.format(seat=seat))
+
+
+def _refuse_completing(project, seat: str) -> None:
+    """seat T§5: a seat whose removal is completing (``immediate``) is never occupied again."""
+    seat_cfg = project.cfg.seats.get(seat)
+    if seat_cfg is not None and seat_cfg.removing == "immediate":
+        raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
+
+
 def _candidates(project, agent_type: str) -> List[str]:
-    seats = sorted((name for name, sc in project.cfg.work_seats().items() if sc.type == agent_type),
+    seats = sorted((name for name, sc in project.cfg.work_seats().items()
+                    if sc.type == agent_type and not sc.removing),
                    key=lambda n: int(n.rsplit("-", 1)[1]))
     holding = {v.meta.get("owner") for v in project.refs.list(CARD_PREFIX).values()
                if v.meta.get("phase") in ("impl", "review")}
     return [s for s in seats if s in holding] + [s for s in seats if s not in holding]
 
 
-def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional[dict] = None) -> Lease:
-    """Occupy a seat (§7.1–7.3) under the project lock and return its lease."""
+def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional[dict] = None,
+            create: bool = True) -> Lease:
+    """Occupy a seat (§7.1–7.3) under the project lock and return its lease. A seat being removed is occupied
+    only when named; with ``create`` false only a registered seat is (seat T§5)."""
     validate_type(agent_type)
     if seat is not None and seat_type(seat) != agent_type:
         raise KankanError(Status.USAGE_ERROR, f"seat {seat} is not of type {agent_type}")
     if seat is not None and is_qa(seat):
-        return acquire_qa(project, agent_type, pids)
+        return acquire_qa(project, agent_type, pids, create=create, seat=seat)
     with project_lock(project.paths):
         project.reload_config()
+        if seat is not None and not create:
+            _refuse_unregistered(project, seat)
         if seat is not None:
+            _refuse_completing(project, seat)
             lease = _occupy(project, seat, agent_type, pids)
             if lease is None:
                 raise KankanError(Status.CONFIG_ERROR, f"seat {seat} is in use or unavailable")
@@ -156,24 +185,49 @@ def acquire(project, agent_type: str, seat: Optional[str] = None, pids: Optional
         return lease
 
 
-def acquire_qa(project, agent_type: str, pids: Optional[dict] = None) -> Lease:
-    """Occupy the Q&A seat ``<type>-qa``, registering it when no Q&A seat exists (spec questions T§2).
+# A refusal the pool expects (stopping, a closed member): the launcher exits cleanly, so the supervisor and its tmux
+# session go at once instead of keeping a fatal error on screen (qapool T§2, T§9).
+POOL_REFUSED = {"qa_pool_refused": True}
 
-    Refuses (config_error, which the supervisor treats as fatal) without an open ``Q&A`` list, and when
-    another type's Q&A seat is the registered one: replacing it is a separate, explicit operation
-    (``qa.replace_seat``). The list is read before the project lock and the recovery comment is posted after
-    it, so the lock hold makes no Trello call and one transaction (questions T§3).
+
+def acquire_qa(project, agent_type: str, pids: Optional[dict] = None, create: bool = True,
+               seat: Optional[str] = None) -> Lease:
+    """Occupy the Q&A seat ``seat`` (default the router ``<type>-qa``), the router registering itself when no Q&A
+    seat exists (spec questions T§2, qapool T§2).
+
+    Refuses (config_error, which the supervisor treats as fatal) without an open ``Q&A`` list, while the pool is
+    stopping (qapool T§9), and for the router when another type's Q&A seat is the registered one: replacing it is a
+    separate, explicit operation (the type change, qapool T§9). A member ``<type>-qaN`` is registered by the router only: it
+    is refused when it is not registered or is marked for removal, so the supervisor of a closed member never
+    brings it back. The list is read before the project lock and the recovery comment is posted after it, so the
+    lock hold makes no Trello call and one transaction (questions T§3).
     """
-    name = qa_seat_name(agent_type)
+    from kankan import qapool
+    router = qa_seat_name(agent_type)
+    name = validate_seat(seat) if seat is not None else router
+    if not is_qa(name) or seat_type(name) != agent_type:
+        raise KankanError(Status.USAGE_ERROR, messages.QA_SEAT_NOT_OF_TYPE.format(seat=name, type=agent_type))
+    member = qapool.is_member(name)
+    if qapool.stopping(project.paths):  # checked before the live list read too: a refusal comes at once
+        raise KankanError(Status.CONFIG_ERROR, messages.QA_POOL_STOPPING.format(router=router), POOL_REFUSED)
     cfg = project.reload_config()
-    info = project.trello.list_info(cfg.qa_list) if cfg.qa_list else None
+    info = project.board.list_info(cfg.qa_list, LIVE) if cfg.qa_list else None
     if info is None or info.closed:
         raise KankanError(Status.CONFIG_ERROR, messages.QA_LIST_UNAVAILABLE)
     with project_lock(project.paths):
         cfg = project.reload_config()
-        registered = cfg.qa_seat()
-        if registered is not None and registered != name:
-            raise KankanError(Status.CONFIG_ERROR, messages.QA_SEAT_OTHER.format(seat=name, registered=registered))
+        if qapool.stopping(project.paths):
+            raise KankanError(Status.CONFIG_ERROR, messages.QA_POOL_STOPPING.format(router=router), POOL_REFUSED)
+        if member:
+            _refuse_member(cfg, name, router)
+        else:
+            if not create:
+                _refuse_unregistered(project, name)
+            _refuse_completing(project, name)
+            registered = cfg.qa_seat()
+            if registered is not None and registered != name:
+                raise KankanError(Status.CONFIG_ERROR,
+                                  messages.QA_SEAT_OTHER.format(seat=name, registered=registered))
         recovered = project.refs.read(seat_ref(name)) is not None
         lease = _occupy(project, name, agent_type, pids, comment=False)
         if lease is None:
@@ -181,6 +235,17 @@ def acquire_qa(project, agent_type: str, pids: Optional[dict] = None) -> Lease:
     if recovered:
         _comment_recovery(project, name, lease.seat_oid)
     return lease
+
+
+def _refuse_member(cfg, seat: str, router: str) -> None:
+    """qapool T§2: a member starts only while registered and not marked for removal (any mode)."""
+    seat_cfg = cfg.seats.get(seat)
+    if seat_cfg is None or seat_cfg.role != "qa":
+        raise KankanError(Status.CONFIG_ERROR, messages.QA_MEMBER_NOT_REGISTERED.format(seat=seat, router=router),
+                          POOL_REFUSED)
+    if seat_cfg.removing:
+        raise KankanError(Status.CONFIG_ERROR, messages.QA_MEMBER_REMOVING.format(seat=seat, router=router),
+                          POOL_REFUSED)
 
 
 def _occupy(project, seat: str, agent_type: str, pids: Optional[dict], comment: bool = True) -> Optional[Lease]:
@@ -217,6 +282,31 @@ def _occupy(project, seat: str, agent_type: str, pids: Optional[dict], comment: 
         raise
 
 
+def occupy_admin(project, seat: str) -> Lease:
+    """A temporary lease of a stopped seat for an administrative completion (qapool T§14, seat §6): under the project
+    lock, the seat flock and a fresh seat ref, without ``ensure_created`` or a recovery comment. Its process record
+    holds the boot ID only (no launcher pid, no pane session), so a crash during the completion leaves nothing that
+    a later ``recover_dead`` of the seat would kill outside it. ``NEEDS_ACTION`` while the seat runs or its seat ref
+    exists (``stop_seat`` frees it first). Released with ``release``."""
+    with project_lock(project.paths):
+        fd = _try_flock(project, seat)
+        if fd is None:
+            raise KankanError(Status.NEEDS_ACTION, messages.SEAT_REMOVE_ALIVE.format(seat=seat))
+        try:
+            ref = seat_ref(seat)
+            session = secrets.token_hex(16)
+            oid = project.refs.write_blob({"schema": 1, "kind": "seat", "seat": seat, "type": seat_type(seat),
+                                           "session": session, "created": clock.iso(clock.now()), "admin": True})
+            if project.refs.read(ref) is not None or not project.refs.transaction([Create(ref, oid)]):
+                raise KankanError(Status.NEEDS_ACTION, messages.SEAT_ADMIN_OCCUPIED.format(seat=seat))
+            write_proc(project, seat, reset=True)
+            project.log("seat_acquired_admin", seat=seat, session=session)
+            return Lease(seat=seat, type=seat_type(seat), session=session, seat_oid=oid, fd=fd)
+        except BaseException:
+            _release_fd(fd)
+            raise
+
+
 def _comment_recovery(project, seat: str, seat_oid: str) -> None:
     for value in owned_cards(project, seat, ("impl", "review", "qa")):
         try:
@@ -246,8 +336,11 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
         cfg = project.reload_config()
         existing = cfg.seats.get(seat)
         snap_lists = None
+        if existing is not None and existing.removing and not _lists_open(project, existing):
+            # seat T§5: lists archived by a removal are never re-created, nor its entry rewritten without its flag
+            raise KankanError(Status.USAGE_ERROR, messages.SEAT_START_REMOVING.format(seat=seat))
         if existing is None or not _lists_open(project, existing):
-            snap_lists = project.trello.snapshot(cfg.board_id).lists
+            snap_lists = project.board.snapshot(LIVE).lists
             ids = {}
             for attr, suffix in LIST_SUFFIXES:
                 name = list_name(seat, suffix)
@@ -263,10 +356,15 @@ def ensure_created(project, seat: str, agent_type: str) -> SeatConfig:
 
 
 def _ensure_qa_seat(project, seat: str, agent_type: str) -> SeatConfig:
-    """Register the Q&A seat (no lists) and create its worktree."""
+    """Register the Q&A router (no lists) and create its worktree; a member (registered by the router only,
+    qapool T§2) gets only its worktree."""
+    from kankan import qapool
     with project_lock(project.paths):
         cfg = project.reload_config()
         existing = cfg.seats.get(seat)
+        if existing is None and qapool.is_member(seat):
+            raise KankanError(Status.CONFIG_ERROR, messages.QA_MEMBER_NOT_REGISTERED.format(
+                seat=seat, router=qa_seat_name(agent_type)))
         if existing is None:
             other = cfg.qa_seat()
             if other is not None:
@@ -281,7 +379,7 @@ def _ensure_qa_seat(project, seat: str, agent_type: str) -> SeatConfig:
 
 def _lists_open(project, seat_cfg: SeatConfig) -> bool:
     for list_id in (seat_cfg.in_progress, seat_cfg.implemented, seat_cfg.review):
-        info = project.trello.list_info(list_id)
+        info = project.board.list_info(list_id, LIVE)
         if info is None or info.closed:
             return False
     return True
@@ -369,6 +467,17 @@ def recover_dead(project, seat: str, kill_alive: bool = False) -> List[int]:
         atomic_write_json(_proc_path(project, seat), data)
         project.log("seat_unavailable", seat=seat, pids=survivors)
     return survivors
+
+
+def supervisor_running(project, seat: str) -> bool:
+    """The seat's recorded supervisor runs (qapool T§5 step 2): its pid is alive with the recorded start time, the
+    record is of the current boot, and the supervisor has not given up restarting the launcher (``gave_up``)."""
+    proc = read_proc(project, seat)
+    if not isinstance(proc, dict) or proc.get("boot_id") != procutil.boot_id() or proc.get("gave_up"):
+        return False
+    entry = proc.get("supervisor")
+    return isinstance(entry, dict) and entry.get("start") is not None \
+        and procutil.alive(entry.get("pid"), entry["start"])
 
 
 def liveness(project, seat: str) -> str:
@@ -474,9 +583,9 @@ def write_agent_file(project, seat: str, session: str, worktree) -> None:
     shared daemon): kept in the seat worktree's private git directory, never in the working tree."""
     gitdir = _worktree_gitdir(worktree)
     if gitdir is not None:
-        from kankan.build import code_id
+        from kankan.build import identity
         atomic_write_json(gitdir / AGENT_FILE, {"seat": seat, "session": session, "project": project.paths.project,
-                                                "code": code_id()})
+                                                **identity()})
 
 
 def read_agent_file(cwd) -> Optional[dict]:

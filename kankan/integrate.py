@@ -12,7 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from kankan import clock, faults, gitutil, labels, messages, worktrees
+from kankan.boardreader import LIVE
+from kankan import clock, faults, gitutil, labels, messages, qapool, worktrees
 from kankan.cards import CardMeta, Phase, delete_integrated_ref
 from kankan.config import project_lock
 from kankan.errors import KankanError, Status
@@ -178,8 +179,8 @@ def card_merged(repo, main: str, short: str) -> Optional[str]:
     return None
 
 
-def _merge_message(card, short: str, tested: str) -> str:
-    title = (card.name if card else "") or short
+def _merge_message(paths, card, short: str, tested: str) -> str:
+    title = (qapool.plain_title(paths, card) if card else "") or short
     url = (card.url if card else "") or ""
     return f"{title}\n\n{url}\n\nKankan-Card: {short}\nKankan-Tested: {tested}\n"
 
@@ -214,7 +215,7 @@ def integrate(ctx, tested: str) -> dict:
             raise KankanError(Status.INELIGIBLE, "the card is not under review by this seat")
         meta = value.meta
         short = meta["short"]
-        card = project.trello.card(ctx.task["card"])
+        card = project.board.card(ctx.task["card"], LIVE)
         from kankan.cards import _where_expected
         if not _where_expected(card, meta):
             raise KankanError(Status.INELIGIBLE, "the card was moved, archived or deleted by the user: commit WIP "
@@ -244,7 +245,7 @@ def integrate(ctx, tested: str) -> dict:
             _main_moved(ctx, card)
         tree = gitutil.out(repo, ["rev-parse", f"{tested}^{{tree}}"])
         merge = gitutil.out(repo, ["commit-tree", tree, "-p", main_oid, "-p", tested, "-F", "-"],
-                            input=_merge_message(card, short, tested))
+                            input=_merge_message(project.paths, card, short, tested))
         new = CardMeta.from_dict(meta).evolve(phase=Phase.INTEGRATED.value, owner=None, session=None,
                                               merge=merge, tested=tested, target_list=cfg.done,
                                               from_list=card.list_id if card else None)
@@ -293,7 +294,7 @@ def _main_moved(ctx, card) -> None:
 def _record_integrated(ctx, value, merge: str, tested: str, repaired: bool) -> dict:
     """Repair a half-applied commit: main already has the merge, the card ref is still ``review``."""
     project = ctx.project
-    card = project.trello.card(value.meta["card"])
+    card = project.board.card(value.meta["card"], LIVE)
     new = CardMeta.from_dict(value.meta).evolve(phase=Phase.INTEGRATED.value, owner=None, session=None,
                                                 merge=merge, tested=tested, target_list=project.cfg.done,
                                                 from_list=card.list_id if card else None)
@@ -327,7 +328,7 @@ def done_review(ctx) -> dict:
     with project_lock(project.paths):
         _check_task_owner(ctx)
         value = project.refs.read(ref)
-        card = project.trello.card(ctx.task["card"])
+        card = project.board.card(ctx.task["card"], LIVE)
         if value is None:
             if card is not None and card.list_id == cfg.done and card_merged(project.paths.repo, cfg.integration_branch,
                                                                               ctx.task.get("short", "")):
@@ -349,10 +350,10 @@ def done_review(ctx) -> dict:
                 # moved by the user after the integration: leave it where it is (reconcile reports it)
                 project.log("human_moved", card=card.id, phase="integrated")
         if moved:
-            _hold_after_integration(project, project.trello.card(card.id) or card, value.meta)
+            _hold_after_integration(project, project.board.card(card.id, LIVE) or card, value.meta)
             if delete_integrated_ref(project, ref, value):
                 project.log("ref_closed", card=ctx.task["card"])
-            labels.clear_kankan_labels(project, project.trello.card(card.id) or card, None, ctx.seat)
+            labels.clear_kankan_labels(project, project.board.card(card.id, LIVE) or card, None, ctx.seat)
     _leave_worktree(ctx, branch)
     send_signal(ctx, "done")
     return {"card": ctx.task["card"], "phase": "done" if moved else "integrated", "merge": value.meta.get("merge")}
@@ -578,7 +579,7 @@ def _block_transition(project, lease, journal) -> None:
         return
     if value is None or value.meta.get("owner") != lease.seat:
         raise KankanError(Status.INELIGIBLE, "the card is no longer held by this seat")
-    card = project.trello.card(journal["card"])
+    card = project.board.card(journal["card"], LIVE)
     if card is None:
         raise KankanError(Status.INELIGIBLE, "the card was deleted")
     new = CardMeta.from_dict(value.meta).evolve(phase=Phase.PARKED.value, owner=None, session=None, cause="block",
@@ -607,7 +608,7 @@ def resolve_help(project, short: str, blocked: Path, remaining: List[str]) -> st
 
 
 def resolve(project, short: str, done: bool, tmux=None) -> dict:
-    from kankan.cards import AdminActor, target_list_for, transition
+    from kankan.cards import AdminActor, implemented_destination, transition
     value = find_card_ref(project, short)
     if value is None or value.meta.get("phase") != Phase.PARKED.value:
         raise KankanError(Status.INELIGIBLE, f"card {short} is not blocked")
@@ -637,17 +638,20 @@ def resolve(project, short: str, done: bool, tmux=None) -> dict:
             raise KankanError(Status.NEEDS_ACTION, "; ".join(problems) + "\n" + resolve_help(
                 project, short, blocked, conflicts(blocked)), {"problems": problems})
         gitutil.run(project.paths.repo, ["worktree", "remove", str(blocked)])
-    card = project.trello.card(value.meta["card"])
+    card = project.board.card(value.meta["card"], LIVE)
     if card is None:
         raise KankanError(Status.INELIGIBLE, f"card {short} no longer exists")
     implementer = value.meta.get("implementer")
-    if implementer not in project.cfg.seats:
-        raise KankanError(Status.NEEDS_RECONCILIATION, f"the implementer seat {implementer} is not configured")
-    new = CardMeta.from_dict(value.meta).evolve(phase=Phase.IMPLEMENTED.value, owner=None, session=None, cause=None,
-                                                target_list=target_list_for(project.cfg, Phase.IMPLEMENTED.value, None,
-                                                                            implementer))
-    transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
-    return {"short": short, "phase": "implemented"}, f"card {short} is back in {implementer}'s Implemented list"
+    with project_lock(project.paths):  # seat T§3: an existing seat's Implemented when the implementer's seat is gone
+        cfg = project.reload_config()
+        phase, target, cause = implemented_destination(cfg, implementer)
+        new = CardMeta.from_dict(value.meta).evolve(phase=phase, owner=None, session=None, cause=cause,
+                                                    target_list=target)
+        transition(project, AdminActor("resolve"), card, value, new, messages.RESOLVED.format(short=short))
+    if phase != Phase.IMPLEMENTED.value:
+        return {"short": short, "phase": phase}, f"card {short} is back in Backlog: no work seat is left to review it"
+    owner = next((name for name, sc in cfg.seats.items() if sc.implemented == target), implementer)
+    return {"short": short, "phase": phase}, f"card {short} is back in {owner}'s Implemented list"
 
 
 def merge_request(project, branch: Optional[str] = None, remote: bool = False, top: bool = True,
