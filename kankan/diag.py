@@ -325,6 +325,29 @@ def _fix_stranded(project) -> List[Issue]:
     return fixed
 
 
+def _fix_parked(project) -> List[Issue]:
+    """Under the project lock: accept where the user put the ``parked`` cards whose move is done (§10.4), from
+    fresh refs and a live snapshot."""
+    fixed: List[Issue] = []
+    snap = project.board.snapshot(LIVE)
+    for ref, value in cards.parse_refs(project).items():
+        if isinstance(value, KankanError):
+            continue
+        card_id = ref[len(CARD_PREFIX):]
+        card = snap.cards.get(card_id)
+        target = value.meta.get("target_list")
+        if cards.settle_parked(project, ref, value, card):
+            fixed.append(Issue("parked_target_cleared", card_id,
+                               f"{card.short} stays in {_list_name(snap, card.list_id)} (expected {_list_name(snap, target)})",
+                               True))
+    return fixed
+
+
+def _list_name(snap, list_id: Optional[str]) -> str:
+    lst = snap.lists.get(list_id) if list_id else None
+    return lst.name if lst is not None else str(list_id)
+
+
 def _mismatch_memory(project) -> dict:
     return read_json(project.paths.kankan_dir / "reconcile.json", {}) or {}
 
@@ -514,6 +537,7 @@ def _fix(project, snap, refs, liveness, qa_ended=frozenset(), answer_gone: Optio
             if meta.get("phase") == "integrated" and card is not None and card.list_id == cfg.done:
                 if cards.delete_integrated_ref(project, f"{CARD_PREFIX}{card_id}", value):
                     fixed.append(Issue("integrated_ref_deleted", card_id, "card already in Done", True))
+        fixed += _fix_parked(project)
         fixed += _fix_stranded(project)
         fixed += _fix_attachment_dirs(project)
         fixed += _fix_qa_record(project, gone)

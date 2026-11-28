@@ -333,6 +333,8 @@ kankan adapter check saved-screen.txt --type codex
 
 `kankan reconcile` does not report a Q&A card in `Done` as missing a merge, unless it was handed over for implementation afterwards.
 
+When you move a card that an agent gave back (to `Backlog`, or `Blocked` for a conflict) to another list, for example `Ideas`, kankan accepts it: the running agents stop expecting the card in its old list within a cycle, and `kankan reconcile --fix` does the same while none runs. A card you move this way into an agent's list, `Blocked` or `Done` stays reported, because it is not where kankan's workflow puts a card that nobody holds.
+
 Every agent command answers with `--json` an envelope `{"ok", "status", "message", "data"}` and an exit code (0 success, 10 no_work, 11 already_claimed, 12 ineligible, 13 main_moved, 14 needs_action, 15 on_hold, 20 network_error, 21 trello_error, 30 needs_reconciliation, 31 not_owner, 40 config_error, 41 usage_error, 50 internal_error). The audit log is `<git dir>/kankan/log.jsonl`.
 
 ### 7.1 Troubleshooting

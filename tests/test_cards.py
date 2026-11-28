@@ -115,6 +115,20 @@ def test_converge_never_reverts_human_move(setup):
     fake.user_move(card.id, project.cfg.backlog)
     assert converge(project, lease) == [f"human_moved:{card.id}"]
     assert fake.card_list(card.id) == project.cfg.backlog
+    meta = project.refs.read(card_ref(card.id)).meta  # the user's move is accepted: no longer lagging (§10.4)
+    assert "target_list" not in meta and meta["phase"] == "parked" and meta["cause"] == "block"
+    assert converge(project, lease) == []
+
+
+def test_converge_keeps_parked_card_moved_into_done(setup):
+    project, fake, lease, card = setup
+    res = transition(project, lease, card, None, claim_meta(project, lease, card), None)
+    parked = CardMeta.from_dict(res.ref.meta).evolve(phase="parked", owner=None, cause="yield",
+                                                      target_list=project.cfg.backlog)
+    value = transition(project, lease, card, res.ref, parked, None).ref
+    fake.user_move(card.id, project.cfg.done)
+    assert converge(project, lease) == [f"human_moved:{card.id}"]
+    assert project.refs.read(card_ref(card.id)).oid == value.oid
 
 
 def test_converge_completes_lagging_claim_not_human(setup, monkeypatch):

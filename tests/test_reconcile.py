@@ -431,3 +431,52 @@ def test_reconcile_fix_prunes_answer_record(board):
     assert {i.subject for i in fixed} == {archived, deleted} and all(i.fixed for i in fixed)
     assert set(qapool.load_record(project.paths)) == {live, moved}
     assert not find(diag.reconcile(project), "qa_answer_record_stale")
+
+
+def _parked_elsewhere(project, fake, list_id, **extra):
+    """A card given back to Backlog (``parked``, move done) that the user then moved to ``list_id``."""
+    card = fake.add_card(project.cfg.backlog, "given back")
+    put_card_ref(project, card["id"], card["shortLink"], phase="parked", cause="yield", branch="b",
+                 target_list=project.cfg.backlog, **extra)
+    fake.user_move(card["id"], list_id)
+    return card
+
+
+def test_fix_accepts_user_move_of_parked_card(board):
+    project, fake, lease = board
+    ideas = fake.add_list(project.cfg.board_id, "Ideas")["id"]
+    card = _parked_elsewhere(project, fake, ideas)
+    diag.reconcile(project)
+    assert find(diag.reconcile(project), "phase_list_mismatch")[0].subject == card["id"]
+    issue = find(diag.reconcile(project, fix=True), "parked_target_cleared")[0]
+    assert issue.fixed and issue.subject == card["id"] and "Ideas" in issue.detail and "Backlog" in issue.detail
+    meta = project.refs.read(card_ref(card["id"])).meta
+    assert "target_list" not in meta and meta["phase"] == "parked" and meta["branch"] == "b"
+    assert fake.card_list(card["id"]) == ideas
+    for _ in range(2):
+        assert not find(diag.reconcile(project), "phase_list_mismatch")
+    fake.user_move(card["id"], project.cfg.backlog)  # moving it back is accepted too
+    for _ in range(2):
+        assert not find(diag.reconcile(project), "phase_list_mismatch")
+
+
+@pytest.mark.parametrize("where", ["done", "seat", "blocked"])
+def test_fix_keeps_parked_card_moved_into_workflow_lists(board, where):
+    project, fake, lease = board
+    list_id = {"done": project.cfg.done, "blocked": project.cfg.blocked,
+               "seat": project.cfg.seats["claude-1"].in_progress}[where]
+    card = _parked_elsewhere(project, fake, list_id)
+    value = project.refs.read(card_ref(card["id"]))
+    diag.reconcile(project)
+    assert not find(diag.reconcile(project, fix=True), "parked_target_cleared")
+    assert project.refs.read(card_ref(card["id"])).oid == value.oid
+    assert find(diag.reconcile(project), "phase_list_mismatch")
+
+
+def test_fix_leaves_parked_ref_with_pending_move(board):
+    project, fake, lease = board
+    ideas = fake.add_list(project.cfg.board_id, "Ideas")["id"]
+    card = _parked_elsewhere(project, fake, ideas, from_list=project.cfg.seats["claude-1"].in_progress)
+    value = project.refs.read(card_ref(card["id"]))
+    assert not find(diag.reconcile(project, fix=True), "parked_target_cleared")
+    assert project.refs.read(card_ref(card["id"])).oid == value.oid

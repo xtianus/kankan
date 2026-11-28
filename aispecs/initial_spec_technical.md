@@ -229,6 +229,7 @@ On every cycle, under the project lock, the launcher compares the phase of each 
 - for phases without a holder (`implemented`, `integrated`, `parked`) any launcher;
 - a card already in the right list counts as moved;
 - in phase `integrated` with the card verified in `Done`, it deletes the ref.
+- in phase `parked` with its move done (no `from_list`) and the card moved by the user to another open list, it removes `target_list` from the blob (conditional on the ref's value, no move), as `release --force` leaves it: the user's move is accepted and the ref no longer counts as lagging. Not when the new list is a seat list, `Blocked` or `Done`, where a parked card is not where kankan's workflow puts it: there the mismatch stays for `reconcile` to report. `reconcile --fix` applies the same rule ([15.3](initial_spec_functional.md#153-kankan-reconcile---fix)).
 
 This way crashes between the Git transition and the Trello move (claim, `done`, `yield`, `block`, `integrate`) resolve themselves. Intermediate states are never eligible for other agents, because eligibility requires agreement between phase and list.
 

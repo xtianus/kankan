@@ -218,6 +218,28 @@ def confirm_move(project, ref: str, value: RefValue) -> RefValue:
     return value
 
 
+def settle_parked(project, ref: str, value: RefValue, card: Optional[Card]) -> bool:
+    """Accept where the user put a ``parked`` card whose move is done (§10.4): remove ``target_list`` from the blob,
+    as ``release --force`` leaves it, without a move. Not for a card moved into a seat list, ``Blocked`` or ``Done``,
+    which stays reported by ``reconcile``. The caller holds the project lock; conditional on ``value.oid``."""
+    meta = value.meta
+    target = meta.get("target_list")
+    if meta.get("phase") != Phase.PARKED.value or meta.get("owner") or meta.get("from_list") or not target:
+        return False
+    cfg = project.cfg
+    if card is None or card.closed or card.list_id == target \
+            or card.list_id in set(cfg.seat_lists()) | {cfg.blocked, cfg.done}:
+        return False
+    new = dict(meta)
+    for key in ("target_list", "pos", "nonce"):
+        new.pop(key, None)
+    oid = project.refs.write_blob(new)
+    if not project.refs.update(ref, oid, value.oid):
+        return False
+    project.log("parked_settled", card=card.id, old_target=target, list=card.list_id, old=value.oid, new=oid)
+    return True
+
+
 def parse_refs(project) -> Dict[str, Union[RefValue, KankanError]]:
     result = {}
     for ref, (oid, kind, body) in project.refs.list_raw(CARD_PREFIX).items():
@@ -317,6 +339,7 @@ def _converge_ref(project, lease: Lease, ref: str, value: RefValue, card: Option
             confirm_move(project, ref, value)
         return events
     if card.list_id != meta.get("from_list"):
+        settle_parked(project, ref, value, card)  # a given-back card the user moved: no longer lagging
         events.append(f"human_moved:{card_id}")
         return events
     if phase == Phase.PARKED.value and meta.get("cause") == "handoff" and cfg.qa_list \

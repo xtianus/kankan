@@ -28,6 +28,7 @@
 ## Cards
 
 - Card refs carry `from_list` only while a Trello move is unconfirmed: after a verified move `cards.confirm_move` rewrites the ref without it, so convergence moves a card only from its recorded source and never replays a move over a later human move.
+- A `parked` ref whose move is done (no `from_list`) and whose card the user moved to another open list loses `target_list` (`cards.settle_parked`, from convergence and `reconcile --fix`), as `release --force` and seat removal leave it; otherwise `reconcile` would report `phase_list_mismatch` forever and every cycle would emit `human_moved`, which makes `workflow.tick` take a second snapshot. Seat lists, `Blocked` and `Done` are excluded: there the mismatch stays reported.
 - Transitions of held cards (`impl`/`review`) by a seat require the card to be open and in its expected list; only the user-move parking (`cause` `user_*`) is exempt. `integrate` and review `done` apply the same rule and re-check seat ownership and task identity under the project lock.
 
 ## Attachments

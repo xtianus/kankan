@@ -358,7 +358,7 @@ By default report only:
 - the integration branch checked out in a worktree; invalid board↔registry binding;
 - attachment directories ([13.3](#133-card-attachments)) of cards without a ref.
 
-With `--fix`, under the project lock and skipping cards whose holder is alive, it repairs only the certain cases: deletes `integrated` refs of cards already in `Done`, deletes unused or expired `Resume` labels, removes kankan labels from cards in `Done`, deletes attachment directories of cards without a ref.
+With `--fix`, under the project lock and skipping cards whose holder is alive, it repairs only the certain cases: deletes `integrated` refs of cards already in `Done`, deletes unused or expired `Resume` labels, removes kankan labels from cards in `Done`, deletes attachment directories of cards without a ref, and accepts where the user put a `parked` card: a card nobody holds whose move is done, whatever the cause it was given back with, and that the user then moved elsewhere keeps its ref without an expected list, so the mismatch is no longer reported (a card moved into a seat list, `Blocked` or `Done` stays reported). Convergence ([10.4](initial_spec_technical.md#104-convergence)) does the same on every cycle.
 
 ### 15.4 Administration commands
 
