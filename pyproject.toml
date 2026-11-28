@@ -7,7 +7,7 @@ name = "kankan"
 dynamic = ["version"]
 description = "Coordinates Claude Code and Codex agents working in parallel on one Git repository through a Trello board"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = []
 

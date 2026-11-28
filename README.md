@@ -51,4 +51,4 @@ Not every card has to be a change. A card in the `Q&A` list is a question: a ded
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
